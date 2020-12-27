@@ -23,12 +23,18 @@ To display help information, use
 HippsDimes --help
 ```
 
+### Output files
+
 This script will generate several files:
 
 - A text file for the final simulated mean distance map
 - A text file for the connectivity matrix
 - A `.xyz` formatted file for the ensemble of genome structures generated (can be turned off)
 - A csv formatted file for cost versus iteration data (can be turned off)
+
+### Examples
+
+
 
 ### Explanantion of the arguments and options
 

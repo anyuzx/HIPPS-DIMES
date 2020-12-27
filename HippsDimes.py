@@ -236,8 +236,10 @@ class optimize:
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='turn off writing conformations to .xyz file')
 def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs):
     """
-    Specify the path to the input file.
-    Specify the prefix you want to use for output files
+    Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
+    INPUT: Specify the path to the input file\n
+    OUTPUT_PREFIX: Specify the prefix for output files\n\n
+    Reference: https://www.biorxiv.org/content/10.1101/2020.05.21.109421v1\n
     """
     if input_type == 'dmap':
         if input_format == 'text':

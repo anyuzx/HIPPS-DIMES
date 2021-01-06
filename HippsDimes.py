@@ -18,6 +18,7 @@ import scipy
 import scipy.linalg
 import pandas as pd
 import click
+import cooler
 from tqdm import tqdm
 
 #------------------------------------------------------------------#

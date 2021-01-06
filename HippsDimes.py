@@ -121,7 +121,7 @@ def write2xyz(fout, xyzs):
             xyz = optimal_rotate(snapshot, xyz0, allow_reflection=True)
             f.write('{}\n\n'.format(natoms))
             for idx, item in enumerate(xyz):
-                f.write('{} {} {} {}\n'.format(int(idx+1), item[0], item[1], item[2]))
+                f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
 
 def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """

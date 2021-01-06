@@ -6,6 +6,8 @@ Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Method
 
 This python script can be used to generate ensemble of genome structures from Hi-C contact map or mean spatial distance map. The method is based on Maximum Entropy principle and the relation between the contact probability and the mean spatial distance from polymer theory. The application of the method can be found in this work https://www.biorxiv.org/content/10.1101/2020.05.21.109421v1.
 
+In general, this script accepts the input file of a Hi-C contact or a mean spatial distance map (can be measured in Multiplex FISH experiment), and generate an ensemble of individual conformations consistent with the inputted contact map or distance map. The output conformations are in `.xyz` format, which users can use to calculate quantities of interest and can be viewed using `VMD` or other compatible softwares.
+
 # Documentation
 
 ## Install

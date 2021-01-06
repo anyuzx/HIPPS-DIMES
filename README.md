@@ -57,13 +57,15 @@ This script will generate several files:
 
 ### Examples
 
-First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740)
+First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740). Rename it to `hic_example.cool`. Then execute the following command,
 
 ```bash
-HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7:10M-15M -i 10
+HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7:10M-15M -i 10 -e 10
 ```
 
 This command tells the script to load the Hi-C contact map `hic_example.cool` and perform the iterative scaling algorithm. The argument `test` instructs the files names of output files start with `test_`. Option `--input-type cmap` specifies that the input file is a contact map. Option `--input-format cooler` specifies that the input file is a `cooler` file. Option `-s chr7:10M-15M` specifies that the algorithm is performed on the region 10 Mbps - 15 Mbps on Chromosome 7.
+
+When the program finishes, the script will generate several output files: `test.xyz`, `test_connectivity_matrix.txt`, and `test_dmap_final.txt`. `test.xyz` contains 10 sets of individual conformations of x, y, z coordinates and can be viewed using `VMD` or other compatible visualization softwares.
 
 ### Explanantion of the arguments and options
 

@@ -1,3 +1,4 @@
+
 # HIPPS-DIMES
 Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Method
 
@@ -9,6 +10,14 @@ This python script can be used to generate ensemble of genome structures from Hi
 
 ## Install
 
+First, download this repository using,
+
+```bash
+git clone https://github.com/anyuzx/HIPPS-DIMES
+```
+
+Next, install required packages using the command below,
+
 ```bash
 pip install --editable .
 ```
@@ -17,10 +26,28 @@ This command will install the required packages, and install the script as a pyt
 
 ## How to use
 
+### To get started
+
+To get started, please view the help information for each arguments and options. To display help information, use
+
+```bash
+HippsDimes --help
+```
+
 To display help information, use
 
 ```bash
 HippsDimes --help
+```
+
+### Input files
+
+This script accept input files in two formats. If the input file is a Hi-C contact map, it can be in `cooler` format or pure text format. If the input file is a mean spatial distance map, the script only accepts a pure text formatted file. The text format for a matrix is the following: each row of the file corresponds to the row of the matrix. Each value is separated by commas. An example of such file is,
+
+``` text
+1, 2, 3
+2, 1, 2
+3, 2, 1
 ```
 
 ### Output files
@@ -34,7 +61,11 @@ This script will generate several files:
 
 ### Examples
 
+```bash
+HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7:10M-15M -i 10
+```
 
+This command tells the script to load the Hi-C contact map `hic_example.cool` and perform the iterative scaling algorithm. The argument `test` instructs the files names of output files start with `test_`. Option `--input-type cmap` specifies that the input file is a contact map. Option `--input-format cooler` specifies that the input file is a `cooler` file. Option `-s chr7:10M-15M` specifies that the algorithm is performed on the region 10 Mbps - 15 Mbps on Chromosome 7.
 
 ### Explanantion of the arguments and options
 

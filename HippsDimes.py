@@ -16,6 +16,7 @@ if not sys.warnoptions:
 import numpy as np
 import scipy
 import scipy.linalg
+import scipy.interpolate
 import pandas as pd
 import click
 import cooler
@@ -148,7 +149,7 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
 
     return np.array(positions)
 
-def interpolate_miss(matrix):
+def interpolate_missing(matrix):
     matrix_copy = np.copy(matrix)
     x = np.arange(0, matrix_copy.shape[1])
     y = np.arange(0, matrix_copy.shape[0])

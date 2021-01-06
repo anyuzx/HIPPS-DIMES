@@ -57,6 +57,8 @@ This script will generate several files:
 
 ### Examples
 
+First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740)
+
 ```bash
 HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7:10M-15M -i 10
 ```

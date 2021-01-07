@@ -10,6 +10,7 @@ setup(
             'Scipy',
             'Pandas',
             'Tqdm',
+            'Cooler',
             ],
         entry_points='''
             [console_scripts]

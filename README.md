@@ -33,7 +33,7 @@ This command will install the required packages, and install the script as a pyt
 * `Tqdm`
 * `Cooler`
 
-We recommend run this script using Python 3.8+
+We recommend running this program using Python 3.8+
 
 ## How to use
 
@@ -60,6 +60,7 @@ This script accept input files in two formats. If the input file is a Hi-C conta
 This script will generate several files:
 
 - A text file for the final simulated mean distance map
+- A text file for the final simulated contact map
 - A text file for the connectivity matrix
 - A `.xyz` formatted file for the ensemble of genome structures generated (can be turned off)
 - A csv formatted file for cost versus iteration data (can be turned off)

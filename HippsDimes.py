@@ -17,6 +17,7 @@ import numpy as np
 import scipy
 import scipy.linalg
 import scipy.interpolate
+import scipy.optimize
 import pandas as pd
 import click
 import cooler
@@ -60,6 +61,25 @@ def a2dmap_theory(A, force_positive_definite = False):
 
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma
     return dmap
+
+def dmap2cmap(dmap, rc):
+    """
+    Return contact map given the mean distance map and the contact threshold
+    """
+    sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
+    cmap = scipy.special.erf(rc/(np.sqrt(2) * sigma_mtx)) - \
+            np.sqrt(2.0/np.pi) * np.exp(-0.5 * rc**2.0/np.power(sigma_mtx, 2.0)) * rc / sigma_mtx
+    np.fill_diagonal(cmap, 1.0)
+    return cmap
+
+def a2cmap_theory(A, rc):
+    """
+    Return contact map given the connectivity matrix and contact threshold, theoretically
+    """
+    dmap = a2dmap_theory(A)
+    cmap = dmap2cmap(dmap, rc)
+    return cmap
+
 
 def a2a(a, fill_negative=False):
     """
@@ -164,6 +184,13 @@ def interpolate_missing(matrix):
     GD1 = scipy.interpolate.griddata((x1, y1), newarr.ravel(),(xx, yy), method='nearest')
     return GD1
 
+def objective_func(rc, A_mtx, cmap_exp):
+    x = a2cmap_theory(A_mtx, rc)
+    y = cmap_exp / cmap_exp.max()
+    logx = interpolate_missing(np.log(x))
+    logy = interpolate_missing(np.log(y))
+    res = np.power(logx[np.triu_indices_from(logx, k=1)] - logy[np.triu_indices_from(logy, k=1)], 2.).mean()**0.5
+    return res
 
 # FUNCTION TO CONVERT CMAP TO DMAP
 def cmap2dmap_core(cmap_exp, rc, alpha, norm_max=1.0, mode='log'):
@@ -264,11 +291,15 @@ def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_r
     cost, dmap_maxent, connectivity_matrix = model.run(iteration, learning_rate)
     cost = pd.DataFrame(np.dstack((np.arange(1, iteration+1), cost))[0], columns=['iteration', 'cost'])
 
+    cmap_rc_minimize_res = scipy.optimize.minimize_scalar(objective_func, args=(connectivity_matrix, cmap))
+    cmap_maxent = a2cmap_theory(connectivity_matrix, cmap_rc_minimize_res.x)
+
     if log:
         cost.to_csv('cost_function_iteration.csv')
     pass
     
     np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
+    np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
     np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), connectivity_matrix)
 
     if not no_xyzs:

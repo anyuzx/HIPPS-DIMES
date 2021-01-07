@@ -39,7 +39,9 @@ We recommend run this script using Python 3.8+
 
 ### To get started
 
-To get started, please view the help information for each arguments and options. To display help information, use
+To get started, please go through the jupyter notebook `walkthrough.ipynb`.
+
+In addition, it is helpful to view the help information for each arguments and options. To display help information, use
 
 ```bash
 HippsDimes --help

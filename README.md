@@ -24,7 +24,16 @@ Next, install required packages using the command below,
 pip install --editable .
 ```
 
-This command will install the required packages, and install the script as a python module. Once installed, you can call `HippsDimes` directly in the terminal to run the script
+This command will install the required packages, and install the script as a python module. Once installed, you can call `HippsDimes` directly in the terminal to run the script. The packages installed are:
+
+* `Click`
+* `Numpy`
+* `Scipy`
+* `Pandas`
+* `Tqdm`
+* `Cooler`
+
+We recommend run this script using Python 3.8+
 
 ## How to use
 

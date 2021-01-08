@@ -10,9 +10,15 @@ In general, this script accepts the input file of a Hi-C contact or a mean spati
 
 # Documentation
 
+## Requirements
+
+- Basic understanding of `bash`, `Python` and how to use terminal
+- Python 3.8+
+- Python Package Installer [`pip`](https://pip.pypa.io/en/stable/). Follow the instruction https://pip.pypa.io/en/stable/installing/ if it is not installed already.
+
 ## Install
 
-First, download this repository using,
+First, open a terminal window and download this repository by put the following command in the terminal and hit Enter,
 
 ```bash
 git clone https://github.com/anyuzx/HIPPS-DIMES
@@ -21,10 +27,11 @@ git clone https://github.com/anyuzx/HIPPS-DIMES
 Next, install required packages using the command below,
 
 ```bash
-pip install --editable .
+cd HIPPS-DIMES
+pip3 install --editable .
 ```
 
-This command will install the required packages, and install the script as a python module. Once installed, you can call `HippsDimes` directly in the terminal to run the script. The packages installed are:
+This command will install the required packages, and install the script as a python module. Note that you need to install `pip3` if it is not installed already (Follow the instruction on the official document here https://pip.pypa.io/en/stable/installing/). Once installed, you can call `HippsDimes` directly in the terminal to run the script. The packages installed are:
 
 * `Click`
 * `Numpy`
@@ -32,8 +39,6 @@ This command will install the required packages, and install the script as a pyt
 * `Pandas`
 * `Tqdm`
 * `Cooler`
-
-We recommend running this program using Python 3.8+
 
 ## How to use
 

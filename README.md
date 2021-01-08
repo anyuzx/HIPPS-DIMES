@@ -14,7 +14,7 @@ In general, this script accepts the input file of a Hi-C contact or a mean spati
 
 - Basic understanding of `bash`, `Python` and how to use terminal
 - Python 3.8+
-- Python Package Installer [`pip`](https://pip.pypa.io/en/stable/). Follow the instruction https://pip.pypa.io/en/stable/installing/ if it is not installed already.
+- Python Package Installer [`pip`](https://pip.pypa.io/en/stable/). Follow the instruction https://pip.pypa.io/en/stable/installing/ if it is not installed already. Make sure the version of `pip3` is up-to-date.
 
 ## Install
 

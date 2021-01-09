@@ -73,6 +73,8 @@ This script will generate several files:
 
 ### Examples
 
+#### Example 1
+
 First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740). Rename it to `hic_example.cool`. Then execute the following command,
 
 ```bash
@@ -82,6 +84,16 @@ HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7
 This command tells the script to load the Hi-C contact map `hic_example.cool` and perform the iterative scaling algorithm. The argument `test` instructs the files names of output files start with `test_`. Option `--input-type cmap` specifies that the input file is a contact map. Option `--input-format cooler` specifies that the input file is a `cooler` file. Option `-s chr7:10M-15M` specifies that the algorithm is performed on the region 10 Mbps - 15 Mbps on Chromosome 7. Note that these three options are required and cannot be neglected. **Some option arguments are optional, some are required. Please refer to the section below and use `HippsDimes --help` for details**
 
 When the program finishes, the script will generate several output files: `test.xyz`, `test_connectivity_matrix.txt`, and `test_dmap_final.txt`. `test.xyz` contains 10 sets of individual conformations of x, y, z coordinates and can be viewed using `VMD` or other compatible visualization softwares.
+
+#### Example 2
+
+In this example, we use Hi-C contact map for HeLa cell line Chromosome 14 at time point of 12 hours after the release from prometaphase. For the purpase of demonstration, you can download the Hi-C `.cool` file from [here](https://drive.google.com/file/d/1j-zfDUP6LOZGCxz9uA3LaMI372ct1cU_/view?usp=sharing) which is origannly retreived from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740) under accession number GSE102740. Once downloaded, execute the following command,
+
+```bash
+HippsDimes GSM3909682_TB-HiC-Dpn-R2-T12_hg19.1000.multires.cool::6 test --input-type cmap --input-format cooler -s chr14:20M-107M -i 10000 -e 10
+```
+
+Similar to the first example, this command tells the script to load the Hi-C cooler file `GSM3909682_TB-HiC-Dpn-R2-T12_hg19.1000.multires.cool` and its group 6 (data for several different resolution is stored in different groups) and perform the HIPPS/DIMES algorithm. In this example, we change the number of iterations to be 10000 by using the option `-i 10000`. On a AMD Ryzen 5 3600 CPU machine, it takes about 3-4 mins to finish the program. Once it is finished, several ouput files are generated.
 
 ### Explanantion of the arguments and options
 

@@ -53,12 +53,12 @@ HippsDimes --help
 
 ### Input files
 
-This script accept input files in two formats. If the input file is a Hi-C contact map, it can be in `cooler` format or pure text format. If the input file is a mean spatial distance map, the script only accepts a pure text formatted file. The text format for a matrix is the following: each row of the file corresponds to the row of the matrix. Values are either space-separated or comma-separated. An example of such file is,
+This script accept input files in two formats. If the input file is a Hi-C contact map, it can be in `cooler` format or pure text format. If the input file is a mean spatial distance map, the script only accepts a pure text formatted file. The text format for a matrix is the following: each row of the file corresponds to the row of the matrix. Values are space-separated. An example of such file is,
 
 ``` text
-1, 2, 3
-2, 1, 2
-3, 2, 1
+1  2  3
+2  1  2
+3  2  1
 ```
 
 ### Output files

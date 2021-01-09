@@ -75,7 +75,7 @@ This script will generate several files:
 
 #### Example 1
 
-First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740). Rename it to `hic_example.cool`. Then execute the following command,
+First, download a cooler format Hi-C contact map from [here](https://drive.google.com/file/d/1eIxGv1JbIrEAVoUSQK_O_ebIjWo6toTJ/view?usp=sharing) (**The file size is about 116 Mb**). This Hi-C contact map is for Chicken cell mitotic chromosome, originally retrieved from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740). Rename it to `hic_example.cool`. Then execute the following command,
 
 ```bash
 HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7:10M-15M -i 10 -e 10
@@ -87,7 +87,7 @@ When the program finishes, the script will generate several output files: `test.
 
 #### Example 2
 
-In this example, we use Hi-C contact map for HeLa cell line Chromosome 14 at time point of 12 hours after the release from prometaphase. For the purpase of demonstration, you can download the Hi-C `.cool` file from [here](https://drive.google.com/file/d/1j-zfDUP6LOZGCxz9uA3LaMI372ct1cU_/view?usp=sharing) which is origannly retreived from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740) under accession number GSE102740. Once downloaded, execute the following command,
+In this example, we use Hi-C contact map for HeLa cell line Chromosome 14 at time point of 12 hours after the release from prometaphase. For the purpase of demonstration, you can download the Hi-C `.cool` file from [here](https://drive.google.com/file/d/1j-zfDUP6LOZGCxz9uA3LaMI372ct1cU_/view?usp=sharing) which is origannly retreived from [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740) under accession number GSE102740. **Before you download, note that the file has size of about 655 Mb**. Once downloaded, execute the following command,
 
 ```bash
 HippsDimes GSM3909682_TB-HiC-Dpn-R2-T12_hg19.1000.multires.cool::6 test --input-type cmap --input-format cooler -s chr14:20M-107M -i 10000 -e 10

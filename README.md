@@ -4,7 +4,7 @@ Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Method
 
 # Description
 
-This python script can be used to generate ensemble of genome structures from Hi-C contact map or mean spatial distance map. The method is based on Maximum Entropy principle and the relation between the contact probability and the mean spatial distance from polymer theory. The application of the method can be found in this work https://www.biorxiv.org/content/10.1101/2020.05.21.109421v2.
+This python script can be used to generate ensemble of genome structures from Hi-C contact map or mean spatial distance map. The method is based on Maximum Entropy principle and the relation between the contact probability and the mean spatial distance from polymer theory. The application of the method can be found in this work https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051.
 
 In general, this script accepts the input file of a Hi-C contact or a mean spatial distance map (can be measured in Multiplex FISH experiment), and generate an ensemble of individual conformations consistent with the inputted contact map or distance map. The output conformations are in `.xyz` format, which users can use to calculate quantities of interest and can be viewed using `VMD` or other compatible softwares.
 
@@ -113,3 +113,10 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `--input-format`: The format of the input file. If the type of input file is Hi-C contact map, then the script support `cooler` format Hi-C contact map file or a pure text based file. In the text based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only support the text based file in which each line represents the row of the mean distance map. This option is required.
 - `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
 - `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
+
+
+# How to cite
+
+If you used this program in your publication, please cite the following reference:
+
+*Shi, Guang, and Dave Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051.*

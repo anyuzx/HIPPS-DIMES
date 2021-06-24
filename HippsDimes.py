@@ -186,7 +186,7 @@ def interpolate_missing(matrix):
 
 def objective_func(rc, A_mtx, cmap_exp):
     x = a2cmap_theory(A_mtx, rc)
-    y = cmap_exp / cmap_exp.max()
+    y = cmap_exp / np.nanmax(cmap_exp)
     logx = interpolate_missing(np.log(x))
     logy = interpolate_missing(np.log(y))
     res = np.power(logx[np.triu_indices_from(logx, k=1)] - logy[np.triu_indices_from(logy, k=1)], 2.).mean()**0.5
@@ -291,15 +291,18 @@ def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_r
     cost, dmap_maxent, connectivity_matrix = model.run(iteration, learning_rate)
     cost = pd.DataFrame(np.dstack((np.arange(1, iteration+1), cost))[0], columns=['iteration', 'cost'])
 
-    cmap_rc_minimize_res = scipy.optimize.minimize_scalar(objective_func, args=(connectivity_matrix, cmap))
-    cmap_maxent = a2cmap_theory(connectivity_matrix, cmap_rc_minimize_res.x)
+    if input_type == 'cmap':
+        cmap_rc_minimize_res = scipy.optimize.minimize_scalar(objective_func, args=(connectivity_matrix, cmap))
+        print('Optimized contact threshold distance: {}\n'.format(cmap_rc_minimize_res.x))
+        cmap_maxent = a2cmap_theory(connectivity_matrix, cmap_rc_minimize_res.x)
 
     if log:
         cost.to_csv('cost_function_iteration.csv')
     pass
     
     np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
-    np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+    if input_type == 'cmap':
+        np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
     np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), connectivity_matrix)
 
     if not no_xyzs:

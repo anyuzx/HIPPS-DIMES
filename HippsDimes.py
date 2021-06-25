@@ -85,7 +85,7 @@ def a2a(a, fill_negative=False):
     """
     Correct the connectivity matrx. Make it Laplacian, and non negative (options)
     """
-    temp = a
+    temp = np.copy(a)
     if fill_negative:
         temp[temp < 0.0] = 0.0
     np.fill_diagonal(temp, - np.sum(a, axis=1) + a.diagonal())
@@ -197,9 +197,9 @@ def cmap2dmap_core(cmap_exp, rc, alpha, norm_max=1.0, mode='log'):
     # rc is the prefactor
     # norm_max is the maximum contact probability
     if mode == 'raw':
-        log10_pmap = np.log10(cmap_exp) + np.log10(norm_max) - np.log10(np.max(cmap_exp))
+        log10_pmap = np.log10(cmap_exp) + np.log10(norm_max) - np.log10(np.nanmax(cmap_exp))
     elif mode == 'log':
-        log10_pmap = cmap_exp + np.log10(norm_max) - np.max(cmap_exp)
+        log10_pmap = cmap_exp + np.log10(norm_max) - np.nanmax(cmap_exp)
 
     return rc * 10 ** (-1.0/alpha * log10_pmap)
 
@@ -212,32 +212,44 @@ def cmap2dmap(cmap, alpha):
     # lastly, convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha)
     return dmap
+
+def cmap2dmap_missing_data(cmap, alpha):
+    # cmap is the raw data
+    # we take log on contact map
+    # unlike cmap2dmap(), this function does not interpolate the missing data. Just leave the missing data as is
+    cmap_log = np.log10(cmap)
+    cmap_log = np.array((cmap_log + cmap_log.T) / 2.)
+    # convert to distance map using value of alpha
+    dmap = cmap2dmap_core(cmap_log, 1.0, alpha)
+    return dmap
 #------------------------------------------------------------------#
 
 class optimize:
-    def __init__(self, dmap_target, mode='second moment'):
-        # dmap_target is the targeted matrix we would like to match
-        # the provided dmap_target should be consistent with the mode argument
-        # For instance, if the mode is the second moment, then the provided dmap_target should be averaged squared distance matrix
-        # if the mode is the first moment, then the provided dmap_target should be the averaged distance matrix
+    def __init__(self, ddmap_target):
+        # ddmap_target is the targeted matrix we would like to match
+        # note that ddmap_taret is the MEAN SQUARED DISTANCE MATRIX
 
-        self.dmap_target = dmap_target
-        self.n = dmap_target.shape[0]
-        self.mode = mode
+        self.ddmap_target = ddmap_target
 
-        self.A = np.zeros((self.n, self.n))
-        self.A_tot = construct_connectivity_matrix_rouse(self.n, self.n / self.dmap_target.max())
+        # get the size of system
+        self.n = ddmap_target.shape[0]
+
+        # initialize the connectivity matrix
+        self.A = construct_connectivity_matrix_rouse(self.n, self.n / np.nanmax(self.ddmap_target[self.ddmap_target != np.inf]))
 
     def __update_parameter(self, learning_rate):
-        rij = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(a2a(self.A_tot)), 2.)
-        compare_ratio = rij / self.dmap_target
-        fhash = np.sum(rij) / 2.
-        self.A_tot += learning_rate * np.log(compare_ratio) / fhash
-        np.fill_diagonal(self.A_tot, 0.0)
-        self.A_tot = a2a(self.A_tot)
-        self.cost = np.sqrt(np.mean(np.power(rij - self.dmap_target, 2.)) / np.mean(np.power(self.dmap_target, 2.)))
+        rij = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+        compare_ratio = rij / self.ddmap_target
+        fhash = np.nansum(rij) / 2.
+        self.A += learning_rate * np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
 
-        return a2dmap_theory(self.A_tot)
+        # update the connectivity matrix
+        # compute the cost/error
+        self.A = a2a(self.A)
+        self.cost = np.sqrt(np.mean(np.power(rij - self.ddmap_target, 2.)) / np.mean(np.power(self.ddmap_target, 2.)))
+
+
+        self.dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
     def run(self, epoch, learning_rate):
         """
@@ -246,10 +258,10 @@ class optimize:
 
         cost_array = []
         for _ in tqdm(range(epoch)):
-            dmap_maxent = self.__update_parameter(learning_rate)
+            self.__update_parameter(learning_rate)
             cost_array.append(self.cost)
 
-        return cost_array, dmap_maxent, self.A_tot
+        return cost_array, self.dmap_maxent, self.A
 
 @click.command()
 @click.argument('input', nargs=1)
@@ -263,12 +275,14 @@ class optimize:
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False))
 @click.option('--log', is_flag=True, default=False, show_default=True, help='write a log file')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='turn off writing conformations to .xyz file')
-def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs):
+@click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
+@click.option('--balance', is_flag=True, default=False, show_default=True, help='turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
+def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
     INPUT: Specify the path to the input file\n
     OUTPUT_PREFIX: Specify the prefix for output files\n\n
-    Reference: https://www.biorxiv.org/content/10.1101/2020.05.21.109421v1\n
+    If you use this program in your publication, please cite this paper: https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051\n
     """
     if input_type == 'dmap':
         if input_format == 'text':
@@ -279,12 +293,18 @@ def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_r
     elif input_type == 'cmap':
         if input_format == 'text':
             cmap = np.loadtxt(input)
-            dmap_target = cmap2dmap(cmap, alpha)
+            if ignore_missing_data:
+                dmap_target = cmap2dmap_missing_data(cmap, alpha)
+            else:
+                dmap_target = cmap2dmap(cmap, alpha)
             dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_format == 'cooler':
             cmap = cooler.Cooler(input)
-            cmap = cmap.matrix(balance=False).fetch(selection)
-            dmap_target = cmap2dmap(cmap, alpha)
+            cmap = cmap.matrix(balance=balance).fetch(selection)
+            if ignore_missing_data:
+                dmap_target = cmap2dmap_missing_data(cmap, alpha)
+            else:
+                dmap_target = cmap2dmap(cmap, alpha)
             dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
 
     model = optimize(dmap_target)

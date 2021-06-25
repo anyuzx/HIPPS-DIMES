@@ -113,6 +113,8 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `--input-format`: The format of the input file. If the type of input file is Hi-C contact map, then the script support `cooler` format Hi-C contact map file or a pure text based file. In the text based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only support the text based file in which each line represents the row of the mean distance map. This option is required.
 - `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
 - `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
+- `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite number in the contact map or distance map
+- `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`
 
 
 # How to cite

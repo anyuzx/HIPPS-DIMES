@@ -115,6 +115,7 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
 - `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite number in the contact map or distance map
 - `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`
+- `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`
 
 
 # How to cite

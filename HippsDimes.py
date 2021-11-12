@@ -193,34 +193,40 @@ def objective_func(rc, A_mtx, cmap_exp):
     return res
 
 # FUNCTION TO CONVERT CMAP TO DMAP
-def cmap2dmap_core(cmap_exp, rc, alpha, norm_max=1.0, mode='log'):
+def cmap2dmap_core(cmap_exp, rc, alpha, not_normalize, norm_max=1.0, mode='log'):
     # rc is the prefactor
     # norm_max is the maximum contact probability
     if mode == 'raw':
-        log10_pmap = np.log10(cmap_exp) + np.log10(norm_max) - np.log10(np.nanmax(cmap_exp))
+        if not_normalize:
+            log10_pmap = np.log10(cmap_exp)
+        else:
+            log10_pmap = np.log10(cmap_exp) + np.log10(norm_max) - np.log10(np.nanmax(cmap_exp))
     elif mode == 'log':
-        log10_pmap = cmap_exp + np.log10(norm_max) - np.nanmax(cmap_exp)
+        if not_normalize:
+            log10_pmap = np.copy(cmap_exp)
+        else:
+            log10_pmap = cmap_exp + np.log10(norm_max) - np.nanmax(cmap_exp)
 
     return rc * 10 ** (-1.0/alpha * log10_pmap)
 
-def cmap2dmap(cmap, alpha):
+def cmap2dmap(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # and then interpolate the missing data. Any zero contact pair will be interpolated
     cmap_log = interpolate_missing(np.log10(cmap))
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.)
     # lastly, convert to distance map using value of alpha
-    dmap = cmap2dmap_core(cmap_log, 1.0, alpha)
+    dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
     return dmap
 
-def cmap2dmap_missing_data(cmap, alpha):
+def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # unlike cmap2dmap(), this function does not interpolate the missing data. Just leave the missing data as is
     cmap_log = np.log10(cmap)
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.)
     # convert to distance map using value of alpha
-    dmap = cmap2dmap_core(cmap_log, 1.0, alpha)
+    dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
     return dmap
 #------------------------------------------------------------------#
 
@@ -277,7 +283,8 @@ class optimize:
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
-def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance):
+@click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='turn off auto normalization of contact map')
+def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance, not_normalize):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
     INPUT: Specify the path to the input file\n
@@ -294,17 +301,17 @@ def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_r
         if input_format == 'text':
             cmap = np.loadtxt(input)
             if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha)
+                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             else:
-                dmap_target = cmap2dmap(cmap, alpha)
+                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
             dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_format == 'cooler':
             cmap = cooler.Cooler(input)
             cmap = cmap.matrix(balance=balance).fetch(selection)
             if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha)
+                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             else:
-                dmap_target = cmap2dmap(cmap, alpha)
+                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
             dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
 
     model = optimize(dmap_target)

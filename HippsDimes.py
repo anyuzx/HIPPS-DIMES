@@ -1,10 +1,9 @@
 """
 Reconstruction of 3D genome organization using the Maximum Entropy Principle
 
-Reference: https://www.biorxiv.org/content/10.1101/2020.05.21.109421v1
-
-Usage:
-    input 
+Reference:
+Shi, Guang, and Dave Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051.
+https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 """
 
 import sys

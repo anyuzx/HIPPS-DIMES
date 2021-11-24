@@ -423,6 +423,7 @@ def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, it
     table.add_column("Input Type", no_wrap=False)
     table.add_column("Input Format", no_wrap=False)
     table.add_column("Optimization method", no_wrap=False)
+    table.add_column("Matrix Size", no_wrap=False)
     table.add_column("Number of Iterations", no_wrap=False)
     table.add_column("Regularization", no_wrap=False)
     table.add_column("Ignore Missing Data", no_wrap=False)
@@ -432,6 +433,7 @@ def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, it
         "{}".format("Contact Map" if input_type=='cmap' else "Distance Map" if input_type=='dmap' else "Unknown"), \
         "{}".format("Text" if input_format=='text' else "Cooler File" if input_format=='cooler' else "Unknown"),\
         "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method == 'GD' else "Unknown"),\
+        "{}".format("{}x{}".format(dmap_target.shape[0], dmap_target.shape[1])),\
         "{}".format(iteration),\
         "{}".format(reg if lamd > 0.0 else "No" if lamd == 0.0 else "Unknown"),\
         "{}".format("Yes" if ignore_missing_data else "No"),\

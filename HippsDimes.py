@@ -20,7 +20,13 @@ import scipy.optimize
 import pandas as pd
 import click
 import cooler
-from tqdm import tqdm
+from rich import print
+from rich.panel import Panel
+from rich.text import Text
+from rich.console import Console
+from rich.table import Table
+#from tqdm.rich import trange, tqdm
+from tqdm import trange, tqdm
 
 #------------------------------------------------------------------#
 # Helper functions
@@ -34,6 +40,26 @@ def construct_connectivity_matrix_rouse(n,k):
     A[0,0]=-k
     A[n-1,n-1]=-k
     return A
+
+def sigma2omega(sigma_mtx):
+    """
+    Return Omega matrix given the sigma matrix
+    """
+    n = sigma_mtx.shape[0]
+    sigma_mtx_square = np.power(sigma_mtx, 2.0)
+    sigma_row_sum = np.sum(sigma_mtx_square, axis=1)
+    sigma_sum = np.sum(sigma_mtx_square)
+    return (sigma_row_sum[:, np.newaxis] + sigma_row_sum - sigma_sum / n) / (2 * n) - sigma_mtx_square / 2.0
+
+def dmap2a_direct(dmap):
+    """
+    Return connectivity matrix A given the mean distance map directly through matrix peusudo inversion
+    """
+    sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
+    Omega = sigma2omega(sigma_mtx)
+    a_direct = nearestNSD(- scipy.linalg.pinv(Omega), 0.0)
+
+    return a_direct
 
 def a2dmap_theory(A, force_positive_definite = False):
     """
@@ -227,46 +253,113 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     # convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
     return dmap
+
+def nearestNSD(X, delta):
+    v, w = scipy.linalg.eigh(X)
+    v_new = np.minimum(v, delta)
+    return w @ np.diag(v_new) @ w.T
 #------------------------------------------------------------------#
 
-class optimize:
+class Optimize:
     def __init__(self, ddmap_target):
         # ddmap_target is the targeted matrix we would like to match
-        # note that ddmap_taret is the MEAN SQUARED DISTANCE MATRIX
-
+        # note that ddmap_taret is the mean SQUARED distance matrix, not mean distance matrix
         self.ddmap_target = ddmap_target
 
         # get the size of system
         self.n = ddmap_target.shape[0]
 
         # initialize the connectivity matrix
-        self.A = construct_connectivity_matrix_rouse(self.n, self.n / np.nanmax(self.ddmap_target[self.ddmap_target != np.inf]))
+        # here the connectivity matrix is initialized as a simple rouse chain whose spring constant is determined such\
+        # that its radius of gyration is close to the target
+        rg2 = .5 * np.nanmean(self.ddmap_target)
+        k = self.n / (4. * rg2)
+        self.A = construct_connectivity_matrix_rouse(self.n, k)
 
-    def __update_parameter(self, learning_rate):
-        rij = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
-        compare_ratio = rij / self.ddmap_target
-        fhash = np.nansum(rij) / 2.
-        self.A += learning_rate * np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
+        # initialize the loss
+        self.loss = None
+    
+    def __compute_loss(self):
+        ddmap_t = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+        loss = np.nanmean(np.power((ddmap_t - self.ddmap_target)/self.ddmap_target, 2.)) ** .5
+        return loss
+    
+    def __update_parameter(self, t, learning_rate, lamd=0.0, reg='l2', method='IS'):
+        # updating using Iterative Scaling
 
-        # update the connectivity matrix
-        # compute the cost/error
+        # compute the mean squared distance matrix at current iteration step
+        ddmap_t = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+        # compute the ratio between the current value and the target
+        compare_ratio = ddmap_t / self.ddmap_target
+        # compute the prefactor for iterative scaling
+        fhash = np.nansum(ddmap_t) / 2.
+
+        if method == 'IS':
+            # compute the gradient
+            if lamd > 0.0:
+                if reg == 'L2':
+                    gradient_t = (np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) - 2. * lamd * self.A) / fhash
+                elif reg == 'L1':
+                    gradient_t = (np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) + lamd * np.sign(- self.A)) / fhash
+            elif lamd == 0.0:
+                gradient_t = np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
+            
+            # update the connectivity matrix
+            self.A += learning_rate * gradient_t
+        elif method == 'GD':
+            if t == 0:
+                self.theta = np.copy(self.A)
+
+            # compute the gradient
+            if lamd > 0.0:
+                if reg == 'L2':
+                    gradient_t = (ddmap_t - self.ddmap_target - 2. * lamd * self.A)
+                elif reg == 'L1':
+                    gradient_t = (ddmap_t - self.ddmap_target + lamd * np.sign(- self.A))
+            elif lamd == 0.0:
+                gradient_t = (ddmap_t - self.ddmap_target)
+                
+            # perform Nesterov update rule
+            # gradient descent state
+            theta_previous = np.copy(self.theta)
+            
+            #self.theta = self.A + np.maximum(np.minimum(learning_rate * gradient_t, step_cap),-step_cap)
+            self.theta = self.A + learning_rate * gradient_t
+
+            #if momentum_rate == None:
+            #    momentum_rate = t/(t+3)
+            
+            # update the connectivity matrix
+            self.A = self.theta + (t/(t+3)) * (self.theta - theta_previous)
+
+        
         self.A = a2a(self.A)
-        self.cost = np.sqrt(np.mean(np.power(rij - self.ddmap_target, 2.)) / np.mean(np.power(self.ddmap_target, 2.)))
+        # project to be negative semidefinite
+        #self.A = nearestNSD(self.A, 0.0)
 
+        # compute the loss
+        self.loss = self.__compute_loss()
 
-        self.dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
-
-    def run(self, epoch, learning_rate):
+    def run(self, epoch, **kwargs):
         """
         Main function to run the optimization
         """
 
-        cost_array = []
-        for _ in tqdm(range(epoch)):
-            self.__update_parameter(learning_rate)
-            cost_array.append(self.cost)
+        console = Console()
 
-        return cost_array, self.dmap_maxent, self.A
+        loss_array = []
+        
+        #for t in trange(epoch):
+        with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
+            for t in pbar:
+                self.__update_parameter(t, **kwargs)
+                # display loss at each iterations
+                pbar.set_postfix(loss=self.loss)
+                loss_array.append(self.loss)
+        
+        dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
+
+        return loss_array, dmap_maxent, self.A
 
 @click.command()
 @click.argument('input', nargs=1)
@@ -274,22 +367,27 @@ class optimize:
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
 @click.option('-s', '--selection', type=str, help='specify which chromosome or region to run the model on if the input file is Hi-C data in cooler format. Accept any valid options for [fetch] method in cooler.Cooler.matrix() selector')
-@click.option('-i', '--iteration', type=int, default=10000, show_default=True)
-@click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True)
-@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False))
-@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False))
+@click.option('-m', '--method', type=click.Choice(['IS','GD'],case_sensitive=True), default='IS', show_default=True,help='specify the method for optimization. IS: Iterative Scaling. GD: Gradient Descent')
+@click.option('-l', '--lamd', type=click.FloatRange(0,max=None), default=0.0,show_default=True, help='specify the weight for the regularization. Only effective if the method is set to be GD')
+@click.option('-r', '--reg', type=click.Choice(['L1','L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Only effective if the method is set to be GD')
+@click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Number of iterations')
+@click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge.')
+@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
+@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False), help='Specify the format of the input. Support pure text format or cooler Hi-C contact map')
 @click.option('--log', is_flag=True, default=False, show_default=True, help='write a log file')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='turn off auto normalization of contact map')
-def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance, not_normalize):
+def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance, not_normalize):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
     INPUT: Specify the path to the input file\n
     OUTPUT_PREFIX: Specify the prefix for output files\n\n
     If you use this program in your publication, please cite this paper: https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051\n
     """
+    console = Console()
+
     if input_type == 'dmap':
         if input_format == 'text':
             dmap_target = np.loadtxt(input)
@@ -312,29 +410,68 @@ def main(input, output_prefix, ensemble, alpha, selection, iteration, learning_r
             else:
                 dmap_target = cmap2dmap(cmap, alpha, not_normalize)
             dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+    
+    title = Text.assemble(("HIPPS-DIMES", "bold yellow"), \
+        ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction\n",\
+        "Shi, Guang, and Dave Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.")
+    console.print(Panel(title))
 
-    model = optimize(dmap_target)
-    cost, dmap_maxent, connectivity_matrix = model.run(iteration, learning_rate)
-    cost = pd.DataFrame(np.dstack((np.arange(1, iteration+1), cost))[0], columns=['iteration', 'cost'])
+    table = Table(title="Information")
+    table.add_column("Input File", no_wrap=False)
+    table.add_column("Input Type", no_wrap=False)
+    table.add_column("Input Format", no_wrap=False)
+    table.add_column("Optimization method", no_wrap=False)
+    table.add_column("Number of Iterations", no_wrap=False)
+    table.add_column("Regularization", no_wrap=False)
+    table.add_column("Ignore Missing Data", no_wrap=False)
+    table.add_column("Matrix Balancing", no_wrap=False)
+    table.add_column("Matrix Normalization", no_wrap=False)
+    table.add_row(input, \
+        "{}".format("Contact Map" if input_type=='cmap' else "Distance Map" if input_type=='dmap' else "Unknown"), \
+        "{}".format("Text" if input_format=='text' else "Cooler File" if input_format=='cooler' else "Unknown"),\
+        "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method == 'GD' else "Unknown"),\
+        "{}".format(iteration),\
+        "{}".format(reg if lamd > 0.0 else "No" if lamd == 0.0 else "Unknown"),\
+        "{}".format("Yes" if ignore_missing_data else "No"),\
+        "{}".format("Yes" if balance else "No" if (balance is False and input_format == 'cooler') else "N/A"),\
+        "{}".format("No" if (not_normalize is True and input_type == 'cmap') else "Yes" if (not_normalize is False and input_type == 'cmap') else "N/A")
+        )
+    console.print(table)
+
+    model = Optimize(dmap_target)
+    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method}
+
+    loss, dmap_maxent, connectivity_matrix = model.run(iteration, **keyword_arguments)
+    loss = pd.DataFrame(np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
+
+    if reg == 'L2':
+        print('L2 norm of the connectivity matrix:', np.linalg.norm(connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]))
+    elif reg == 'L1':
+        print('L1 norm of the connectivity matrix:', np.abs(connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]).sum())
+
+    console.print("Final loss: {}".format(loss['loss'].values[-1]))
 
     if input_type == 'cmap':
         cmap_rc_minimize_res = scipy.optimize.minimize_scalar(objective_func, args=(connectivity_matrix, cmap))
-        print('Optimized contact threshold distance: {}\n'.format(cmap_rc_minimize_res.x))
+        console.print('Optimized contact threshold distance: {}\n'.format(cmap_rc_minimize_res.x))
         cmap_maxent = a2cmap_theory(connectivity_matrix, cmap_rc_minimize_res.x)
 
     if log:
-        cost.to_csv('cost_function_iteration.csv')
-    pass
+        loss.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+        console.print("Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
     
     np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
+    console.print("Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
     if input_type == 'cmap':
         np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+        console.print("Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
     np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), connectivity_matrix)
+    console.print('Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
 
     if not no_xyzs:
         xyzs = a2xyz_sample(connectivity_matrix, ensemble = ensemble)
         write2xyz('{}.xyz'.format(output_prefix), xyzs)
-    
+        console.print("Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))    
 
 if __name__ == '__main__':
     main()

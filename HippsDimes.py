@@ -368,17 +368,19 @@ class Optimize:
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
 @click.option('-s', '--selection', type=str, help='specify which chromosome or region to run the model on if the input file is Hi-C data in cooler format. Accept any valid options for [fetch] method in cooler.Cooler.matrix() selector')
 @click.option('-m', '--method', type=click.Choice(['IS','GD'],case_sensitive=True), default='IS', show_default=True,help='specify the method for optimization. IS: Iterative Scaling. GD: Gradient Descent')
-@click.option('-l', '--lamd', type=click.FloatRange(0,max=None), default=0.0,show_default=True, help='specify the weight for the regularization. Only effective if the method is set to be GD')
-@click.option('-r', '--reg', type=click.Choice(['L1','L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Only effective if the method is set to be GD')
+@click.option('-l', '--lamd', type=click.FloatRange(0,max=None), default=0.0,show_default=True, help='Specify the weight for the regularization.')
+@click.option('-r', '--reg', type=click.Choice(['L1','L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
 @click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Number of iterations')
-@click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge.')
+@click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. \
+    If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. \
+        It should be a very small value (such as 1e-8) when using gradient descent optimization')
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False), help='Specify the format of the input. Support pure text format or cooler Hi-C contact map')
-@click.option('--log', is_flag=True, default=False, show_default=True, help='write a log file')
-@click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='turn off writing conformations to .xyz file')
-@click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
-@click.option('--balance', is_flag=True, default=False, show_default=True, help='turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
-@click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='turn off auto normalization of contact map')
+@click.option('--log', is_flag=True, default=False, show_default=True, help='Write a log file')
+@click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
+@click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
+@click.option('--balance', is_flag=True, default=False, show_default=True, help='Turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
+@click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, input_format, log, no_xyzs, ignore_missing_data, balance, not_normalize):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n

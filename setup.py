@@ -11,6 +11,7 @@ setup(
             'Pandas',
             'Tqdm',
             'Cooler',
+            'rich',
             ],
         entry_points='''
             [console_scripts]

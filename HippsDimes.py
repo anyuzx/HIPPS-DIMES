@@ -278,12 +278,12 @@ class Optimize:
 
         # initialize the loss
         self.loss = None
-    
+
     def __compute_loss(self):
         ddmap_t = ((3. * np.pi) / 8.)  * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
         loss = np.nanmean(np.power((ddmap_t - self.ddmap_target)/self.ddmap_target, 2.)) ** .5
         return loss
-    
+
     def __update_parameter(self, t, learning_rate, lamd=0.0, reg='l2', method='IS'):
         # updating using Iterative Scaling
 
@@ -303,7 +303,7 @@ class Optimize:
                     gradient_t = (np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) + lamd * np.sign(- self.A)) / fhash
             elif lamd == 0.0:
                 gradient_t = np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
-            
+
             # update the connectivity matrix
             self.A += learning_rate * gradient_t
         elif method == 'GD':
@@ -318,21 +318,21 @@ class Optimize:
                     gradient_t = (ddmap_t - self.ddmap_target + lamd * np.sign(- self.A))
             elif lamd == 0.0:
                 gradient_t = (ddmap_t - self.ddmap_target)
-                
+
             # perform Nesterov update rule
             # gradient descent state
             theta_previous = np.copy(self.theta)
-            
+
             #self.theta = self.A + np.maximum(np.minimum(learning_rate * gradient_t, step_cap),-step_cap)
             self.theta = self.A + learning_rate * gradient_t
 
             #if momentum_rate == None:
             #    momentum_rate = t/(t+3)
-            
+
             # update the connectivity matrix
             self.A = self.theta + (t/(t+3)) * (self.theta - theta_previous)
 
-        
+
         self.A = a2a(self.A)
         # project to be negative semidefinite
         #self.A = nearestNSD(self.A, 0.0)
@@ -348,7 +348,7 @@ class Optimize:
         console = Console()
 
         loss_array = []
-        
+
         #for t in trange(epoch):
         with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
             for t in pbar:
@@ -356,7 +356,7 @@ class Optimize:
                 # display loss at each iterations
                 pbar.set_postfix(loss=self.loss)
                 loss_array.append(self.loss)
-        
+
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
         return loss_array, dmap_maxent, self.A
@@ -390,29 +390,38 @@ def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, it
     """
     console = Console()
 
-    if input_type == 'dmap':
-        if input_format == 'text':
-            dmap_target = np.loadtxt(input)
-            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-        elif input_format == 'cooler':
-            click.echo('input-type=dmap only support text format file')
-    elif input_type == 'cmap':
-        if input_format == 'text':
-            cmap = np.loadtxt(input)
-            if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
-            else:
-                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-        elif input_format == 'cooler':
-            cmap = cooler.Cooler(input)
-            cmap = cmap.matrix(balance=balance).fetch(selection)
-            if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
-            else:
-                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-    
+    with console.status("[bold green]System initialization...") as status:
+        if input_type == 'dmap':
+            console.print("Reading distance matrix from file")
+            if input_format == 'text':
+                dmap_target = np.loadtxt(input)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+            elif input_format == 'cooler':
+                click.echo('input-type=dmap only support text format file')
+        elif input_type == 'cmap':
+            console.print("Reading contact map from file")
+            if input_format == 'text':
+                cmap = np.loadtxt(input)
+                if ignore_missing_data:
+                    dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
+                else:
+                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+            elif input_format == 'cooler':
+                cmap = cooler.Cooler(input)
+                console.print("Cooler file read completed")
+                cmap = cmap.matrix(balance=balance).fetch(selection)
+                console.print("Cooler file selection completed")
+                if len(cmap) >= 5000:
+                    console.print("The matrix size is {}x{}. It is too large. Please use smaller matrix".format(len(cmap), len(cmap)))
+                    exit(0)
+                if ignore_missing_data:
+                    dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
+                else:
+                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+        console.print("Initialization completed")
+
     title = Text.assemble(("HIPPS-DIMES", "bold yellow"), \
         ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction\n",\
         "Shi, Guang, and Dave Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.")
@@ -463,7 +472,7 @@ def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, it
     if log:
         loss.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
         console.print("Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
-    
+
     np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
     console.print("Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
     if input_type == 'cmap':
@@ -475,7 +484,7 @@ def main(input, output_prefix, ensemble, alpha, selection, method, lamd, reg, it
     if not no_xyzs:
         xyzs = a2xyz_sample(connectivity_matrix, ensemble = ensemble)
         write2xyz('{}.xyz'.format(output_prefix), xyzs)
-        console.print("Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))    
+        console.print("Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
 
 if __name__ == '__main__':
     main()

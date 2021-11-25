@@ -41,6 +41,7 @@ This command will install the required packages, and install the script as a pyt
 * `Pandas`
 * `Tqdm`
 * `Cooler`
+* `rich`
 
 ## How to use
 
@@ -108,8 +109,11 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `-e` or `--ensemble`: Number of individual conformations to be generated. This script will generate an ensemble of structures consistent with the input Hi-C contact map or the mean spatial distance map. Each individual conformations are different from each other. You can specify how many such individual conformations you want to generate. If not specified, its value would be 1000.
 - `-a` or `--alpha`: Value of the contact map to distance map conversion exponent. If the input file is Hi-C contact map, the method first convert the contact map to a mean spatial distance map. The equation of the conversion is d_{ij} ~ c_{ij}^{1/\alpha}. The default value of \alpha is 4.0, estimated in this work 10.1126/science.aaf8084. If not specified, its value is 4.0
 - `-s` or `--selection`: Specify chromosome or region. This option is only required and works when the input file has [`cooler`](https://github.com/open2c/cooler) format. The value of this option is passed to the `cooler.Cooler.matrix().fetch()` method. For details, please refer their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
+- `-m` or `--method`: Specify the method used for optimization. The default method is Iterative Scaling (IS). Currently, Iterative scaling and gradient descent are supported.
+- `-l` or `--lamd`: Specify the weight for L1 or L2 regularization. Default value is zero, meaning no regularization. Regularization is typically used to avoid over-fitting.
+- `-r` or `--reg`: Specify the type of regularization. Default is L2 regularization. L1 and L2 are supported.
 - `-i` or `--iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slow down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed to good convergence is larger. If not specified, its default value is 10000.
-- `-r` or `--learning-rate`: The learning rate for iterative scaling. Higher learning rate achieves faster convergence. However, the model can crash if learning rate is too large. One should play around this option to see what works best. If not specified, its default value is 10.0
+- `-r` or `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. The default value is 10.0. 
 - `--input-type`: The type of the input file. To use the script, the type must be specified. The method can work on both the contact map (`cmap`) or distance map (`dmap`). This option is required.
 - `--input-format`: The format of the input file. If the type of input file is Hi-C contact map, then the script support `cooler` format Hi-C contact map file or a pure text based file. In the text based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only support the text based file in which each line represents the row of the mean distance map. This option is required.
 - `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
@@ -118,6 +122,13 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`
 
+### Tips for using this program
+
+- In practice, contact map or distance map larger than 5000x5000 is too large for the method to converge. If your matrix is larger than 5000x5000, I suggest that you can either perform a coarse-graining on the original matrix to get a smaller one or you can use the model on a subregion of the contact map/distance map.
+- When using Iterative scaling for optimization, the learning rate typically can be set between 1 and 50. You should try different values to see what is the optimal learning rate to use. For gradient descent, the learning rate typically needed to be set very small, such as 1e-7. 
+- If your contact map/distance map has a lot of missing or zero entries. You can try to turn on the option `--ignore-missing-data`. This will tell the code not considering these missing entries. Thus giving you a less biased result
+- Whenever the contact map is feeded, the programe will normalize the contact map by dividing it by its maximum value entry. If you don't want this, you can set option `--not-normalize`. This will tell the code not normalize the contact map at all
+- Note that when feeding the contact map, there is no physical length scale associated with it. Thus we cannot set a unit to the resulting distance matrix or the structures. In this sense, the structures generated are dimensionless. But one can use additional information to set the length scale of the problem. For instance, if you have a reasonable estimate of average distance between two nearest loci, then you can use this distance as the measure to rescale the structure to be consistent with it.
 
 # How to cite
 

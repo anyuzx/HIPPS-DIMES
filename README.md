@@ -1,5 +1,3 @@
-> This README is not up to date. Some available options are not shown here
-
 # HIPPS-DIMES
 Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Method
 

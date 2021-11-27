@@ -63,7 +63,7 @@ def dmap2a_direct(dmap):
     """
     sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
     Omega = sigma2omega(sigma_mtx)
-    a_direct = nearestNSD(- scipy.linalg.pinv(Omega), 0.0)
+    a_direct = nearestNSD(- scipy.linalg.pinvh(Omega), 0.0)
 
     return a_direct
 
@@ -71,7 +71,7 @@ def dmap2a_direct(dmap):
 def ddmap2a_direct(ddmap):
     sigma_mtx = np.sqrt(ddmap / 3.0)
     Omega = sigma2omega(sigma_mtx)
-    a_direct = nearestNSD(- scipy.linalg.pinv(Omega), 0.0)
+    a_direct = nearestNSD(- scipy.linalg.pinvh(Omega), 0.0)
 
     return a_direct
 

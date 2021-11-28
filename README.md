@@ -107,7 +107,7 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `-e` or `--ensemble`: Number of individual conformations to be generated. This script will generate an ensemble of structures consistent with the input Hi-C contact map or the mean spatial distance map. Each individual conformations are different from each other. You can specify how many such individual conformations you want to generate. If not specified, its value would be 1000.
 - `-a` or `--alpha`: Value of the contact map to distance map conversion exponent. If the input file is Hi-C contact map, the method first convert the contact map to a mean spatial distance map. The equation of the conversion is d_{ij} ~ c_{ij}^{1/\alpha}. The default value of \alpha is 4.0, estimated in this work 10.1126/science.aaf8084. If not specified, its value is 4.0
 - `-s` or `--selection`: Specify chromosome or region. This option is only required and works when the input file has [`cooler`](https://github.com/open2c/cooler) format. The value of this option is passed to the `cooler.Cooler.matrix().fetch()` method. For details, please refer their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
-- `-m` or `--method`: Specify the method used for optimization. The default method is Iterative Scaling (IS). Currently, Iterative scaling and gradient descent are supported.
+- `-m` or `--method`: Specify the method used for optimization. The default method is Iterative Scaling (IS). Currently, Iterative scaling (IS), gradient descent (GD) and direct inversion (DI) are supported.
 - `-l` or `--lamd`: Specify the weight for L1 or L2 regularization. Default value is zero, meaning no regularization. Regularization is typically used to avoid over-fitting.
 - `-r` or `--reg`: Specify the type of regularization. Default is L2 regularization. L1 and L2 are supported.
 - `-i` or `--iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slow down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed to good convergence is larger. If not specified, its default value is 10000.
@@ -119,6 +119,7 @@ Similar to the first example, this command tells the script to load the Hi-C coo
 - `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite number in the contact map or distance map
 - `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`
+- `--enforece-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative
 
 ### Tips for using this program
 

@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
         name='HippsDimes',
-        version='1.1',
+        version='1.21',
         py_modules=['HippsDimes'],
         install_requires=[
             'Click',

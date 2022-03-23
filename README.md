@@ -252,8 +252,8 @@ several ouput files are generated.
 If you used this program in your publication, please cite the following
 reference:
 
-_Shi, Guang, and Dave Thirumalai. "From Hi-C Contact Map to Three-dimensional
+_Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
 Organization of Interphase Human Chromosomes." Physical Review X 11.1
 (2021): 011051._
 
-_Shi, Guang, and Devarajan Thirumalai. "A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." arXiv preprint arXiv:2203.08238 (2022)._
+_Shi, Guang, and D. Thirumalai. "A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." arXiv preprint arXiv:2203.08238 (2022)._

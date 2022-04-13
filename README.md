@@ -1,21 +1,8 @@
-# HIPPS-DIMES
-
-Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Method
-
 # Description
 
-This python script can be used to generate ensemble of genome structures from
-Hi-C contact map or mean spatial distance map. The method is based on Maximum
-Entropy principle and the relation between the contact probability and the mean
-spatial distance from polymer theory. The application of the method can be found
-in the publications here https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051 and here https://www.biorxiv.org/content/10.1101/2022.03.12.484103v1
+This python program is the implementation of the HIPPS-DIMES method. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of 3D chromatin structures. IN a nutshell, this program accepts the input file of a mean spatial distance map (which canbe measured in Multiplex FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
 
-In general, this script accepts the input file of a Hi-C contact or a mean
-spatial distance map (can be measured in Multiplex FISH experiment), and
-generate an ensemble of individual conformations consistent with the inputted
-contact map or distance map. The output conformations are in `.xyz` format,
-which users can use to calculate quantities of interest and can be viewed using
-`VMD` or other compatible softwares.
+The theory and applications of this method can be found in our work published here in Physical Review X ([link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)) and in bioRxiv ([link](https://www.biorxiv.org/content/10.1101/2022.03.12.484103v1))
 
 # Documentation
 

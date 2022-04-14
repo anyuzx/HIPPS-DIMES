@@ -2,7 +2,7 @@
 
 ![Imgur](https://i.imgur.com/z7yLZZL.jpg)
 
-This python program is the implementation of the HIPPS-DIMES method. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of 3D chromatin structures. IN a nutshell, this program accepts the input file of a mean spatial distance map (which canbe measured in Multiplex FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
+This python program is the implementation of the HIPPS-DIMES method[^1][^2]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of 3D chromatin structures. IN a nutshell, this program accepts the input file of a mean spatial distance map (which canbe measured in Multiplex FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
 
 The theory and applications of this method can be found in our work published in Physical Review X ([link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)) and in a recent preprint posted on bioRxiv ([link](https://www.biorxiv.org/content/10.1101/2022.03.12.484103v1))
 
@@ -19,14 +19,13 @@ The theory and applications of this method can be found in our work published in
 
 ## Install
 
-First, open a terminal window and download this repository by put the following
-command in the terminal and hit Enter,
+First, download this repository using,
 
 ```bash
 git clone https://github.com/anyuzx/HIPPS-DIMES
 ```
 
-Next, install required packages using the command below,
+Next, go into the repository folder and install required packages using the command below,
 
 ```bash
 cd HIPPS-DIMES
@@ -246,3 +245,8 @@ Organization of Interphase Human Chromosomes." Physical Review X 11.1
 (2021): 011051._
 
 _Shi, Guang, and D. Thirumalai. "A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." arXiv preprint arXiv:2203.08238 (2022)._
+
+[^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
+Organization of Interphase Human Chromosomes." Physical Review X 11.1
+(2021): 011051._
+[^2]: _Shi, Guang, and D. Thirumalai. "A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." arXiv preprint arXiv:2203.08238 (2022)._

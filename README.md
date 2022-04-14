@@ -1,6 +1,6 @@
 # Description
 
-![Imgur](https://i.imgur.com/z7yLZZL.jpg)
+![Imgur](https://i.imgur.com/IyTmFyE.jpg)
 
 This python program is the implementation of the HIPPS-DIMES method[^1][^2]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of 3D chromatin structures. IN a nutshell, this program accepts the input file of a mean spatial distance map (which canbe measured in Multiplex FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
 

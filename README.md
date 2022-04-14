@@ -138,6 +138,10 @@ iterations to be 10000 by using the option `-i 10000`. On a AMD Ryzen 5 3600 CPU
 machine, it takes about 3-4 mins to finish the program. Once it is finished,
 several ouput files are generated.
 
+#### Additional examples
+
+The jupyter notebook `walkthrough.ipynb` in this repository contains additional examples. In particular, if you would like see an example of direct application of HIPPS-DIMES on imaging data, please go through the notebook.
+
 ### Explanantion of the arguments and options
 
 #### Argument
@@ -235,7 +239,7 @@ several ouput files are generated.
   two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
-# How to cite
+## How to cite
 
 If you used this program in your publication, please cite the following
 reference:

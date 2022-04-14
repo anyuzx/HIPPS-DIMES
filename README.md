@@ -10,12 +10,7 @@ _The theory and applications of this method can be found in our work published i
 
 ## Requirements
 
-- Basic understanding of `bash`, `Python` and how to use terminal
 - Python 3.8+
-- Python Package Installer [`pip`](https://pip.pypa.io/en/stable/). Follow the
-  instruction https://pip.pypa.io/en/stable/installing/ to install it if it is
-  not installed already. Make sure the version of `pip3` is up-to-date.
-- Linux or Mac OS system
 
 ## Install
 

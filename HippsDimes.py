@@ -4,7 +4,7 @@ Reconstruction of 3D genome organization using the Maximum Entropy Principle
 Reference:
 1. Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051.
 https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
-2. Shi, Guang, and D. Thirumalai. "A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." bioRxiv (2022).
+2. Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." bioRxiv (2022).
 """
 
 import sys
@@ -337,7 +337,8 @@ class Optimize:
             # initialize the connectivity matrix
             # here the connectivity matrix is initialized as a simple rouse chain whose spring constant is determined such\
             # that its radius of gyration is close to the target
-            rg2 = .5 * np.nanmean(self.ddmap_target)
+            # we need to filter out both NaN and inf entries
+            rg2 = .5 * np.nanmean(self.ddmap_target[~np.isinf(self.ddmap_target)])
             k = self.n / (4. * rg2)
             self.A = construct_connectivity_matrix_rouse(self.n, k)
         else:
@@ -345,6 +346,7 @@ class Optimize:
 
         # initialize the loss
         self.loss = None
+
 
     def __compute_loss(self):
         ddmap_t = ((3. * np.pi) / 8.) * \

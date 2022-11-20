@@ -203,7 +203,7 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   `input_type == cmap` and `input_format == cooler`
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only
   effective when `input_type == cmap`
-- `--enforece-nonnegative-connectivity-matrix`: Constrain all the "spring
+- `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring
   constants" to be nonnegative
 
 ### Tips for using this program

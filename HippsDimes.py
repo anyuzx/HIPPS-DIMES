@@ -410,8 +410,10 @@ class Optimize:
             # update the connectivity matrix
             self.A = self.theta + (t/(t+3)) * (self.theta - theta_previous)
 
-        self.A = a2a(
-            self.A, fill_negative=enforce_nonnegative_connectivity_matrix)
+        # convert all nan to zero
+        self.A = np.nan_to_num(self.A)
+
+        self.A = a2a(self.A, fill_negative=enforce_nonnegative_connectivity_matrix)
         # project to be negative semidefinite
         #self.A = nearestNSD(self.A, 0.0)
 
@@ -482,7 +484,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     title = Text.assemble(("HIPPS-DIMES", "bold yellow"),
                           ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction\n",
                           "1. Shi, Guang, and D. Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.\n",
-                          "2. Shi, Guang, and D. Thirumalai. A method to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants. bioRxiv (2022).")
+                          "2. Shi, Guang, and D. Thirumalai. A maximum-entropy model to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants. bioRxiv (2022).")
     console.print(Panel(title))
 
     with console.status("[bold green]System initialization...") as status:

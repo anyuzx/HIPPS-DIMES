@@ -2,7 +2,7 @@
 
 This python program is the implementation of the HIPPS-DIMES method[^1][^2]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
 
-_The theory and applications of this method can be found in our work published in Physical Review X ([link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)) and in a recent preprint posted on bioRxiv ([link](https://www.biorxiv.org/content/10.1101/2022.03.12.484103v2))_
+_The theory and applications of this method can be found in our work published in Physical Review X ([link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)) and in Nature Communications ([link](https://www.nature.com/articles/s41467-023-36412-4))_
 
 # Documentation
 
@@ -246,4 +246,4 @@ Organization of Interphase Human Chromosomes." Physical Review X 11.1
 [^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
 Organization of Interphase Human Chromosomes." Physical Review X 11.1
 (2021): 011051._
-[^2]: _Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." bioRxiv (2022)._
+[^2]: _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._

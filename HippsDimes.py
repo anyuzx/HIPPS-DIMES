@@ -4,7 +4,7 @@ Reconstruction of 3D genome organization using the Maximum Entropy Principle
 Reference:
 1. Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051.
 https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
-2. Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatins from pairwise distances: Applications to Interphase Chromosomes and Structural Variants." bioRxiv (2022).
+2. Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants." Nature Communications 14.1 (2023): 1150.
 """
 
 import sys

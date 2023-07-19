@@ -28,6 +28,7 @@ from rich.console import Console
 from rich.table import Table
 #from tqdm.rich import trange, tqdm
 from tqdm import trange, tqdm
+from math import inf
 
 console = Console()
 
@@ -463,7 +464,7 @@ class Optimize:
 @click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. \
     If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. \
         It should be a very small value (such as 1e-8) when using gradient descent optimization')
-@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
+@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap', 'sccmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map, dmap: distance map or sccmap: single-cell contact map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False), help='Specify the format of the input. Support pure text format or cooler Hi-C contact map')
 @click.option('--log', is_flag=True, default=False, show_default=True, help='Write a log file')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
@@ -497,6 +498,31 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                 click.echo('input-type=dmap only support text format file')
         elif input_type == 'cmap':
             console.print("Reading contact map from file")
+            if input_format == 'text':
+                cmap = np.loadtxt(input)
+                if ignore_missing_data:
+                    dmap_target = cmap2dmap_missing_data(
+                        cmap, alpha, not_normalize)
+                else:
+                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+            elif input_format == 'cooler':
+                cmap = cooler.Cooler(input)
+                console.print("Cooler file read completed")
+                cmap = cmap.matrix(balance=balance).fetch(selection)
+                console.print("Cooler file selection completed")
+                if len(cmap) >= 5000:
+                    console.print("The matrix size is {}x{}. It is too large. Please use smaller matrix".format(
+                        len(cmap), len(cmap)))
+                    exit(0)
+                if ignore_missing_data:
+                    dmap_target = cmap2dmap_missing_data(
+                        cmap, alpha, not_normalize)
+                else:
+                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+        elif input_type == 'sccmap':
+            console.print("Reading single cell contact map from file")
             if input_format == 'text':
                 cmap = np.loadtxt(input)
                 if ignore_missing_data:

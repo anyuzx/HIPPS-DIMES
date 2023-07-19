@@ -189,6 +189,11 @@ def write2xyz(fout, xyzs):
             for idx, item in enumerate(xyz):
                 f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
 
+def write2xyzOneFrame(fout, X, Y, Z):
+    natoms = X.shape[0]
+    print('{}\n'.format(natoms),file=fout)
+    for i in range(len(X)):
+        print('{}\t{}\t{}\t{}'.format('C', X[i][0], Y[i][0], Z[i][0]),file=fout)
 
 def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """
@@ -322,6 +327,45 @@ If the results are not good enough, please try iterative scaling or gradient des
     else:
         return False
 
+def sc2b(sccmap,rc=1):
+    # constructs the constraint b matrix
+    constr = np.argwhere(sccmap==1)
+    bmap = np.zeros((constr.shape[0],1))
+
+def sc2B(sccmap):
+    # constructs the constraint B matrix
+    constr = np.argwhere(sccmap==1)
+    Bmap = np.zeros((constr.shape[0],sccmap.shape[0]))
+    if len(constr)%2 != 0:
+        raise ValueError("Number of constraints not even! Check sc HiC map")
+    for i in range(len(constr)):
+        currConstrStart = constr[i][0]
+        currConstrStop = constr[i][1]
+        if currConstrStart<currConstrStop:
+            Bmap[i][currConstrStart] = 1
+            Bmap[i][currConstrStop] = -1
+        elif currConstrStart>currConstrStop:
+            Bmap[i][currConstrStart] = -1
+            Bmap[i][currConstrStop] = 1
+    return Bmap
+#------------------------------------------------------------------#
+#------------------------Gibbs Sampling----------------------------#
+class GibbsSampling:
+    def __init__(self, sccmap, nIters=100, connectivity_matrix):
+        # sccmap is the single-cell contact map to be sampled
+        # nsamples by default set to 100, can be changed if necessary
+        self.sccmap = (sccmap+sccmap.T)//2 #Makes the scmap symmetric and integer valued
+
+        # get the size of system
+        self.n = sccmap.shape[0]
+        # set connectivity matrix
+        self.A = connectivity_matrix
+        self.nIter = nIters
+    def __run__(self, **kwargs):
+        #Run a for loop over nIters
+        #Sample the conditional distribution
+        #Write xyz files
+#------------------------------------------------------------------#
 #------------------------------------------------------------------#
 
 

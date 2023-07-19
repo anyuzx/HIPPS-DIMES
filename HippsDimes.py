@@ -523,6 +523,9 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                 dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_type == 'sccmap':
             console.print("Reading single cell contact map from file")
+            if connectivity_matrix is None:
+                #console.print("Connectivity matrix was not entered! Please enter connectivity matrix for single-cell Hi-C calculations")
+                raise Exception("Connectivity matrix was not entered! Please enter connectivity matrix for single-cell Hi-C calculations")
             if input_format == 'text':
                 cmap = np.loadtxt(input)
                 if ignore_missing_data:
@@ -566,7 +569,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     table.add_column("Matrix Normalization", no_wrap=False)
     table.add_row(input,
                   "{}".format("Contact Map" if input_type ==
-                              'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"),
+                              'cmap' else "Distance Map" if input_type == 'dmap' else "Single Cell Contact Map" if input_type == 'sccmap' else "Unknown"),
                   "{}".format("Text" if input_format ==
                               'text' else "Cooler File" if input_format == 'cooler' else "Unknown"),
                   "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method ==

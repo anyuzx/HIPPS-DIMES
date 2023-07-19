@@ -29,6 +29,8 @@ from rich.table import Table
 #from tqdm.rich import trange, tqdm
 from tqdm import trange, tqdm
 from math import inf
+from numpy.random import normal as nml
+from scipy.stats import truncnorm as tnml
 
 console = Console()
 
@@ -348,10 +350,38 @@ def sc2B(sccmap):
             Bmap[i][currConstrStart] = -1
             Bmap[i][currConstrStop] = 1
     return Bmap
+
+def SampleCondDist(j,z,D,b): 
+    #Sample conditional distribution
+    #j = the coordinate to be sampled
+    #z = [Nx1] b = [Mx1]
+    #D = [MxN]
+    zMj = np.delete(z,j,axis=0)
+    DMj = np.delete(D,j,axis=1)
+    Dj = D[:,j]
+    
+    constraints = b-DMj@zMj
+    # print(j)
+    # print(constraints)
+    #print(Dj,np.where(Dj<0)[0].size)
+    maxLB = -inf
+    if np.where(Dj<0)[0].size>0:
+        maxLB = np.max(np.divide(constraints[np.where(Dj<0)],Dj[np.where(Dj<0)]))
+    minUB = inf
+    if np.where(Dj>0)[0].size>0:
+        minUB = np.min(np.divide(constraints[np.where(Dj>0)],Dj[np.where(Dj>0)]))
+    if np.isinf(maxLB) and np.isinf(minUB):
+        zVal = nml(0,1)
+    else:
+        dummy = tnml(maxLB,minUB,0,1)
+        #print(maxLB,minUB)
+        zVal = dummy.rvs(1)
+    #print(zVal)
+    return zVal
 #------------------------------------------------------------------#
 #------------------------Gibbs Sampling----------------------------#
 class GibbsSampling:
-    def __init__(self, sccmap, nIters=100, connectivity_matrix):
+    def __init__(self, sccmap, connectivity_matrix, nIters=100):
         # sccmap is the single-cell contact map to be sampled
         # nsamples by default set to 100, can be changed if necessary
         self.sccmap = (sccmap+sccmap.T)//2 #Makes the scmap symmetric and integer valued
@@ -360,11 +390,41 @@ class GibbsSampling:
         self.n = sccmap.shape[0]
         # set connectivity matrix
         self.A = connectivity_matrix
+
         self.nIter = nIters
+
+    def __initialCalculations__(self):
+        
+
+        self.sigMap = np.linalg.inv(self.A)
+        self.gibbsInv = np.linalg.cholesky(self.sigMap)
+        self.gibbsMap = np.linalg.inv(self.gibbsInv)
+
+        self.bmap = sc2b(self.sccmap,1.0)
+        self.Bmap = sc2B(self.sccmap)
+
+        self.D = self.Bmap@self.gibbsMap
+        self.D[np.abs(self.D) < 1e-14] = 0
+
+        self.z_X = np.zeros((self.n,1))  #Samples for X
+        self.z_Y = np.zeros((self.n,1))  #Samples for Y
+        self.z_Z = np.zeros((self.n,1))  #Samples for Z
+
     def __run__(self, **kwargs):
         #Run a for loop over nIters
         #Sample the conditional distribution
         #Write xyz files
+        fout = open("Traj.xyz","w")
+        for i in range(self.nIter):
+            #Sample all z sequentially
+            for j in range(self.n):
+                self.z_X[j] = SampleCondDist(j,self.z_X,self.D,self.b)
+                self.z_Y[j] = SampleCondDist(j,self.z_Y,self.D,self.b)
+                self.z_Z[j] = SampleCondDist(j,self.z_Z,self.D,self.b)
+            X = self.gibbsInv@self.z_X
+            Y = self.gibbsInv@self.z_Y
+            Z = self.gibbsInv@self.z_Z
+            write2xyzOneFrame(fout, X, Y, Z)
 #------------------------------------------------------------------#
 #------------------------------------------------------------------#
 
@@ -631,67 +691,71 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                   )
     console.print(table)
 
-    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix)
-    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix}
+    if input_type != 'sccmap':
+        #normal HIPPS
+        model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix)
+        keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
+                            'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix}
 
-    if method == 'IS' or method == 'GD':
-        general_method = 'optimization'
-    elif method == 'DI':
-        general_method = 'direct'
+        if method == 'IS' or method == 'GD':
+            general_method = 'optimization'
+        elif method == 'DI':
+            general_method = 'direct'
 
-    loss, dmap_maxent, connectivity_matrix = model.run(
-        iteration, general_method=general_method, **keyword_arguments)
-    try:
-        loss = pd.DataFrame(
-            np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
-    except IndexError:
-        pass
+        loss, dmap_maxent, connectivity_matrix = model.run(
+            iteration, general_method=general_method, **keyword_arguments)
+        try:
+            loss = pd.DataFrame(
+                np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
+        except IndexError:
+            pass
 
-    if reg == 'L2':
-        print('L2 norm of the connectivity matrix:', np.linalg.norm(
-            connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]))
-    elif reg == 'L1':
-        print('L1 norm of the connectivity matrix:', np.abs(
-            connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]).sum())
+        if reg == 'L2':
+            print('L2 norm of the connectivity matrix:', np.linalg.norm(
+                connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]))
+        elif reg == 'L1':
+            print('L1 norm of the connectivity matrix:', np.abs(
+                connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]).sum())
 
-    console.print("Final loss: {}".format(loss['loss'].values[-1]))
+        console.print("Final loss: {}".format(loss['loss'].values[-1]))
 
-    with console.status("[bold green]System finalizing...") as status:
-        if input_type == 'cmap':
-            cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
-                objective_func, args=(connectivity_matrix, cmap))
-            console.print('Optimized contact threshold distance: {}\n'.format(
-                cmap_rc_minimize_res.x))
-            cmap_maxent = a2cmap_theory(
-                connectivity_matrix, cmap_rc_minimize_res.x)
+        with console.status("[bold green]System finalizing...") as status:
+            if input_type == 'cmap':
+                cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
+                    objective_func, args=(connectivity_matrix, cmap))
+                console.print('Optimized contact threshold distance: {}\n'.format(
+                    cmap_rc_minimize_res.x))
+                cmap_maxent = a2cmap_theory(
+                    connectivity_matrix, cmap_rc_minimize_res.x)
 
-        if log:
-            loss.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+            if log:
+                loss.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+                console.print(
+                    "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
+
+            np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
             console.print(
-                "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
-
-        np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
-        console.print(
-            "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
-        if input_type == 'cmap':
-            np.savetxt('{}_dmap_target.txt'.format(output_prefix), np.sqrt((8./(3.*np.pi))* dmap_target))
+                "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
+            if input_type == 'cmap':
+                np.savetxt('{}_dmap_target.txt'.format(output_prefix), np.sqrt((8./(3.*np.pi))* dmap_target))
+                console.print(
+                    "Target distance map saved to file: [bold magenta]{}_dmap_target.txt[/bold magenta]".format(output_prefix))
+                np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+                console.print(
+                    "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
+            np.savetxt('{}_connectivity_matrix.txt'.format(
+                output_prefix), connectivity_matrix)
             console.print(
-                "Target distance map saved to file: [bold magenta]{}_dmap_target.txt[/bold magenta]".format(output_prefix))
-            np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
-            console.print(
-                "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
-        np.savetxt('{}_connectivity_matrix.txt'.format(
-            output_prefix), connectivity_matrix)
-        console.print(
-            'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
+                'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
 
-        if not no_xyzs:
-            xyzs = a2xyz_sample(connectivity_matrix, ensemble=ensemble)
-            write2xyz('{}.xyz'.format(output_prefix), xyzs)
-            console.print(
-                "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
-
+            if not no_xyzs:
+                xyzs = a2xyz_sample(connectivity_matrix, ensemble=ensemble)
+                write2xyz('{}.xyz'.format(output_prefix), xyzs)
+                console.print(
+                    "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
+    elif input_type == 'sccmap':
+        #sc HIPPS
+        model = GibbsSampling(cmap, connectivity_matrix, 100)
 
 if __name__ == '__main__':
     main()

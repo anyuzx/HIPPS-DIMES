@@ -342,9 +342,11 @@ def sc2B(sccmap):
     Bmap = np.zeros((constr.shape[0],sccmap.shape[0]))
     if len(constr)%2 != 0:
         raise ValueError("Number of constraints not even! Check sc HiC map")
+    # print(constr)
     for i in range(len(constr)):
         currConstrStart = constr[i][0]
         currConstrStop = constr[i][1]
+        print(currConstrStart,currConstrStop)
         if currConstrStart<currConstrStop:
             Bmap[i][currConstrStart] = 1
             Bmap[i][currConstrStop] = -1
@@ -367,10 +369,10 @@ def SampleCondDist(j,z,D,b):
     #print(Dj,np.where(Dj<0)[0].size)
     maxLB = -inf
     if np.where(Dj<0)[0].size>0:
-        maxLB = np.max(np.divide(constraints[np.where(Dj<0)],Dj[np.where(Dj<0)]))
+        maxLB = np.max(np.divide(constraints[np.where(Dj<0)].T,Dj[np.where(Dj<0)]))
     minUB = inf
     if np.where(Dj>0)[0].size>0:
-        minUB = np.min(np.divide(constraints[np.where(Dj>0)],Dj[np.where(Dj>0)]))
+        minUB = np.min(np.divide(constraints[np.where(Dj>0)].T,Dj[np.where(Dj>0)]))
     if np.isinf(maxLB) and np.isinf(minUB):
         zVal = nml(0,1)
     else:
@@ -391,8 +393,7 @@ class GibbsSampling:
         self.n = sccmap.shape[0]
         # set connectivity matrix
         self.A = -connectivity_matrix
-        self.A += 1/(self.n**2)    #Tether to center of mass
-        print(np.linalg.det(self.A))
+        self.A[0,0] = self.A[0,0]*2 #Tether first monomer to 0
         self.nIter = nIters
         
 

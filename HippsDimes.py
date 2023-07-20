@@ -191,11 +191,13 @@ def write2xyz(fout, xyzs):
             for idx, item in enumerate(xyz):
                 f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
 
+
 def write2xyzOneFrame(fout, X, Y, Z):
     natoms = X.shape[0]
     print('{}\n'.format(natoms),file=fout)
     for i in range(len(X)):
         print('{}\t{}\t{}\t{}'.format('C', X[i][0], Y[i][0], Z[i][0]),file=fout)
+
 
 def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """
@@ -342,17 +344,12 @@ def sc2B(sccmap):
     Bmap = np.zeros((constr.shape[0],sccmap.shape[0]))
     if len(constr)%2 != 0:
         raise ValueError("Number of constraints not even! Check sc HiC map")
-    # print(constr)
+    #print(constr)
     for i in range(len(constr)):
         currConstrStart = constr[i][0]
         currConstrStop = constr[i][1]
-        print(currConstrStart,currConstrStop)
-        if currConstrStart<currConstrStop:
-            Bmap[i][currConstrStart] = 1
-            Bmap[i][currConstrStop] = -1
-        elif currConstrStart>currConstrStop:
-            Bmap[i][currConstrStart] = -1
-            Bmap[i][currConstrStop] = 1
+        Bmap[i][currConstrStart] = 1
+        Bmap[i][currConstrStop] = -1
     return Bmap
 
 def SampleCondDist(j,z,D,b): 
@@ -364,9 +361,6 @@ def SampleCondDist(j,z,D,b):
     DMj = np.delete(D,j,axis=1)
     Dj = D[:,j]
     constraints = b-DMj@zMj
-    # print(j)
-    # print(constraints)
-    #print(Dj,np.where(Dj<0)[0].size)
     maxLB = -inf
     if np.where(Dj<0)[0].size>0:
         maxLB = np.max(np.divide(constraints[np.where(Dj<0)].T,Dj[np.where(Dj<0)]))
@@ -377,7 +371,6 @@ def SampleCondDist(j,z,D,b):
         zVal = nml(0,1)
     else:
         dummy = tnml(maxLB,minUB,0,1)
-        #print(maxLB,minUB)
         zVal = dummy.rvs(1)
     #print(zVal)
     return zVal
@@ -393,19 +386,19 @@ class GibbsSampling:
         self.n = sccmap.shape[0]
         # set connectivity matrix
         self.A = -connectivity_matrix
+        
         self.A[0,0] = self.A[0,0]*2 #Tether first monomer to 0
         self.nIter = nIters
         
-
         self.sigMap = np.linalg.inv(self.A)
         self.gibbsInv = np.linalg.cholesky(self.sigMap)
         self.gibbsMap = np.linalg.inv(self.gibbsInv)
-
-        self.bmap = sc2b(self.sccmap,1.0)
+        
+        self.b_map = sc2b(self.sccmap,1.0)
         self.Bmap = sc2B(self.sccmap)
 
-        self.D = self.Bmap@self.gibbsMap
-        self.D[np.abs(self.D) < 1e-14] = 0
+        self.D = self.Bmap@self.gibbsInv
+        self.D[np.abs(self.D) < 1e-12] = 0
 
         self.z_X = np.zeros((self.n,1))  #Samples for X
         self.z_Y = np.zeros((self.n,1))  #Samples for Y
@@ -421,12 +414,13 @@ class GibbsSampling:
             #Sample all z sequentially
             print(i)
             for j in range(self.n):
-                self.z_X[j] = SampleCondDist(j,self.z_X,self.D,self.bmap)
-                self.z_Y[j] = SampleCondDist(j,self.z_Y,self.D,self.bmap)
-                self.z_Z[j] = SampleCondDist(j,self.z_Z,self.D,self.bmap)
+                self.z_X[j] = SampleCondDist(j,self.z_X,self.D,self.b_map)
+                self.z_Y[j] = SampleCondDist(j,self.z_Y,self.D,self.b_map)
+                self.z_Z[j] = SampleCondDist(j,self.z_Z,self.D,self.b_map)
             X = self.gibbsInv@self.z_X
             Y = self.gibbsInv@self.z_Y
             Z = self.gibbsInv@self.z_Z
+            
             write2xyzOneFrame(fout, X, Y, Z)
 #------------------------------------------------------------------#
 #------------------------------------------------------------------#

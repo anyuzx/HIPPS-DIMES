@@ -333,6 +333,8 @@ def sc2b(sccmap,rc=1):
     # constructs the constraint b matrix
     constr = np.argwhere(sccmap==1)
     bmap = np.zeros((constr.shape[0],1))
+    bmap = bmap+rc
+    return bmap
 
 def sc2B(sccmap):
     # constructs the constraint B matrix
@@ -359,7 +361,6 @@ def SampleCondDist(j,z,D,b):
     zMj = np.delete(z,j,axis=0)
     DMj = np.delete(D,j,axis=1)
     Dj = D[:,j]
-    
     constraints = b-DMj@zMj
     # print(j)
     # print(constraints)
@@ -389,11 +390,10 @@ class GibbsSampling:
         # get the size of system
         self.n = sccmap.shape[0]
         # set connectivity matrix
-        self.A = connectivity_matrix
-
+        self.A = -connectivity_matrix
+        self.A += 1/(self.n**2)    #Tether to center of mass
+        print(np.linalg.det(self.A))
         self.nIter = nIters
-
-    def __initialCalculations__(self):
         
 
         self.sigMap = np.linalg.inv(self.A)
@@ -410,17 +410,19 @@ class GibbsSampling:
         self.z_Y = np.zeros((self.n,1))  #Samples for Y
         self.z_Z = np.zeros((self.n,1))  #Samples for Z
 
-    def __run__(self, **kwargs):
+    def run(self, nEpochs, **kwargs):
         #Run a for loop over nIters
         #Sample the conditional distribution
         #Write xyz files
+        self.nIter = nEpochs
         fout = open("Traj.xyz","w")
         for i in range(self.nIter):
             #Sample all z sequentially
+            print(i)
             for j in range(self.n):
-                self.z_X[j] = SampleCondDist(j,self.z_X,self.D,self.b)
-                self.z_Y[j] = SampleCondDist(j,self.z_Y,self.D,self.b)
-                self.z_Z[j] = SampleCondDist(j,self.z_Z,self.D,self.b)
+                self.z_X[j] = SampleCondDist(j,self.z_X,self.D,self.bmap)
+                self.z_Y[j] = SampleCondDist(j,self.z_Y,self.D,self.bmap)
+                self.z_Z[j] = SampleCondDist(j,self.z_Z,self.D,self.bmap)
             X = self.gibbsInv@self.z_X
             Y = self.gibbsInv@self.z_Y
             Z = self.gibbsInv@self.z_Z
@@ -755,7 +757,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                     "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
     elif input_type == 'sccmap':
         #sc HIPPS
-        model = GibbsSampling(cmap, connectivity_matrix, 100)
-
+        model = GibbsSampling(cmap, connectivity_matrix, ensemble)
+        model.run(iteration)
 if __name__ == '__main__':
     main()

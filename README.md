@@ -136,7 +136,9 @@ several ouput files are generated.
 
 #### Additional examples
 
-The jupyter notebook `walkthrough.ipynb` in this repository contains additional examples. In particular, if you would like see an example of direct application of HIPPS-DIMES on imaging data, please go through the notebook.
+The jupyter notebook `walkthrough.ipynb` in this repository contains additional examples. 
+
+> In particular, if you would like see an example of direct application of HIPPS-DIMES on imaging data, please go through the notebook.
 
 ### Explanantion of the arguments and options
 
@@ -211,28 +213,28 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
 
 ### Tips for using this program
 
-- In practice, contact map or distance map larger than 5000x5000 is too large
+- In practice, a contact map or distance map larger than 5000x5000 is too large
   for the method to converge. If your matrix is larger than 5000x5000, I suggest
   that you can either perform a coarse-graining on the original matrix to get a
-  smaller one or you can use the model on a subregion of the contact
+  smaller on,e or you can use the model on a subregion of the contact
   map/distance map.
-- When using Iterative scaling for optimization, the learning rate typically can
+- When using the Iterative Scaling algorithm (with argument `-m IS`) for optimization, the learning rate typically can
   be set between 1 and 50. You should try different values to see what is the
-  optimal learning rate to use. For gradient descent, the learning rate
+  optimal learning rate to use. For gradient descent (with argument `-m GD`), the learning rate
   typically needed to be set very small, such as 1e-7.
 - If your contact map/distance map has a lot of missing or zero entries. You can
   try to turn on the option `--ignore-missing-data`. This will tell the code not
-  considering these missing entries. Thus giving you a less biased result
-- Whenever the contact map is feeded, the programe will normalize the contact
+  to consider these missing entries. Thus giving you a less biased result
+- Whenever the contact map is fed, the program will normalize the contact
   map by dividing it by its maximum value entry. If you don't want this, you can
-  set option `--not-normalize`. This will tell the code not normalize the
+  set the option `--not-normalize`. This will tell the code not to normalize the
   contact map at all
 - Note that when feeding the contact map, there is no physical length scale
   associated with it. Thus we cannot set a unit to the resulting distance matrix
   or the structures. In this sense, the structures generated are dimensionless.
   But one can use additional information to set the length scale of the problem.
-  For instance, if you have a reasonable estimate of average distance between
-  two nearest loci, then you can use this distance as the measure to rescale the
+  For instance, if you have a reasonable estimate of the average distance between
+  the two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
 ## How to cite

@@ -75,7 +75,7 @@ content of the file should look like this,
 This script will generate several files:
 
 - A text file for the final simulated mean distance map
-- A text file for the final simulated contact map
+- A text file for the final simulated contact map (this is the best agreement contact map to the _normalized_ input contact map)
 - A text file for the connectivity matrix
 - A `.xyz` formatted file for the ensemble of genome structures generated (can
   be turned off)

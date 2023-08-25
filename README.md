@@ -237,6 +237,20 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   the two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
+### Use it as a package
+The python file `HippsDimes.py` can also used as a package. You can do `import` as,
+
+```python
+import HippsDimes as HD
+```
+
+Some useful functions:
+
+`HippsDimes.a2xyz_sample`: use connectivity matrix to generate random samples of structures
+`HippsDimes.a2cmap_theory`: use connectivity matrix and a distance threshold to generate contact map
+`HippsDimes.a2dmap_theory`: use connectivity matrix to generate a mean distance map
+
+
 ## How to cite
 
 If you used this program in your publication, please cite the following

@@ -76,7 +76,6 @@ def ddmap2a_direct(ddmap):
 
     return a_direct
 
-
 def a2dmap_theory(A, force_positive_definite=False):
     """
     Return mean distance map given the connectivity matrix A theoretically
@@ -348,9 +347,7 @@ class Optimize:
         self.loss = None
 
 
-    def __compute_loss(self):
-        ddmap_t = ((3. * np.pi) / 8.) * \
-            np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+    def __compute_loss(self, ddmap_t):
         with np.errstate(divide='ignore', invalid='ignore'):
             loss = np.nanmean(
                 np.power((ddmap_t - self.ddmap_target)/self.ddmap_target, 2.)) ** .5
@@ -418,7 +415,7 @@ class Optimize:
         #self.A = nearestNSD(self.A, 0.0)
 
         # compute the loss
-        self.loss = self.__compute_loss()
+        self.loss = self.__compute_loss(ddmap_t)
 
     def run(self, epoch, general_method='optimization', **kwargs):
         """

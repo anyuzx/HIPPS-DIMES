@@ -33,6 +33,102 @@ console = Console()
 
 #------------------------------------------------------------------#
 # Helper functions
+def compute_acf_general_theory(i, j, t, a, zeta=1.0):
+    """
+    Numerically compute the autocorrelation function (ACF) for monomers i, j 
+    using the connectivity matrix `a`. Returns both the time-dependent 
+    ACF and the corresponding MSD for each time point.
+
+    Parameters
+    ----------
+    i, j : int
+        Indices of the monomers for which to calculate the correlation function.
+    t : array_like
+        A 1D array of time points (lag times).
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    zeta : float
+        Friction coefficient (if part of the model). Default is 1.0.
+
+    Returns
+    -------
+    output : np.ndarray
+        2D array. First column is time `t`, second column is the ACF values at each time.
+    msd : np.ndarray
+        1D array of the same length as `t`, giving the mean-square displacement 
+        inferred from the ACF. This is returned as a second column alongside `t`.
+    """
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue_inv = 1.0 / eigvalue
+
+    # difference in eigenvector components for monomers i and j
+    vpi_vpj = eigvector[i, :] - eigvector[j, :]
+    
+    # normal_modes_square_mean = -(1 / eigenvalue) but filter out any inf
+    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+    
+    # Expand time dimension for broadcast
+    t_reshaped = np.expand_dims(t, axis=-1)
+    # Effective relaxation times
+    tau_p = - zeta / eigvalue
+    decay_factor = np.exp(-t_reshaped / tau_p)
+
+    # ACF(t)
+    res = 3.0 * np.sum(vpi_vpj**2 * decay_factor * normal_modes_square_mean, axis=-1)
+    # Equilibrium part
+    res_eq = 3.0 * np.sum(vpi_vpj**2 * normal_modes_square_mean, axis=-1)
+
+    # Combine results: first column is time, second is res
+    output = np.column_stack((t, res))
+
+    # The mean-square displacement from the correlation function
+    msd = 2.0 * (res_eq - output[:, 1])
+    return output, msd
+
+def compute_m1_general_theory(i, t, a, zeta=1.0):
+    """
+    Compute the single-monomer mean-square displacement (MSD) for monomer i, 
+    given the connectivity matrix `a`.
+
+    Parameters
+    ----------
+    i : int
+        Index of the monomer.
+    t : array_like
+        A 1D array of time points (lag times).
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    zeta : float
+        Friction coefficient. Default is 1.0.
+
+    Returns
+    -------
+    msd : np.ndarray
+        2D array. First column is time `t`, second column is the MSD for 
+        monomer i at those times.
+    """
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue_inv = 1.0 / eigvalue
+    vpi = eigvector[i, :]
+
+    # Filter out infinities
+    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+
+    # Expand time dimension for broadcast
+    t_reshaped = np.expand_dims(t, axis=-1)
+    tau_p = - zeta / eigvalue
+    decay_factor = np.exp(-t_reshaped / tau_p)
+
+    # The time-dependent part
+    res = 3.0 * np.sum(vpi**2 * decay_factor * normal_modes_square_mean, axis=-1)
+    # Equilibrium radius
+    r2_eq = 3.0 * np.sum(vpi**2 * normal_modes_square_mean, axis=-1)
+    # MSD
+    msd_data = 2.0 * (r2_eq - res)
+
+    # Combine time with MSD
+    msd = np.column_stack((t, msd_data))
+    return msd
 
 
 def construct_connectivity_matrix_rouse(n, k):

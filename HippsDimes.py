@@ -79,11 +79,13 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
     res_eq = 3.0 * np.sum(vpi_vpj**2 * normal_modes_square_mean, axis=-1)
 
     # Combine results: first column is time, second is res
-    output = np.column_stack((t, res))
+    two_point_acf = np.column_stack((t, res))
 
     # The mean-square displacement from the correlation function
-    msd = 2.0 * (res_eq - output[:, 1])
-    return output, msd
+    two_point_msd = 2.0 * (res_eq - two_point_acf[:, 1])
+    two_point_msd = np.column_stack((t, two_point_msd))
+
+    return two_point_acf, two_point_msd
 
 def compute_m1_general_theory(i, t, a, zeta=1.0):
     """

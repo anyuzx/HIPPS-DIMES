@@ -1,11 +1,12 @@
 ![Imgur](https://i.imgur.com/IyTmFyE.jpg)
 
-This python program is the implementation of the HIPPS-DIMES method[^1][^2]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
+This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
 
 The theory and applications of this method can be found in our work published:
 
 - Shi, Guang, and D. Thirumalai. "From Hi-C contact map to three-dimensional organization of interphase human chromosomes." Physical Review X 11.1 (2021): 011051. [link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)
 - Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants." Nature Communications 14.1 (2023): 1150. [link](https://www.nature.com/articles/s41467-023-36412-4)
+- Shi, Guang, Sucheol Shin, and D. Thirumalai. "Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes." bioRxiv (2025): 2025-01. [link](https://www.biorxiv.org/content/10.1101/2025.01.16.633484v1)
 
 # Documentation
 
@@ -250,6 +251,30 @@ Some useful functions:
 `HippsDimes.a2cmap_theory`: use connectivity matrix and a distance threshold to generate contact map
 `HippsDimes.a2dmap_theory`: use connectivity matrix to generate a mean distance map
 
+------
+
+## Dynamics Prediction Functionality
+In addition to reconstructing static 3D chromatin structures from contact or distance maps, the HIPPS-DIMES code now includes modules to simulate the dynamics of the chromatin[^3]. This new functionality is based on polymer physics and the Ornstein–Uhlenbeck process, which allows you to investigate time-dependent properties such as the autocorrelation function (ACF) and mean-square displacement (MSD) of individual monomers.
+
+### New Functions
+- **`compute_acf_general_theory(i, j, t, a, zeta=1.0)`**: This function numerically computes the time-dependent autocorrelation function between monomers *i* and *j* using the connectivity matrix `a`. In addition to the ACF, it returns the corresponding two-point MSD for each time point in the provided time array `t`.
+
+- **`compute_m1_general_theory(i, t, a, zeta=1.0)`**: This function computes the single-loci mean-square displacement (MSD) for the i-th monomer as a function of time. The output is a 2D array where the first column is time and the second is the MSD of the monomer.
+
+### New `Dynamics` Class
+The new `Dynamics` class encapsulates the routines needed to run dynamic simulations provided the connectivity matrix `a`.
+
+#### Example code
+```python
+from HippsDimes import Dynamics
+
+model = Dynamics(a) # a is the connectivity matrix
+model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+
+model.run(int(1e5), every = 10)
+```
+
+Trajectory data can be accessed through `model.traj`. It is a `TxNx3` numpy array. `T` is the number of snapshots. `N` is the number of loci and 3 corresponds to coordinates at x, y, z dimensions.
 
 ## How to cite
 
@@ -262,7 +287,10 @@ Organization of Interphase Human Chromosomes." Physical Review X 11.1
 
 * _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._
 
+* _Shi, G., Shin, Sucheol, and Thirumalai, D. Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes. bioRxiv (2025)._
+
 [^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
 Organization of Interphase Human Chromosomes." Physical Review X 11.1
 (2021): 011051._
 [^2]: _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._
+[^3]: _Shi, G., Shin, S., and Thirumalai, D. Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes. bioRxiv (2025)._

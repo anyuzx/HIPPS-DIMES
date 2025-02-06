@@ -33,7 +33,127 @@ console = Console()
 
 #------------------------------------------------------------------#
 # Helper functions
+def compute_acf_general_theory(i, j, t, a, zeta=1.0):
+    """
+    Numerically compute the autocorrelation function (ACF) for monomers i, j 
+    using the connectivity matrix `a`. Returns both the time-dependent 
+    ACF and the corresponding MSD for each time point.
 
+    Parameters
+    ----------
+    i, j : int
+        Indices of the monomers for which to calculate the correlation function.
+    t : array_like
+        A 1D array of time points (lag times).
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    zeta : float
+        Friction coefficient (if part of the model). Default is 1.0.
+
+    Returns
+    -------
+    output : np.ndarray
+        2D array. First column is time `t`, second column is the ACF values at each time.
+    msd : np.ndarray
+        1D array of the same length as `t`, giving the mean-square displacement 
+        inferred from the ACF. This is returned as a second column alongside `t`.
+    """
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue_inv = 1.0 / eigvalue
+
+    # difference in eigenvector components for monomers i and j
+    vpi_vpj = eigvector[i, :] - eigvector[j, :]
+    
+    # normal_modes_square_mean = -(1 / eigenvalue) but filter out any inf
+    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+    
+    # Expand time dimension for broadcast
+    t_reshaped = np.expand_dims(t, axis=-1)
+    # Effective relaxation times
+    tau_p = - zeta / eigvalue
+    decay_factor = np.exp(-t_reshaped / tau_p)
+
+    # ACF(t)
+    res = 3.0 * np.sum(vpi_vpj**2 * decay_factor * normal_modes_square_mean, axis=-1)
+    # Equilibrium part
+    res_eq = 3.0 * np.sum(vpi_vpj**2 * normal_modes_square_mean, axis=-1)
+
+    # Combine results: first column is time, second is res
+    two_point_acf = np.column_stack((t, res))
+
+    # The mean-square displacement from the correlation function
+    two_point_msd = 2.0 * (res_eq - two_point_acf[:, 1])
+    two_point_msd = np.column_stack((t, two_point_msd))
+
+    return two_point_acf, two_point_msd
+
+def compute_m1_general_theory(i, t, a, zeta=1.0):
+    """
+    Compute the single-monomer mean-square displacement (MSD) for monomer i, 
+    given the connectivity matrix `a`.
+
+    Parameters
+    ----------
+    i : int
+        Index of the monomer.
+    t : array_like
+        A 1D array of time points (lag times).
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    zeta : float
+        Friction coefficient. Default is 1.0.
+
+    Returns
+    -------
+    msd : np.ndarray
+        2D array. First column is time `t`, second column is the MSD for 
+        monomer i at those times.
+    """
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue_inv = 1.0 / eigvalue
+    vpi = eigvector[i, :]
+
+    # Filter out infinities
+    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+
+    # Expand time dimension for broadcast
+    t_reshaped = np.expand_dims(t, axis=-1)
+    tau_p = - zeta / eigvalue
+    decay_factor = np.exp(-t_reshaped / tau_p)
+
+    # The time-dependent part
+    res = 3.0 * np.sum(vpi**2 * decay_factor * normal_modes_square_mean, axis=-1)
+    # Equilibrium radius
+    r2_eq = 3.0 * np.sum(vpi**2 * normal_modes_square_mean, axis=-1)
+    # MSD
+    msd_data = 2.0 * (r2_eq - res)
+
+    # Combine time with MSD
+    msd = np.column_stack((t, msd_data))
+    return msd
+
+def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
+    """
+    Update variable x for a Ornstein Uhlenbeck process
+    x: Array for value of x of each degree of freedom
+    k: Array for spring constant for each degree of freedom
+    zeta: one value
+    beta: one value
+    """
+    if isinstance(x, np.ndarray):
+        rand_noise = np.random.randn(*x.shape)
+    else:
+        rand_noise = np.random.randn()
+    
+    if method == 'euler-maruyama':
+        dx = - k[:, np.newaxis] * x * dt / zeta + b * dt / zeta + np.sqrt(2.0 * dt / (zeta * beta)) * rand_noise
+        x_new = x + dx
+    elif method == 'exact':
+        theta = k[:, np.newaxis] / zeta
+        sigma = (2. / (zeta * beta)) ** .5
+        mu = np.exp(- theta * dt)
+        x_new = x * mu + np.nan_to_num(np.sqrt((sigma ** 2. / (2. * theta)) * (1. - mu ** 2.))) * rand_noise
+    return x_new
 
 def construct_connectivity_matrix_rouse(n, k):
     """
@@ -244,8 +364,6 @@ def objective_func(rc, A_mtx, cmap_exp):
     return res
 
 # FUNCTION TO CONVERT CMAP TO DMAP
-
-
 def cmap2dmap_core(cmap_exp, rc, alpha, not_normalize, norm_max=1.0, mode='log'):
     # rc is the prefactor
     # norm_max is the maximum contact probability
@@ -444,6 +562,123 @@ class Optimize:
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
         return loss_array, dmap_maxent, self.A
+
+class Dynamics:
+    def __init__(self, input, M=None, k=None, model=None):
+        if isinstance(input, int) and M is None and k is not None:
+            if not isinstance(k, int) and not isinstance(k, float):
+                sys.stdout.write('Spring constant should be a number')
+                sys.exit(0)
+            if model != 'rouse' and model is not None:
+                sys.stdout.write("Please specify model to be 'rouse'")
+                sys.exit(0)
+
+            self.A = construct_connectivity_matrix_rouse(input, k)
+            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.N = input
+        elif isinstance(input, int) and M is not None and k is not None:
+            if not isinstance(k, int) and not isinstance(k, float):
+                sys.stdout.write('Spring constant should be a number')
+                sys.exit(0)
+            if not isinstance(M, int):
+                sys.stdout.write('Number of random cross links need to be an integer')
+                sys.exit(0)
+            if model != 'random':
+                sys.stdout.write("Please specify model to be 'random'")
+                sys.exit(0)
+            self.A = construct_connectivity_matrix_random(input, M, k)
+            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.N = input
+        elif isinstance(input, np.ndarray) and M is None and k is None:
+            if len(input.shape) !=2 or input.shape[0] != input.shape[1]:
+                sys.stdout.write('The connectivity matrix should be a square matrix')
+                sys.exit(0)
+            if not np.allclose(input, input.T):
+                sys.stdout.write('The connectivity matrix should be a symmetrix real matrix')
+                sys.exit(0)
+
+            self.A = input
+            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.N = input.shape[0]
+
+    def generateXYZ(self, force_positive_definite = False):
+        self.xyz = a2xyz(self.A, force_positive_definite = force_positive_definite)
+        self.modes = self.eigvector.T @ self.xyz
+
+    def initialize(self, dt, zeta, beta):
+        if not isinstance(dt, int) and not isinstance(dt, float):
+            sys.stdout.write('Time step should be a number')
+            sys.exit(0)
+        if not isinstance(zeta, int) and not isinstance(zeta, float):
+            sys.stdout.write('Friction coefficient step should be a number')
+            sys.exit(0)
+        if not isinstance(beta, int) and not isinstance(beta, float):
+            sys.stdout.write('Temperature step should be a number')
+            sys.exit(0)
+        elif beta <= 0.0:
+            sys.stdout.write('Temperature should be positive')
+            sys.exit(0)
+
+        self.zeta = zeta
+        self.beta = beta
+        self.dt = dt
+
+    def updateModes(self, method='euler-maruyama'):
+        try:
+            self.zeta
+            self.beta
+            self.dt
+        except AttributeError:
+            sys.stdout.write('Please run initialize() first')
+            sys.exit(0)
+
+        self.modes = Ornstein_Uhlenbeck_update(self.modes, self.dt, - self.eigvalue, self.zeta, self.beta, method=method)
+        # self.modes = OU.OU(self.modes, self.dt, - self.eigvalue, self.zeta, self.beta)
+
+    def updateXYZ(self):
+        self.xyz = self.eigvector @ self.modes
+
+    def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama'):
+        """
+        T: number of timesteps
+        update: update x,y,z positions every this many timesteps
+        every: save x,y,z positions to the trajectory every this many timesteps
+        initial_conformation: initial conformation of the simulation
+        """
+        if not isinstance(T, int):
+            sys.stdout.write('Number of steps should be an integer')
+            sys.exit(0)
+
+        if initial_conformation is None:
+            try:
+                self.xyz
+                self.modes
+            except AttributeError:
+                self.generateXYZ()
+        else:
+            if initial_conformation.shape[0] != self.N:
+                sys.stdout.write('Number of particles is not correct')
+                sys.exit(0)
+            if initial_conformation.shape[1] != 3:
+                sys.stdout.write('The dimension should be three')
+                sys.exit(0)
+            self.xyz = initial_conformation
+
+        self.traj = []
+        for t in tqdm(range(T)):
+            if t % update == 0:
+                self.updateXYZ()
+            if t % every == 0:
+                self.updateXYZ()
+                self.traj.append(self.xyz)
+                #sys.stdout.write('\rTimestep {}'.format(t+1))
+                #sys.stdout.flush()
+            self.updateModes(method=method)
+
+        self.traj = np.array(self.traj)
+
+    def reset(self):
+        self.generateXYZ()
 
 
 @click.command()

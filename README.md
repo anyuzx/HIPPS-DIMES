@@ -43,6 +43,7 @@ are:
 - `Tqdm`
 - `Cooler`
 - `rich`
+- `hic-straw`
 
 ## How to use
 
@@ -59,7 +60,7 @@ HippsDimes --help
 ### Input files
 
 This script accept input files in two formats. If the input file is a Hi-C
-contact map, it can be in either `.cool` format (see https://github.com/open2c/cooler for details of the `cooler` library) or pure text format. If the
+contact map, it can be in either `.cool` format (see https://github.com/open2c/cooler for details of the `cooler` library), '.hic' format (via hicstraw) or pure text format. If the
 input file is a mean spatial distance map, the script only accepts a pure text
 formatted file. The text format for a matrix is the following: each row of the
 file corresponds to the row of the matrix. Values are space-separated. The
@@ -135,6 +136,18 @@ iterations to be 10000 by using the option `-i 10000`. On a AMD Ryzen 5 3600 CPU
 machine, it takes about 3-4 mins to finish the program. Once it is finished,
 several ouput files are generated.
 
+#### Example 3
+
+A `.hic` format example:
+
+```bash
+HippsDimes mydata.hic test \
+  --input-type cmap --input-format hic \
+  --selection chr1:31000000-41000000,chr1:31000000-41000000 \
+  --binsize 25000 --norm KR --unit BP \
+  -i 10000 -e 10
+```
+
 #### Additional examples
 
 The jupyter notebook `walkthrough.ipynb` in this repository contains additional examples. 
@@ -196,7 +209,7 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   map (`dmap`). This option is required.
 - `--input-format`: The format of the input file. If the type of input file is
   Hi-C contact map, then the script support `cooler` format Hi-C contact map
-  file or a pure text based file. In the text based file, each line corresponds
+  file, `.hic` format, or a pure text based file. In the text based file, each line corresponds
   to the row of the contact map. If the type of input file is mean distance map,
   then the script only support the text based file in which each line represents
   the row of the mean distance map. This option is required.

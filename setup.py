@@ -12,6 +12,7 @@ setup(
             'Tqdm',
             'Cooler',
             'rich',
+            'hic-straw'
             ],
         entry_points='''
             [console_scripts]

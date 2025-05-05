@@ -20,7 +20,8 @@ import scipy.interpolate
 import scipy.optimize
 import pandas as pd
 import click
-import cooler
+import cooler # for cooler format of HiC data
+import hicstraw # for .hic format of HiC data
 from rich import print
 from rich.panel import Panel
 from rich.text import Text
@@ -28,6 +29,7 @@ from rich.console import Console
 from rich.table import Table
 #from tqdm.rich import trange, tqdm
 from tqdm import trange, tqdm
+
 
 console = Console()
 
@@ -602,7 +604,7 @@ class Dynamics:
             self.N = input.shape[0]
 
     def generateXYZ(self, force_positive_definite = False):
-        self.xyz = a2xyz(self.A, force_positive_definite = force_positive_definite)
+        self.xyz = a2xyz_sample(self.A, force_positive_definite = force_positive_definite)[0]
         self.modes = self.eigvector.T @ self.xyz
 
     def initialize(self, dt, zeta, beta):
@@ -687,7 +689,7 @@ class Dynamics:
 @click.option('-k', '--connectivity-matrix', type=str, required=False, help='Use provided connectivity matrix as initialization. Useful when restart from previous run')
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
-@click.option('-s', '--selection', type=str, help='specify which chromosome or region to run the model on if the input file is Hi-C data in cooler format. Accept any valid options for [fetch] method in cooler.Cooler.matrix() selector')
+@click.option('-s', '--selection', type=str, required=False, help='For cooler: any valid selector for cooler.Cooler.matrix().fetch(), e.g. "chr1" or "chr1::start-end". For .hic: use "chr1:start1-end1,chr2:start2-end2"')
 @click.option('-m', '--method', type=click.Choice(['IS', 'GD', 'DI'], case_sensitive=True), default='IS', show_default=True, help='specify the method. IS: Iterative Scaling. GD: Gradient Descent. DI: Direct Inversion. When using\
     Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.')
 @click.option('-l', '--lamd', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Specify the weight for the regularization.')
@@ -697,7 +699,10 @@ class Dynamics:
     If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. \
         It should be a very small value (such as 1e-8) when using gradient descent optimization')
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
-@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler'], case_sensitive=False), help='Specify the format of the input. Support pure text format or cooler Hi-C contact map')
+@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
+@click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
+@click.option('--norm', 'hic_norm', type=str, default='KR', show_default=True, help='Normalization for .hic: KR, VC, NONE')
+@click.option('--unit', 'hic_unit', type=click.Choice(['BP', 'FRAG'], case_sensitive=False), default='BP', show_default=True, help='Unit for .hic: BP or FRAG')
 @click.option('--log', is_flag=True, default=False, show_default=True, help='Write a log file')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
@@ -705,7 +710,7 @@ class Dynamics:
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, \
-    input_format, log, no_xyzs, ignore_missing_data, balance, not_normalize, enforce_nonnegative_connectivity_matrix):
+    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, enforce_nonnegative_connectivity_matrix):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
     INPUT: Specify the path to the input file\n
@@ -732,12 +737,6 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
             console.print("Reading contact map from file")
             if input_format == 'text':
                 cmap = np.loadtxt(input)
-                if ignore_missing_data:
-                    dmap_target = cmap2dmap_missing_data(
-                        cmap, alpha, not_normalize)
-                else:
-                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
             elif input_format == 'cooler':
                 cmap = cooler.Cooler(input)
                 console.print("Cooler file read completed")
@@ -747,13 +746,57 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                     console.print("The matrix size is {}x{}. It is too large. Please use smaller matrix".format(
                         len(cmap), len(cmap)))
                     exit(0)
-                if ignore_missing_data:
-                    dmap_target = cmap2dmap_missing_data(
-                        cmap, alpha, not_normalize)
-                else:
-                    dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-        
+            elif input_format == 'hic':
+                # parse selection for .hic
+                if not selection or ',' not in selection:
+                    console.print("[red]For .hic input, --selection must be 'chr1:start1-end1,chr2:start2-end2'")
+                    sys.exit(1)
+                hic = hicstraw.HiCFile(input)
+                console.print(".hic format file read completed")
+                reg1, reg2 = selection.split(',')
+                # strip optional 'chr' prefix for hicstraw
+                raw_chrom1, r1 = reg1.split(':')
+                raw_chrom2, r2 = reg2.split(':')
+                chrom1 = raw_chrom1[3:] if raw_chrom1.lower().startswith('chr') else raw_chrom1
+                chrom2 = raw_chrom2[3:] if raw_chrom2.lower().startswith('chr') else raw_chrom2
+                start1, end1 = map(int, r1.split('-'))
+                start2, end2 = map(int, r2.split('-'))
+                
+                # try efficient random-access API
+                matrix_obj = hic.getMatrixZoomData(chrom1, chrom2, 'observed', hic_norm, hic_unit, binsize)
+                console.print("Fetched hic matrix zoom data")
+                try:
+                    cmap = matrix_obj.getRecordsAsMatrix(start1, end1, start2, end2)
+                except Exception:
+                    # fallback manual assembly via straw
+                    console.print("Falling back to manual assembly via hicstraw.straw()...")
+                    region1 = f"{chrom1}:{start1}:{end1}"
+                    region2 = f"{chrom2}:{start2}:{end2}"
+                    result = hicstraw.straw('observed', hic_norm, input,
+                                             region1, region2,
+                                             hic_unit, binsize)
+                    # compute dimensions
+                    dim1 = (end1 - start1) // binsize + 1
+                    dim2 = (end2 - start2) // binsize + 1
+                    cmap = np.zeros((dim1, dim2))
+                    # build map
+                    for pt in tqdm(result, desc="Building hic contact map"):
+                        i = int((pt.binX - start1) / binsize)
+                        j = int((pt.binY - start2) / binsize)
+                        cmap[i, j] = pt.counts
+                    cmap = cmap + cmap.T
+
+                console.print(".hic contact map extracted")
+            
+            if ignore_missing_data:
+                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
+            else:
+                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+        else:
+            console.print("[red]Invalid input_type")
+            sys.exit(1)
+
         if connectivity_matrix is not None:
             connectivity_matrix = np.loadtxt(connectivity_matrix)
             console.print("Load the provided connectivity matrix and will use it as initialization.")
@@ -775,7 +818,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                   "{}".format("Contact Map" if input_type ==
                               'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"),
                   "{}".format("Text" if input_format ==
-                              'text' else "Cooler File" if input_format == 'cooler' else "Unknown"),
+                              'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"),
                   "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method ==
                               'GD' else "Direct Inversion" if method == 'DI' else "Unknown"),
                   "{}".format("{}x{}".format(

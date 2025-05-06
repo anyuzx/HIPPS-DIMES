@@ -338,6 +338,84 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
 
     return np.array(positions)
 
+def a2xyz_sample_fixed_end(A,
+                           xyz_start,
+                           xyz_end,
+                           ensemble=1,
+                           force_positive_definite=False):
+    """
+    Generate `ensemble` random polymer configurations from connectivity matrix A,
+    *with* bead 0 fixed at xyz_start and bead n−1 fixed at xyz_end.
+
+    Parameters
+    ----------
+    A : (n,n) array_like
+        Connectivity matrix.
+    xyz_start : length‐3 array_like
+        3D coordinates for bead 0.
+    xyz_end : length‐3 array_like
+        3D coordinates for bead n−1.
+    ensemble : int, optional
+        Number of independent samples to draw.  Default is 1.
+    force_positive_definite : bool, optional
+
+    Returns
+    -------
+    positions : (ensemble, n, 3) ndarray
+        Sampled bead coordinates.
+    """
+    # 1) Make a copy of A and add a large negative diag‐entry at the two ends
+    A_copy = np.array(A, dtype=float)
+    w = -1e5
+    A_copy[0,   0]   += w
+    A_copy[-1, -1]   += w
+
+    # 2) Eigendecompose
+    evals, evecs = scipy.linalg.eigh(A_copy)
+
+    # 3) Build the “temp” = 1/λ  matrix, clean up infinities and huge values
+    temp = 1.0 / evals[:, None]
+    temp[np.isinf(temp)] = 0.0
+    TOL = 1e8
+    temp[np.abs(temp) >= TOL] = 0.0
+    if force_positive_definite:
+        temp[temp > 0.0] = 0.0
+
+    # 4) Compute end‐to‐end distance and linear “b” term
+    xyz_start = np.array(xyz_start, float)
+    xyz_end   = np.array(xyz_end,   float)
+    L = np.linalg.norm(xyz_end - xyz_start)
+
+    n = len(evals)
+    b = np.zeros((n, 3))
+    b[-1, 2] = -w * L   # ensures the last bead sits at z=L in the internal frame
+
+    # 5) Sample `ensemble` positions
+    out = []
+    for _ in range(ensemble):
+        # random + shift in eigenspace
+        coeff = np.sqrt(-temp) * np.random.randn(n, 3)
+        shift = (evecs.T @ b) * (-1.0 / evals)[:, None]
+        xyz   = evecs @ (coeff + shift)
+
+        # 6) Hard‐set the two ends along the z‐axis. This is not strictly necessary if w is large enough.
+        xyz[0]    = [0.0, 0.0, 0.0]
+        xyz[-1]   = [0.0, 0.0, L]
+
+        # 7) xyz now is oriented in such way that the first monomer is at [0,0,0] and last is at [0,0,L]
+        #    Hence we need to rotate+translate into the user‐specified endpoints
+        ref1 = np.array([[0,0,0], [0,0,L]])
+        ref2 = np.vstack((xyz_start, xyz_end))
+        _, R = optimal_rotate(ref1, ref2, return_rotation=True)
+
+        c1 = ref1.mean(axis=0)
+        c2 = ref2.mean(axis=0)
+        xyz = (xyz - c1) @ R + c2
+
+        out.append(xyz)
+    out = np.array(out)
+
+    return out
 
 def interpolate_missing(matrix):
     matrix_copy = np.copy(matrix)

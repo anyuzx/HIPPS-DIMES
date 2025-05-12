@@ -54,11 +54,10 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
 
     Returns
     -------
-    output : np.ndarray
+    two_point_acf : np.ndarray
         2D array. First column is time `t`, second column is the ACF values at each time.
-    msd : np.ndarray
-        1D array of the same length as `t`, giving the mean-square displacement 
-        inferred from the ACF. This is returned as a second column alongside `t`.
+    two_point_msd : np.ndarray
+        2D array. First column is time `t`, second column is the two-point MSD at each time
     """
     eigvalue, eigvector = scipy.linalg.eigh(a)
     eigvalue_inv = 1.0 / eigvalue

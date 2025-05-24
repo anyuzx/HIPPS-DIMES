@@ -254,6 +254,26 @@ def compute_all_tau_integral(a):
 
     return tau1, tau2
 
+def compute_relaxation_time_ij(a, i, j):
+    # a is the connectivity matrix
+    eigval, eigvec = np.linalg.eigh(-a) # note negative sign
+
+    lam = eigval[1:] # ignore the p=0 mode
+    vec = eigvec[:, 1:] # remove the eigvector corresponding to p=0 mode
+
+    v_pi = vec[i, :] # V_{p,i}
+    v_pj = vec[j, :] # V_{p,j}
+    E_ps = (v_pi - v_pj) ** 2
+
+    sum0 = np.sum(E_ps / lam)
+    sum1 = np.sum(E_ps / lam ** 2.)
+    sum2 = np.sum(E_ps / lam ** 3.)
+
+    tau1 = sum1 / sum0
+    tau2 = sum2 / sum1
+    return tau1, tau2
+
+
 def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
     """
     Update variable x for a Ornstein Uhlenbeck process

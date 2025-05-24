@@ -133,6 +133,76 @@ def compute_m1_general_theory(i, t, a, zeta=1.0):
     msd = np.column_stack((t, msd_data))
     return msd
 
+def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
+    """
+    Vectorized computation of 1/e relaxation times tau_{ij} for all pairs (i,j)
+    by sampling the normalized correlator on a time grid and linearly interpolating
+    to find when G_norm(t) crosses 1/e.
+
+    Parameters
+    ----------
+    K : (n×n) ndarray
+        Connectivity matrix (symmetric).
+    num_t : int
+        Number of time points in the log-spaced grid.
+    factor : float
+        Multiplier for raising the upper time bound relative to the slowest-mode time.
+    tol : float
+        Small epsilon to avoid division by zero.
+
+    Returns
+    -------
+    tau_mat : (n×n) ndarray
+        Approximate 1/e times tau_{ij} for each pair (i,j).
+    """
+    n = K.shape[0]
+    # 1. Diagonalize -K
+    eigvals, eigvecs = np.linalg.eigh(-K)
+    lam = eigvals[1:]          # drop zero mode
+    vec = eigvecs[:, 1:]       # shape (n, m)
+
+    # 2. Precompute E_p(i,j) and W0 = E_p/λ_p
+    diff = vec[:, None, :] - vec[None, :, :]  # shape (n,n,m)
+    E = diff * diff                           # (n,n,m)
+    W0 = E / lam[None, None, :]               # (n,n,m)
+
+    # 3. Time grid
+    t_min = 0.0
+    tau_slow = 1.0 / np.min(lam)
+    t_max = factor * tau_slow
+    t_vals = np.logspace(np.log10(t_min + 1e-12), np.log10(t_max), num_t)
+
+    # 4. Compute normalized G for each t
+    denom = np.sum(W0, axis=2)               # (n,n)
+    G_norm = np.empty((n, n, num_t))
+    for idx, t in enumerate(tqdm(t_vals)):
+        num = np.sum(W0 * np.exp(-lam[None, None, :] * t), axis=2)
+        G_norm[..., idx] = num / (denom + tol)
+
+    # 5. Find first crossing index where G_norm <= 1/e
+    mask = G_norm <= (1.0 / np.e)
+    # argmax returns first True along axis=2, but if no True, gives 0.
+    cross_idx = mask.argmax(axis=2)
+
+    # 6. Interpolate tau
+    tau_mat = np.zeros((n, n))
+    # handle crossing at first bin or no crossing
+    tau_mat[mask[..., 0] == False] = t_vals[0]  # if first bin is true or none
+    for i in range(n):
+        for j in range(n):
+            k = cross_idx[i, j]
+            if k == 0:
+                tau_mat[i, j] = t_vals[0]
+            else:
+                t0, t1 = t_vals[k-1], t_vals[k]
+                G0, G1 = G_norm[i, j, k-1], G_norm[i, j, k]
+                # linear interpolation
+                tau_mat[i, j] = t0 + (1/np.e - G0) * (t1 - t0) / (G1 - G0 + tol)
+                
+    np.fill_diagonal(tau_mat, 0.0)
+    
+    return tau_mat
+
 def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
     """
     Update variable x for a Ornstein Uhlenbeck process

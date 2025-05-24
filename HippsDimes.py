@@ -203,6 +203,57 @@ def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     
     return tau_mat
 
+def compute_all_tau_integral(a):
+    """
+    Compute first‐moment (tau1) and second‐moment (tau2) relaxation times
+    for all pairs of loci (i, j) in a single vectorized pass.
+
+    Parameters
+    ----------
+    K : (n×n) ndarray
+        Connectivity matrix.
+
+    Returns
+    -------
+    tau1 : (n×n) ndarray
+        First‐moment relaxation time for each pair (i,j): 
+          tau1[i,j] = (∑_p E_p(i,j)/λ_p^2) / (∑_p E_p(i,j)/λ_p)
+    tau2 : (n×n) ndarray
+        Second‐moment relaxation time ratio for each pair (i,j):
+          tau2[i,j] = (∑_p E_p(i,j)/λ_p^3) / (∑_p E_p(i,j)/λ_p^2)
+    """
+    # 1) Eigendecompose -a
+    eigvals, eigvecs = np.linalg.eigh(-a)  # eigvals ascending
+
+    # 2) Discard the zero‐mode
+    lam = eigvals[1:]             # shape (n-1,)
+    vec = eigvecs[:, 1:]          # shape (n,   n-1)
+
+    # 3) Precompute inverse powers
+    inv_lam  = 1.0 / lam           # 1/λ_p
+    inv_lam2 = inv_lam ** 2        # 1/λ_p^2
+    inv_lam3 = inv_lam ** 3        # 1/λ_p^3
+
+    # 4) Compute squared differences for all (i,j,p)
+    #    E[i,j,p] = (V[p,i] - V[p,j])^2
+    #    vec shape -> (n, m), we want (n, n, m)
+    diff = vec[:, None, :] - vec[None, :, :]  # shape (n, n, m)
+    E = diff * diff                          # squared differences
+
+    # 5) Weighted sums via tensordot over the mode axis
+    sum0 = np.tensordot(E, inv_lam,  axes=([2], [0]))  # ∑ E/λ_p
+    sum1 = np.tensordot(E, inv_lam2, axes=([2], [0]))  # ∑ E/λ_p^2
+    sum2 = np.tensordot(E, inv_lam3, axes=([2], [0]))  # ∑ E/λ_p^3
+
+    # 6) Form relaxation times
+    tau1 = sum1 / sum0  # first moment
+    tau2 = sum2 / sum1  # second moment ratio
+
+    np.fill_diagonal(tau1, 0.0)
+    np.fill_diagonal(tau2, 0.0)
+
+    return tau1, tau2
+
 def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
     """
     Update variable x for a Ornstein Uhlenbeck process

@@ -254,7 +254,7 @@ def compute_all_tau_integral(a):
 
     return tau1, tau2
 
-def compute_relaxation_time_ij(a, i, j):
+def compute_tau_ij_integral(a, i, j):
     # a is the connectivity matrix
     eigval, eigvec = np.linalg.eigh(-a) # note negative sign
 
@@ -272,6 +272,59 @@ def compute_relaxation_time_ij(a, i, j):
     tau1 = sum1 / sum0
     tau2 = sum2 / sum1
     return tau1, tau2
+
+def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
+    """
+    Compute the 1/e relaxation time tau_{ij} for loci i and j,
+    solving G2_ij(tau) / G2_ij(0) = 1/e.
+
+    Parameters
+    ----------
+    K : (n×n) ndarray
+        Connectivity (spring‐constant) matrix (symmetric, positive semidef.).
+    i, j : int
+        Indices of the two loci (0 <= i, j < n, i != j).
+    t_min : float, optional
+        Lower bracket for root‐finding (default: 0.0).
+    t_max : float or None, optional
+        Upper bracket for root‐finding. If None, set to `factor`×slowest‐mode time.
+    factor : float, optional
+        Multiplier for slowest‐mode timescale to set t_max (default: 10).
+    tol : float, optional
+        Root‐finder convergence tolerance.
+
+    Returns
+    -------
+    tau_ij : float
+        Relaxation time τ_{ij} where the normalized two‐point correlator equals 1/e.
+    """
+    # 1) Diagonalize -K so eigenvalues are positive
+    eigvals, eigvecs = np.linalg.eigh(-K)
+    
+    # 2) Discard the zero (COM) mode
+    lam = eigvals[1:]                # shape (n-1,)
+    vec = eigvecs[:, 1:]             # shape (n,   n-1)
+
+    # 3) Mode-difference squared for pair (i,j)
+    v_i = vec[i, :]                  # (n-1,)
+    v_j = vec[j, :]                  # (n-1,)
+    E_p = (v_i - v_j)**2             # (n-1,)
+
+    # 4) Compute G2_ij(0)
+    G2_0 = np.sum(E_p / lam)
+
+    # 5) Normalized correlator function
+    def G_norm(t):
+        return np.sum((E_p / lam) * np.exp(-lam * t)) / G2_0
+
+    # 6) Determine t_max if needed
+    if t_max is None:
+        tau_slow = 1.0 / np.min(lam)
+        t_max = factor * tau_slow
+
+    # 7) Root‐find G_norm(t) = 1/e
+    tau_ij = scipy.optimize.brentq(lambda t: G_norm(t) - 1/np.e, t_min, t_max, xtol=tol)
+    return tau_ij
 
 
 def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):

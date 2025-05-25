@@ -88,7 +88,7 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
 
     return two_point_acf, two_point_msd
 
-def compute_m1_general_theory(i, t, a, zeta=1.0):
+def compute_m1_i(i, t, a, zeta=1.0):
     """
     Compute the single-monomer mean-square displacement (MSD) for monomer i, 
     given the connectivity matrix `a`.
@@ -132,6 +132,63 @@ def compute_m1_general_theory(i, t, a, zeta=1.0):
     # Combine time with MSD
     msd = np.column_stack((t, msd_data))
     return msd
+
+def compute_m1_all(a, t, zeta=1.0):
+    """
+    Compute the single-monomer mean-square displacement (MSD) for all monomers, 
+    given the connectivity matrix `a`. This is a vectorized version that computes
+    MSD for all monomers simultaneously.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    t : array_like
+        A 1D array of time points (lag times).
+    zeta : float
+        Friction coefficient. Default is 1.0.
+
+    Returns
+    -------
+    msd_all : np.ndarray
+        3D array of shape (n, len(t), 2) where:
+        - First dimension is the monomer index
+        - Second dimension is the time points
+        - Third dimension contains [time, msd] pairs
+    """
+    n = a.shape[0]
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue_inv = 1.0 / eigvalue
+
+    # Filter out infinities
+    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+
+    # Expand time dimension for broadcast
+    t_reshaped = np.expand_dims(t, axis=-1)
+    tau_p = - zeta / eigvalue
+    decay_factor = np.exp(-t_reshaped / tau_p)
+
+    # Compute for all monomers simultaneously
+    # Shape: (n, len(t), n-1) where n-1 is number of modes
+    vpi_squared = np.power(eigvector, 2)  # Shape: (n, n-1)
+    
+    # Time-dependent part for all monomers
+    # Shape: (n, len(t))
+    res = 3.0 * np.sum(vpi_squared[:, None, :] * decay_factor[None, :, :] * normal_modes_square_mean[None, None, :], axis=-1)
+    
+    # Equilibrium radius for all monomers
+    # Shape: (n,)
+    r2_eq = 3.0 * np.sum(vpi_squared * normal_modes_square_mean[None, :], axis=-1)
+    
+    # MSD for all monomers
+    # Shape: (n, len(t))
+    msd_data = 2.0 * (r2_eq[:, None] - res)
+
+    # Combine time with MSD for all monomers
+    # Shape: (n, len(t), 2)
+    msd_all = np.stack([np.tile(t, (n, 1)), msd_data], axis=-1)
+    
+    return msd_all
 
 def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     """
@@ -566,7 +623,7 @@ def a2xyz_sample_fixed_end(A,
     # 2) Eigendecompose
     evals, evecs = scipy.linalg.eigh(A_copy)
 
-    # 3) Build the “temp” = 1/λ  matrix, clean up infinities and huge values
+    # 3) Build the "temp" = 1/λ matrix, clean up infinities and huge values
     temp = 1.0 / evals[:, None]
     temp[np.isinf(temp)] = 0.0
     TOL = 1e8
@@ -574,7 +631,7 @@ def a2xyz_sample_fixed_end(A,
     if force_positive_definite:
         temp[temp > 0.0] = 0.0
 
-    # 4) Compute end‐to‐end distance and linear “b” term
+    # 4) Compute end‐to‐end distance and linear "b" term
     xyz_start = np.array(xyz_start, float)
     xyz_end   = np.array(xyz_end,   float)
     L = np.linalg.norm(xyz_end - xyz_start)

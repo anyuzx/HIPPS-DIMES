@@ -768,6 +768,49 @@ If the results are not good enough, please try iterative scaling or gradient des
         return True
     else:
         return False
+    
+def subnetwork_schur(A, keep, tol=1e-12):
+    """
+    Compute the marginal (Schur‐complement) connectivity matrix on a subset of nodes.
+
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Full connectivity (precision) matrix.
+    keep : 1D array_like of ints
+        Indices of the nodes to keep (subset S).
+    tol : float, optional
+        Threshold below which A_CC is considered singular; uses pinv accordingly.
+
+    Returns
+    -------
+    A_eff : (len(keep), len(keep)) ndarray
+        Effective connectivity on the subset S,
+        A_eff = A_SS - A_SC @ inv(A_CC) @ A_CS
+    """
+    A = np.asarray(A)
+    keep = np.asarray(keep, dtype=int)
+    N = A.shape[0]
+    # build complement indices
+    all_idx = np.arange(N)
+    remove = np.setdiff1d(all_idx, keep)
+
+    # partition
+    A_SS = A[np.ix_(keep, keep)]
+    A_SC = A[np.ix_(keep, remove)]
+    A_CC = A[np.ix_(remove, remove)]
+    A_CS = A_SC.T
+
+    # invert (or pseudo-invert) A_CC
+    # if it's near-singular, pinv is safer
+    if np.linalg.cond(A_CC) > 1/tol:
+        A_CC_inv = np.linalg.pinv(A_CC, rcond=tol)
+    else:
+        A_CC_inv = np.linalg.inv(A_CC)
+
+    # Schur complement
+    A_eff = A_SS - A_SC @ A_CC_inv @ A_CS
+    return A_eff
 
 #------------------------------------------------------------------#
 

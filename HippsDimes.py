@@ -190,6 +190,82 @@ def compute_m1_all(a, t, zeta=1.0):
     
     return msd_all
 
+def compute_mcom_segment(i, j, t, a, zeta=1.0):
+    """
+    Compute the center-of-mass mean-square displacement (MSD) for the subsegment
+    running from monomer i to monomer j (inclusive), given the connectivity matrix `a`.
+
+    Parameters
+    ----------
+    i : int
+        Index of the first monomer in the segment.
+    j : int
+        Index of the last monomer in the segment (inclusive).
+    t : array_like
+        A 1D array of time points (lag times).
+    a : np.ndarray
+        The connectivity (or "Laplacian") matrix for the polymer/chain.
+    zeta : float
+        Friction coefficient. Default is 1.0.
+
+    Returns
+    -------
+    msd : np.ndarray
+        2D array. First column is time `t`, second column is the MSD for the 
+        segment COM at those times.
+    """
+    # Input validation
+    if not isinstance(i, int) or not isinstance(j, int):
+        raise TypeError("i and j must be integers")
+    if i < 0 or j < i or j >= a.shape[0]:
+        raise ValueError("Invalid indices i and j")
+    if not isinstance(zeta, (int, float)) or zeta <= 0:
+        raise ValueError("zeta must be a positive number")
+    if not isinstance(t, np.ndarray) or t.ndim != 1:
+        raise ValueError("t must be a 1D array")
+    if not isinstance(a, np.ndarray) or a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("a must be a square matrix")
+
+    # Eigen-decomposition of the connectivity matrix
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    
+    # Discard zero mode
+    eigvalue = eigvalue[1:]
+    eigvector = eigvector[:, 1:]
+    
+    # Compute weights W_p = (1/(j-i+1)) * sum_{m=i}^j V_{p,m}
+    segment_length = j - i + 1
+    W = np.sum(eigvector[i:j+1, :], axis=0) / segment_length
+
+    # 1/eigvalue, filtering infinities (zero-mode)
+    eigvalue_inv = 1.0 / eigvalue
+    normal_modes_square_mean = -np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+
+    # Expand time dimension for broadcasting
+    t_reshaped = np.expand_dims(t, axis=-1)  # shape (len(t), 1)
+
+    # Relaxation times tau_p
+    tau_p = -zeta / eigvalue
+    tau_p = np.nan_to_num(tau_p, posinf=0.0, neginf=0.0)  # Handle potential division by zero
+
+    # Decay factor for each mode at each time
+    decay_factor = np.exp(-t_reshaped / tau_p)  # shape (len(t), n)
+
+    # Compute time-dependent part: 3 * sum(W^2 * decay_factor * normal_modes_square_mean, over modes)
+    # Ensure proper broadcasting by reshaping W
+    W_reshaped = W[None, :]  # shape (1, n)
+    res = 3.0 * np.sum((W_reshaped**2) * decay_factor * normal_modes_square_mean, axis=-1)
+
+    # Equilibrium variance of COM: 3 * sum(W^2 * normal_modes_square_mean)
+    r2_eq = 3.0 * np.sum((W**2) * normal_modes_square_mean)
+
+    # MSD = 2 * (r2_eq - res)
+    msd_data = 2.0 * (r2_eq - res)
+
+    # Combine time with MSD into a 2D array
+    msd = np.column_stack((t, msd_data))
+    return msd
+
 def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     """
     Vectorized computation of 1/e relaxation times tau_{ij} for all pairs (i,j)

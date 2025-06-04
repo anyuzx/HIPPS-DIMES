@@ -133,60 +133,93 @@ def compute_m1_i(i, t, a, zeta=1.0):
     msd = np.column_stack((t, msd_data))
     return msd
 
-def compute_m1_all(a, t, zeta=1.0):
+def compute_m1_all(a, t, zeta=1.0, tol=1e-12):
     """
-    Compute the single-monomer mean-square displacement (MSD) for all monomers, 
-    given the connectivity matrix `a`. This is a vectorized version that computes
-    MSD for all monomers simultaneously.
+    Compute single-monomer MSD for all monomers, including center-of-mass motion.
+    The zero (CM) mode is handled analytically rather than dropped.
 
     Parameters
     ----------
-    a : np.ndarray
-        The connectivity (or "Laplacian") matrix for the polymer/chain.
-    t : array_like
-        A 1D array of time points (lag times).
-    zeta : float
+    a : np.ndarray, shape (n, n)
+        Connectivity (Laplacian) matrix, negative-semidefinite.
+    t : array_like, shape (len(t),)
+        A 1D array of lag times.
+    zeta : float, optional
         Friction coefficient. Default is 1.0.
+    tol : float, optional
+        Tolerance to identify zero eigenvalue. Default is 1e-12.
 
     Returns
     -------
-    msd_all : np.ndarray
-        3D array of shape (n, len(t), 2) where:
-        - First dimension is the monomer index
-        - Second dimension is the time points
-        - Third dimension contains [time, msd] pairs
+    msd_all : np.ndarray, shape (n, len(t), 2)
+        For each monomer m=0..n-1 and each lag time t[k], returns [t[k], MSD(m, t[k])].
+        MSD includes both internal motion and center-of-mass diffusion.
+
+    Notes
+    -----
+    The MSD calculation includes:
+    1. Internal motion from non-zero modes
+    2. Center-of-mass diffusion (6D_cm*t where D_cm = 1/(zeta*n))
     """
+    # Input validation
+    if not isinstance(a, np.ndarray) or a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("a must be a square matrix")
+    if not isinstance(zeta, (int, float)) or zeta <= 0:
+        raise ValueError("zeta must be a positive number")
+    if not isinstance(tol, (int, float)) or tol <= 0:
+        raise ValueError("tol must be a positive number")
+    
+    t = np.asarray(t)
+    if t.ndim != 1:
+        raise ValueError("t must be a 1D array")
+    
     n = a.shape[0]
-    eigvalue, eigvector = scipy.linalg.eigh(a)
-    eigvalue_inv = 1.0 / eigvalue
-
-    # Filter out infinities
-    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
-
-    # Expand time dimension for broadcast
-    t_reshaped = np.expand_dims(t, axis=-1)
-    tau_p = - zeta / eigvalue
-    decay_factor = np.exp(-t_reshaped / tau_p)
-
-    # Compute for all monomers simultaneously
-    # Shape: (n, len(t), n-1) where n-1 is number of modes
-    vpi_squared = np.power(eigvector, 2)  # Shape: (n, n-1)
     
-    # Time-dependent part for all monomers
-    # Shape: (n, len(t))
-    res = 3.0 * np.sum(vpi_squared[:, None, :] * decay_factor[None, :, :] * normal_modes_square_mean[None, None, :], axis=-1)
+    # Eigendecomposition
+    lam, V = scipy.linalg.eigh(a)  # lam: eigenvalues, V: eigenvectors
     
-    # Equilibrium radius for all monomers
-    # Shape: (n,)
-    r2_eq = 3.0 * np.sum(vpi_squared * normal_modes_square_mean[None, :], axis=-1)
+    # Find zero (CM) mode
+    p0 = np.argmin(np.abs(lam))
+    if abs(lam[p0]) > tol:
+        raise ValueError("No near-zero eigenvalue found; CM mode missing or 'a' not Rouse-type")
     
-    # MSD for all monomers
-    # Shape: (n, len(t))
-    msd_data = 2.0 * (r2_eq[:, None] - res)
-
-    # Combine time with MSD for all monomers
-    # Shape: (n, len(t), 2)
-    msd_all = np.stack([np.tile(t, (n, 1)), msd_data], axis=-1)
+    # Get non-zero modes
+    p_nz = np.arange(n) != p0  # boolean mask for non-zero modes
+    lam_nz = lam[p_nz]        # non-zero eigenvalues
+    V_nz = V[:, p_nz]         # non-zero eigenvectors
+    
+    # Compute equilibrium variances for non-zero modes
+    sigma2_nz = -1.0 / lam_nz  # shape (n-1,)
+    
+    # Compute relaxation times
+    tau = np.full(n, np.inf)   # initialize all to infinity
+    tau[p_nz] = -zeta / lam_nz # set non-zero mode times
+    
+    # Compute decay factors for non-zero modes
+    t_col = t[:, None]         # shape (len(t), 1)
+    decay = np.exp(-t_col / tau[p_nz])  # shape (len(t), n-1)
+    
+    # Compute squared eigenvector components
+    V2 = V_nz**2               # shape (n, n-1)
+    
+    # Compute time-dependent part from non-zero modes
+    res = 3.0 * np.sum(
+        V2[:, None, :] * decay[None, :, :] * sigma2_nz[None, None, :],
+        axis=2
+    )  # shape (n, len(t))
+    
+    # Compute equilibrium variance for each monomer
+    r2_eq = 3.0 * np.sum(V2 * sigma2_nz[None, :], axis=1)  # shape (n,)
+    
+    # Compute center-of-mass diffusion
+    D_cm = 1.0 / (zeta * n)
+    msd_cm = 6.0 * D_cm * t    # shape (len(t),)
+    
+    # Total MSD = CM diffusion + internal motion
+    msd = msd_cm[None, :] + 2.0 * (r2_eq[:, None] - res)  # shape (n, len(t))
+    
+    # Stack time with MSD
+    msd_all = np.stack([np.tile(t, (n, 1)), msd], axis=-1)
     
     return msd_all
 
@@ -671,7 +704,7 @@ def a2xyz_sample_fixed_end(A,
                            force_positive_definite=False):
     """
     Generate `ensemble` random polymer configurations from connectivity matrix A,
-    *with* bead 0 fixed at xyz_start and bead n−1 fixed at xyz_end.
+    *with* bead 0 fixed at xyz_start and bead n−1 fixed at xyz_end.
 
     Parameters
     ----------

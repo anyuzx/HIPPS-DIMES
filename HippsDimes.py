@@ -527,6 +527,30 @@ def construct_connectivity_matrix_rouse(n, k):
     A[n-1, n-1] = -k
     return A
 
+def construct_connectivity_matrix_random(n, m, k):
+    """
+    Generate random connected rouse chain
+    n: the length of chain
+    k: the spring constant
+    m: number of non-consecutive bonds
+    """
+    A = construct_connectivity_matrix_rouse(n, k)
+    pairs = list(itertools.combinations(np.arange(n), 2))
+
+    for pair in pairs:
+        if pair[1] - pair[0] == 1:
+            pairs.remove(pair)
+    pairs_indices = np.random.choice(len(pairs), m, replace=False)
+
+    for idx in pairs_indices:
+        pair = pairs[idx]
+        A[pair[0], pair[1]] = k
+        A[pair[1], pair[0]] = k
+
+    for i in range(A.shape[0]):
+        A[i, i] = -np.sum(np.delete(A[:, i], i))
+
+    return A
 
 def sigma2omega(sigma_mtx):
     """

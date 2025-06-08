@@ -9,6 +9,7 @@ https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 
 import sys
 import warnings
+import itertools
 
 if not sys.warnoptions:
     warnings.simplefilter("ignore")

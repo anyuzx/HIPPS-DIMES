@@ -20,13 +20,17 @@ First, download this repository using,
 
 ```bash
 git clone https://github.com/anyuzx/HIPPS-DIMES
+cd HIPPS-DIMES
 ```
 
-Next, go into the repository folder and install required packages using the command below,
-
+#### Using pip
 ```bash
-cd HIPPS-DIMES
-pip3 install --editable .
+pip install -e .
+```
+
+#### Using UV
+```bash
+uv pip install -e .
 ```
 
 This command will install the required packages, and install the script as a
@@ -36,14 +40,16 @@ https://pip.pypa.io/en/stable/installing/). Once installed, you can call
 `HippsDimes` directly in the terminal to run the script. The packages installed
 are:
 
-- `Click`
-- `Numpy`
-- `Scipy`
-- `Pandas`
-- `Tqdm`
-- `Cooler`
-- `rich`
-- `hic-straw`
+The package requires:
+- Python 3.8+
+- `Click` - Command line interface
+- `Numpy` - Numerical computing
+- `Scipy` - Scientific computing
+- `Pandas` - Data manipulation
+- `Tqdm` - Progress bars
+- `Cooler` - Hi-C data format support
+- `Rich` - Rich terminal output
+- `hic-straw` - .hic format support
 
 ## How to use
 

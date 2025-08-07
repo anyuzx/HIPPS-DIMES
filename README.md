@@ -33,12 +33,10 @@ pip install -e .
 uv pip install -e .
 ```
 
-This command will install the required packages, and install the script as a
-python module. Note that you need to install `pip3` if it is not installed
-already (Follow the instruction on the official document here
-https://pip.pypa.io/en/stable/installing/). Once installed, you can call
-`HippsDimes` directly in the terminal to run the script. The packages installed
-are:
+This command will install the required packages from `pyproject.toml`, and install the script as a
+python module. Once installed, you can call `HippsDimes` directly in the terminal to run the script.
+
+### Dependencies
 
 The package requires:
 - Python 3.8+

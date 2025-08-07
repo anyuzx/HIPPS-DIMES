@@ -9,7 +9,7 @@ description = "Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Struc
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Guang Shi", email = "guang.shi@utexas.edu"}
+    {name = "Guang Shi", email = "guang.shi.gs@gmail.com"}
 ]
 keywords = ["bioinformatics", "chromatin", "3d-structure", "hi-c", "polymer-physics"]
 classifiers = [
@@ -29,11 +29,11 @@ classifiers = [
 requires-python = ">=3.8"
 dependencies = [
     "click>=8.0.0",
-    "numpy>=1.20.0",
+    "numpy>=2.0.0",
     "scipy>=1.7.0",
     "pandas>=1.3.0",
     "tqdm>=4.60.0",
-    "cooler>=0.8.0",
+    "cooler>=0.10.3",
     "rich>=10.0.0",
     "hic-straw>=1.0.0",
 ]
@@ -63,7 +63,7 @@ Repository = "https://github.com/anyuzx/HIPPS-DIMES.git"
 HippsDimes = "HippsDimes:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["HippsDimes.py"]
+packages = ["."]
 
 [tool.black]
 line-length = 88

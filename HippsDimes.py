@@ -493,6 +493,129 @@ def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
     tau_ij = scipy.optimize.brentq(lambda t: G_norm(t) - 1/np.e, t_min, t_max, xtol=tol)
     return tau_ij
 
+# ------------------------------
+# Modulus
+def compute_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the storage and loss moduli for a polymer system.
+    The zero eigenvalue (corresponding to center-of-mass motion) is excluded.
+    
+    Parameters
+    ----------
+    a : np.ndarray
+        Connectivity matrix of the polymer system
+    freq : np.ndarray
+        Array of frequencies at which to compute the moduli
+    zeta : float, optional
+        Friction coefficient, by default 1.0
+        
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Two 2D arrays containing:
+        - First array: frequencies and storage modulus
+        - Second array: frequencies and loss modulus
+        
+    Raises
+    ------
+    ValueError
+        If input matrices have incorrect shapes or types
+    """
+    # Input validation
+    if not isinstance(a, np.ndarray) or a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("a must be a square matrix")
+    if not isinstance(freq, np.ndarray) or freq.ndim != 1:
+        raise ValueError("freq must be a 1D array")
+    if not isinstance(zeta, (int, float)) or zeta <= 0:
+        raise ValueError("zeta must be a positive number")
+        
+    # Compute eigenvalues and eigenvectors
+    eigvalue, eigvector = scipy.linalg.eigh(a)
+    
+    # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
+    eigvalue = eigvalue[:-1]             # Shape: (n_modes,)
+    eigvector = eigvector[:, :-1]        # Shape: (n_monomers, n_modes)
+    
+    # Compute normal modes and relaxation times
+    eigvalue_inv = 1.0 / eigvalue
+    normal_modes_square_mean = -eigvalue_inv
+    tau_p = -zeta / eigvalue
+    
+    # Reshape frequency for broadcasting
+    freq_reshaped = np.expand_dims(freq, axis=-1)
+    
+    # Compute moduli
+    storage_modulus = np.sum((freq_reshaped * tau_p) ** 2. / 
+                           (1 + (freq_reshaped * tau_p) ** 2), axis=-1)
+    loss_modulus = np.sum((freq_reshaped * tau_p) / 
+                         (1 + (freq_reshaped * tau_p) ** 2), axis=-1)
+    
+    return (np.column_stack((freq, storage_modulus)), 
+            np.column_stack((freq, loss_modulus)))
+
+def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute the storage and loss moduli for individual monomers in a polymer system.
+    The zero eigenvalue (corresponding to center-of-mass motion) is excluded.
+    
+    Parameters
+    ----------
+    a : np.ndarray
+        Connectivity matrix of the polymer system
+    freq : np.ndarray
+        Array of frequencies at which to compute the moduli
+    zeta : float, optional
+        Friction coefficient, by default 1.0
+        
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        Three arrays containing:
+        - First array: frequencies
+        - Second array: storage modulus for each monomer (shape: n_freqs × n_monomers)
+        - Third array: loss modulus for each monomer (shape: n_freqs × n_monomers)
+        
+    Raises
+    ------
+    ValueError
+        If input matrices have incorrect shapes or types
+    """
+    # Input validation
+    if not isinstance(a, np.ndarray) or a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("a must be a square matrix")
+    if not isinstance(freq, np.ndarray) or freq.ndim != 1:
+        raise ValueError("freq must be a 1D array")
+    if not isinstance(zeta, (int, float)) or zeta <= 0:
+        raise ValueError("zeta must be a positive number")
+    
+    # Compute eigenvalues and eigenvectors
+    eigvals, eigvecs = scipy.linalg.eigh(a)
+    
+    # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
+    eigvals = eigvals[:-1]             # Shape: (n_modes,)
+    eigvecs = eigvecs[:, :-1]          # Shape: (n_monomers, n_modes)
+    
+    # Relaxation times τ_p
+    tau_p = -zeta / eigvals           # Shape: (n_modes,)
+    
+    # Compute ωτ_p for all frequencies and modes
+    omega_tau_p = freq[:, np.newaxis] * tau_p[np.newaxis, :]  # Shape: (n_freqs, n_modes)
+    
+    # Calculate f_p(ω) and g_p(ω)
+    f_p = (omega_tau_p ** 2) / (1 + omega_tau_p ** 2)         # For storage modulus
+    g_p = omega_tau_p / (1 + omega_tau_p ** 2)                # For loss modulus
+    
+    # Square of eigenvector components (V_{pi}^2)
+    eigvecs_squared = eigvecs ** 2                            # Shape: (n_monomers, n_modes)
+    
+    # Compute G'_i(ω) and G''_i(ω) using Einstein summation
+    G_prime_i = np.einsum('mp,fp->fm', eigvecs_squared, f_p)        # Shape: (n_freqs, n_monomers)
+    G_double_prime_i = np.einsum('mp,fp->fm', eigvecs_squared, g_p) # Shape: (n_freqs, n_monomers)
+    
+    return freq, G_prime_i, G_double_prime_i
+
+# ------------------------------
+
 
 def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
     """

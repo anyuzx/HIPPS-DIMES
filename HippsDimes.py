@@ -1070,6 +1070,76 @@ def subnetwork_schur(A, keep, tol=1e-12):
     A_eff = A_SS - A_SC @ A_CC_inv @ A_CS
     return A_eff
 
+def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilon=1e-12, return_scales=False):
+    """
+    Symmetric neighbor balancing:
+
+        s_i = 0.5 * (C[i, i-1] + C[i, i+1])         (with edge handling)
+        C_bal[i, j] = C[i, j] / sqrt(s_i * s_j)
+
+    Parameters
+    ----------
+    C : (N, N) array_like
+        Contact matrix (typically symmetric, nonnegative).
+    circular : bool, default False
+        If True, treat indices modulo N (wrap-around neighbors).
+        If False, use the single available neighbor at the ends:
+            s_0   = C[0, 1]
+            s_{N-1} = C[N-1, N-2]
+    epsilon : float, default 1e-12
+        Stabilizer to avoid division by zero and negative scales.
+    return_scales : bool, default False
+        If True, also return the vector s of per-locus neighbor averages.
+
+    Returns
+    -------
+    C_bal : (N, N) ndarray
+        Neighbor-balanced matrix using your symmetric formula.
+    s : (N,) ndarray, optional
+        The per-locus neighbor averages used (only if return_scales=True).
+    """
+    X = np.asarray(C, dtype=float)
+    if X.ndim != 2 or X.shape[0] != X.shape[1]:
+        raise ValueError("C must be a square 2D array")
+
+    n = X.shape[0]
+    idx = np.arange(n)
+
+    if circular:
+        left_idx  = (idx - 1) % n
+        right_idx = (idx + 1) % n
+        s = 0.5 * (X[idx, left_idx] + X[idx, right_idx])
+    else:
+        s = np.empty(n, dtype=float)
+        # interior i=1..n-2 have both neighbors
+        if n >= 3:
+            s[1:-1] = 0.5 * (np.diag(X, k=-1)[:-1] + np.diag(X, k=1)[1:])
+        elif n == 2:
+            # degenerate case: each has only one neighbor
+            s[:] = np.array([X[0,1], X[1,0]])
+        else:
+            # n == 1: no neighbors; avoid divide by zero by using epsilon
+            s[:] = epsilon
+
+        # edges: use the single available neighbor
+        if n >= 2:
+            s[0]   = X[0, 1]
+            s[-1]  = X[-1, -2]
+
+    # Guard against zeros/negatives
+    s = np.maximum(s, epsilon)
+    scale = np.sqrt(s)
+
+    C_bal = X / (scale[:, None] * scale[None, :])
+
+    # multiply by the mean value of diagonal contacts if not_normalize is set to be True
+    if not_normalize:
+        C_bal = np.nanmean(np.diag(C)) * C_bal
+
+    if return_scales:
+        return C_bal, s
+    return C_bal
+
 #------------------------------------------------------------------#
 
 
@@ -1336,10 +1406,11 @@ class Dynamics:
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='Turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
+@click.option('--neighbor-balance', is_flag=True, default=False, show_default=True, help='Turn on neighbor balancing for contact map. Only effective when input_type == cmap. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. see Paggi, Zhang 2025 for method details')
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, \
-    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, enforce_nonnegative_connectivity_matrix):
+    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix):
     """
     Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
     INPUT: Specify the path to the input file\n
@@ -1417,6 +1488,11 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
 
                 console.print(".hic contact map extracted")
             
+            # Apply neighbor balancing if requested
+            if neighbor_balance:
+                console.print("Applying neighbor balancing to contact map (see Paggi, Zhang 2025)")
+                cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
+            
             if ignore_missing_data:
                 dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             else:
@@ -1442,6 +1518,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     table.add_column("Regularization", no_wrap=False)
     table.add_column("Ignore Missing Data", no_wrap=False)
     table.add_column("Matrix Balancing", no_wrap=False)
+    table.add_column("Neighbor Balancing", no_wrap=False)
     table.add_column("Matrix Normalization", no_wrap=False)
     table.add_row(input,
                   "{}".format("Contact Map" if input_type ==
@@ -1458,6 +1535,8 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
                   "{}".format("Yes" if ignore_missing_data else "No"),
                   "{}".format("Yes" if balance else "No" if (
                       balance is False and input_format == 'cooler') else "N/A"),
+                  "{}".format("Yes" if neighbor_balance else "No" if (
+                      neighbor_balance is False and input_type == 'cmap') else "N/A"),
                   "{}".format("No" if (not_normalize is True and input_type == 'cmap') else "Yes" if (
                       not_normalize is False and input_type == 'cmap') else "N/A")
                   )

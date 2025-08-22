@@ -295,7 +295,7 @@ Trajectory data can be accessed through `model.traj`. It is a `TxNx3` numpy arra
 
 ## How to cite
 
-If you used this program in your publication, please cite the following
+If you used this program in your publication, please cite from the following
 reference:
 
 * _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional

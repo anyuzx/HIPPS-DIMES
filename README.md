@@ -6,7 +6,7 @@ The theory and applications of this method can be found in our work published:
 
 - Shi, Guang, and D. Thirumalai. "From Hi-C contact map to three-dimensional organization of interphase human chromosomes." Physical Review X 11.1 (2021): 011051. [link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)
 - Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants." Nature Communications 14.1 (2023): 1150. [link](https://www.nature.com/articles/s41467-023-36412-4)
-- Shi, Guang, Sucheol Shin, and D. Thirumalai. "Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes." bioRxiv (2025): 2025-01. [link](https://www.biorxiv.org/content/10.1101/2025.01.16.633484v1)
+- Shi, Guang, Sucheol Shin, and D. Thirumalai. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advances 11.31 (2025): eadx1763. [link](https://www.science.org/doi/full/10.1126/sciadv.adx1763)
 
 # Documentation
 
@@ -304,7 +304,7 @@ Organization of Interphase Human Chromosomes." Physical Review X 11.1
 
 * _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._
 
-* _Shi, G., Shin, Sucheol, and Thirumalai, D. Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes. bioRxiv (2025)._
+* _Shi, G., Shin, S., and Thirumalai, D. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advances 11.31 (2025): eadx1763._
 
 [^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
 Organization of Interphase Human Chromosomes." Physical Review X 11.1

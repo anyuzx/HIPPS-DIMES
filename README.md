@@ -1,12 +1,18 @@
 ![Imgur](https://i.imgur.com/tYexBe2.jpeg)
 
-This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generate an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares. 
+This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generates an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares.
+
+In addition to reconstructing static 3D chromatin structures, the code now includes **dynamics prediction functionality** based on polymer physics and the Ornstein–Uhlenbeck process. This allows you to simulate time-dependent properties such as autocorrelation functions (ACF) and mean-square displacement (MSD) of individual loci, providing insights into the dynamic behavior of chromatin. 
 
 The theory and applications of this method can be found in our work published:
 
 - Shi, Guang, and D. Thirumalai. "From Hi-C contact map to three-dimensional organization of interphase human chromosomes." Physical Review X 11.1 (2021): 011051. [link](https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051)
 - Shi, Guang, and D. Thirumalai. "A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants." Nature Communications 14.1 (2023): 1150. [link](https://www.nature.com/articles/s41467-023-36412-4)
 - Shi, Guang, Sucheol Shin, and D. Thirumalai. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advances 11.31 (2025): eadx1763. [link](https://www.science.org/doi/full/10.1126/sciadv.adx1763)
+
+Other applications of this method can be found in:
+- Dey, Atreya, et al. "Structural changes in chromosomes driven by multiple condensin motors during mitosis." Cell Reports 42.4 (2023).
+- Jeong, Davin, et al. "Structural basis for the preservation of a subset of topologically associating domains in interphase chromosomes upon cohesin depletion." Elife 12 (2024): RP88564.
 
 # Documentation
 
@@ -63,7 +69,7 @@ HippsDimes --help
 
 ### Input files
 
-This script accept input files in two formats. If the input file is a Hi-C
+This script accepts input files in two formats. If the input file is a Hi-C
 contact map, it can be in either `.cool` format (see https://github.com/open2c/cooler for details of the `cooler` library), '.hic' format (via hicstraw) or pure text format. If the
 input file is a mean spatial distance map, the script only accepts a pure text
 formatted file. The text format for a matrix is the following: each row of the
@@ -104,7 +110,7 @@ HippsDimes hic_example.cool test --input-type cmap --input-format cooler -s chr7
 
 This command tells the script to load the Hi-C contact map `hic_example.cool`
 and perform the iterative scaling algorithm. The argument `test` instructs the
-files names of output files start with `test_`. Option `--input-type cmap`
+file names of output files start with `test_`. Option `--input-type cmap`
 specifies that the input file is a contact map. Option `--input-format cooler`
 specifies that the input file is a `cooler` file. Option `-s chr7:10M-15M`
 specifies that the algorithm is performed on the region 10 Mbps - 15 Mbps on
@@ -120,10 +126,10 @@ and can be viewed using `VMD` or other compatible visualization softwares.
 #### Example 2
 
 In this example, we use Hi-C contact map for HeLa cell line Chromosome 14 at
-time point of 12 hours after the release from prometaphase. For the purpase of
+time point of 12 hours after the release from prometaphase. For the purpose of
 demonstration, you can download the Hi-C `.cool` file from
 [here](https://drive.google.com/file/d/1j-zfDUP6LOZGCxz9uA3LaMI372ct1cU_/view?usp=sharing)
-which is origannly retreived from
+which is originally retrieved from
 [GEO repository](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102740)
 under accession number GSE102740. **Before you download, note that the file has
 size of about 655 Mb**. Once downloaded, execute the following command,
@@ -138,7 +144,7 @@ cooler file `GSM3909682_TB-HiC-Dpn-R2-T12_hg19.1000.multires.cool` and its group
 perform the HIPPS/DIMES algorithm. In this example, we change the number of
 iterations to be 10000 by using the option `-i 10000`. On a AMD Ryzen 5 3600 CPU
 machine, it takes about 3-4 mins to finish the program. Once it is finished,
-several ouput files are generated.
+several output files are generated.
 
 #### Example 3
 
@@ -158,91 +164,64 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
 
 > In particular, if you would like see an example of direct application of HIPPS-DIMES on imaging data, please go through the notebook.
 
-### Explanantion of the arguments and options
+### Explanation of the arguments and options
 
-#### Argument
+#### Arguments
 
 - `INPUT`: File path for the input file. The input file can be a Hi-C contact
   map or a mean spatial distance map as measured in Multiplexed FISH experiment.
-- `OUTPUT_PREFIX`: Prefix for outputfiles. For instance, if one specify it to be
+- `OUTPUT_PREFIX`: Prefix for output files. For instance, if one specifies it to be
   `TEST`, then all the output files will start with `TEST_`.
 
 #### Options
 
-- `-k` or `--connectivity-matrix`: Provide the path to the existing connectivity
+- `-k, --connectivity-matrix`: Provide the path to the existing connectivity
   matrix one would like to use as initialization. Useful if restarting using the
   result from the previous run.
-- `-e` or `--ensemble`: Number of individual conformations to be generated. This
+- `-e, --ensemble`: Number of individual conformations to be generated. This
   script will generate an ensemble of structures consistent with the input Hi-C
   contact map or the mean spatial distance map. Each individual conformations
   are different from each other. You can specify how many such individual
-  conformations you want to generate. If not specified, its value would be 1000.
-- `-a` or `--alpha`: Value of the contact map to distance map conversion
-  exponent. If the input file is Hi-C contact map, the method first convert the
+  conformations you want to generate. Default: 1000.
+- `-a, --alpha`: Value of the contact map to distance map conversion
+  exponent. If the input file is Hi-C contact map, the method first converts the
   contact map to a mean spatial distance map. The equation of the conversion is
-  d*{ij} ~ c*{ij}^{1/\alpha}. The default value of \alpha is 4.0, estimated in
-  this work 10.1126/science.aaf8084. If not specified, its value is 4.0
-- `-s` or `--selection`: Specify chromosome or region. This option is only
-  required and works when the input file has
-  [`cooler`](https://github.com/open2c/cooler) format. The value of this option
-  is passed to the `cooler.Cooler.matrix().fetch()` method. For details, please
-  refer their
-  [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
-- `-m` or `--method`: Specify the method used for optimization. The default
-  method is Iterative Scaling (IS). Currently, Iterative scaling (IS), gradient
-  descent (GD) and direct inversion (DI) are supported.
-- `-l` or `--lamd`: Specify the weight for L1 or L2 regularization. Default
-  value is zero, meaning no regularization. Regularization is typically used to
-  avoid over-fitting.
-- `-r` or `--reg`: Specify the type of regularization. Default is L2
-  regularization. L1 and L2 are supported.
-- `-i` or `--iteration`: The method relies on iterative scaling to find the
-  optimal parameters. This option specifies the number of iterations. Generally,
-  the more iterations the model runs, the better results are. However, the
-  convergence of the model slow down when iteration increases. For larger size
-  of contact map and the mean distance map, the number of iterations needed to
-  good convergence is larger. If not specified, its default value is 10000.
-- `-r` or `--learning-rate`: Learning rate. This hyperparameter controls the
-  speed of convergence. If its value is too small, then convergence is very
-  slow. If its value is too large, the program may never converge. Typically,
-  learning rate can be set to be 1-30 if use Iterative scaling method. It should
-  be a very small value (such as 1e-8) when using gradient descent optimization.
-  The default value is 10.0.
-- `--input-type`: The type of the input file. To use the script, the type must
-  be specified. The method can work on both the contact map (`cmap`) or distance
-  map (`dmap`). This option is required.
-- `--input-format`: The format of the input file. If the type of input file is
-  Hi-C contact map, then the script support `cooler` format Hi-C contact map
-  file, `.hic` format, or a pure text based file. In the text based file, each line corresponds
-  to the row of the contact map. If the type of input file is mean distance map,
-  then the script only support the text based file in which each line represents
-  the row of the mean distance map. This option is required.
-- `--log`: A log file will be written if this option is specified. The log file
-  contains the data of cost versus iteration.
+  d_{ij} ~ c_{ij}^{1/\alpha}. The default value of α is 4.0, estimated in
+  this work 10.1126/science.aaf8084. Default: 4.0.
+- `-s, --selection`: Specify chromosome or region. This option is required
+  when the input file has `cooler` or `.hic` format. For cooler files, the value is passed to the `cooler.Cooler.matrix().fetch()` method. For .hic files, use format "chr1:start1-end1,chr2:start2-end2". For details on cooler selectors, please refer to their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
+- `-m, --method`: Specify the method used for optimization. Options: IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
+- `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. Regularization is typically used to avoid over-fitting.
+- `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
+- `-i, --iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slows down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed for good convergence is larger. Default: 10000.
+- `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
+- `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
+- `--input-format`: The format of the input file. Options: `text`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, or a pure text-based file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only supports the text-based file in which each line represents the row of the mean distance map. This option is required.
+- `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
+- `--norm`: Normalization for .hic format. Options: KR, VC, NONE. Default: KR.
+- `--unit`: Unit for .hic format. Options: BP, FRAG. Default: BP.
+- `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
 - `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
-- `--ignore-missing-data`: Turn on this argument will let the program ignore the
-  missing elements or infinite number in the contact map or distance map
-- `--balance`: Turn on the matrix balance for contact map. Only effective when
-  `input_type == cmap` and `input_format == cooler`
-- `--not-normalize`: Turn off the auto normalization of the contact map. Only
-  effective when `input_type == cmap`
-- `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring
-  constants" to be nonnegative
+- `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite numbers in the contact map or distance map.
+- `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`.
+- `--neighbor-balance`: Turn on neighbor balancing for contact map. Only effective when `input_type == cmap`. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. See Paggi, Zhang 2025 for method details.
+- `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
+- `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
 
 ### Tips for using this program
 
 - In practice, a contact map or distance map larger than 5000x5000 is too large
   for the method to converge. If your matrix is larger than 5000x5000, I suggest
   that you can either perform a coarse-graining on the original matrix to get a
-  smaller on,e or you can use the model on a subregion of the contact
+  smaller one, or you can use the model on a subregion of the contact
   map/distance map.
 - When using the Iterative Scaling algorithm (with argument `-m IS`) for optimization, the learning rate typically can
   be set between 1 and 50. You should try different values to see what is the
   optimal learning rate to use. For gradient descent (with argument `-m GD`), the learning rate
   typically needed to be set very small, such as 1e-7.
-- If your contact map/distance map has a lot of missing or zero entries. You can
+- If your contact map/distance map has a lot of missing or zero entries, you can
   try to turn on the option `--ignore-missing-data`. This will tell the code not
-  to consider these missing entries. Thus giving you a less biased result
+  to consider these missing entries, thus giving you a less biased result.
 - Whenever the contact map is fed, the program will normalize the contact
   map by dividing it by its maximum value entry. If you don't want this, you can
   set the option `--not-normalize`. This will tell the code not to normalize the
@@ -256,7 +235,7 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   structure to be consistent with it.
 
 ### Use it as a package
-The python file `HippsDimes.py` can also used as a package. You can do `import` as,
+The python file `HippsDimes.py` can also be used as a package. You can do `import` as,
 
 ```python
 import HippsDimes as HD
@@ -276,7 +255,7 @@ In addition to reconstructing static 3D chromatin structures from contact or dis
 ### New Functions
 - **`compute_acf_general_theory(i, j, t, a, zeta=1.0)`**: This function numerically computes the time-dependent autocorrelation function between monomers *i* and *j* using the connectivity matrix `a`. In addition to the ACF, it returns the corresponding two-point MSD for each time point in the provided time array `t`.
 
-- **`compute_m1_general_theory(i, t, a, zeta=1.0)`**: This function computes the single-loci mean-square displacement (MSD) for the i-th monomer as a function of time. The output is a 2D array where the first column is time and the second is the MSD of the monomer.
+- **`compute_m1_i(i, t, a, zeta=1.0)`**: This function computes the single-loci mean-square displacement (MSD) for the i-th monomer as a function of time. The output is a 2D array where the first column is time and the second is the MSD of the monomer.
 
 ### New `Dynamics` Class
 The new `Dynamics` class encapsulates the routines needed to run dynamic simulations provided the connectivity matrix `a`.

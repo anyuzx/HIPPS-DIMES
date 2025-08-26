@@ -1420,9 +1420,10 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     console = Console()
 
     title = Text.assemble(("HIPPS-DIMES", "bold yellow"),
-                          ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction\n",
+                          ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction - Dynamics Prediction\n",
                           "1. Shi, Guang, and D. Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.\n",
-                          "2. Shi, Guang, and D. Thirumalai. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nature Communications 14.1 (2023): 1150.")
+                          "2. Shi, Guang, and D. Thirumalai. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nature Communications 14.1 (2023): 1150.\n",
+                          "3. Shi, Guang, Shin, Sucheol, and D. Thirumalai. Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes. Science Advances 11.31 (2025): eadx1763.")
     console.print(Panel(title))
 
     with console.status("[bold green]System initialization...") as status:

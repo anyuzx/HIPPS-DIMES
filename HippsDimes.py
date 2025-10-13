@@ -20,6 +20,7 @@ import scipy
 import scipy.linalg
 import scipy.interpolate
 import scipy.optimize
+import scipy.spatial.distance
 import pandas as pd
 import click
 import cooler # for cooler format of HiC data
@@ -618,27 +619,99 @@ def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) 
 # ------------------------------
 
 
-def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, b = 0.0, method='euler-maruyama'):
+def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, method='euler-maruyama', update_zero_modes=True, zero_mode_tol=1e-10):
     """
     Update variable x for a Ornstein Uhlenbeck process
-    x: Array for value of x of each degree of freedom
-    k: Array for spring constant for each degree of freedom
-    zeta: one value
-    beta: one value
+    
+    Parameters
+    ----------
+    x : Array for value of x of each degree of freedom
+    dt : time step
+    k : Array for spring constant for each degree of freedom (eigenvalues)
+    zeta : friction coefficient
+    beta : inverse temperature
+    force_projection : V^T * B (force projected onto eigenmodes)
+    method : 'euler-maruyama' or 'exact'
+    update_zero_modes : if True, zero eigenvalue modes (COM) will diffuse; if False, COM is fixed
+    zero_mode_tol : tolerance for identifying zero eigenvalue modes
+    
+    Notes
+    -----
+    For OU process: dX = θ(μ - X)dt + σ dW
+    where θ = k/ζ, σ = sqrt(2/(ζβ))
+    
+    With external force, the long-term mean μ satisfies:
+    θμ = force_projection/ζ
+    => μ = force_projection/(ζθ) = force_projection/k
+    
+    For Euler-Maruyama: directly use force_projection/ζ
+    For exact method: calculate μ = force_projection/k (handling division by zero for zero modes)
+    
+    **Unstable Modes (k < 0):**
+    When the connectivity matrix has positive eigenvalues (e.g., from broken bonds), k < 0.
+    This causes exponential growth in those modes. The 'euler-maruyama' method handles this
+    with controlled growth over small time steps. The 'exact' method should NOT be used with
+    unstable modes as the noise term becomes undefined.
     """
     if isinstance(x, np.ndarray):
         rand_noise = np.random.randn(*x.shape)
     else:
         rand_noise = np.random.randn()
     
+    theta = k[:, np.newaxis] / zeta
+    
+    # Identify zero eigenvalue modes and unstable modes (k < 0)
+    zero_modes_mask = np.abs(k) < zero_mode_tol
+    unstable_modes_mask = k < -zero_mode_tol  # Negative spring constants = positive eigenvalues
+    
+    # Warn if using exact method with unstable modes
+    if method == 'exact' and np.any(unstable_modes_mask):
+        import warnings
+        warnings.warn(
+            f"Detected {np.sum(unstable_modes_mask)} unstable modes (positive eigenvalues) with 'exact' method. "
+            "This may cause numerical issues. Consider using 'euler-maruyama' method for systems with broken bonds.",
+            RuntimeWarning
+        )
+
     if method == 'euler-maruyama':
-        dx = - k[:, np.newaxis] * x * dt / zeta + b * dt / zeta + np.sqrt(2.0 * dt / (zeta * beta)) * rand_noise
+        # Euler-Maruyama: dX = -θX dt + (force_projection/ζ) dt + σ dW
+        # No need to divide by eigenvalue here
+        dx = - theta * x * dt + force_projection * dt / zeta + np.sqrt(2.0 * dt / (zeta * beta)) * rand_noise
         x_new = x + dx
     elif method == 'exact':
-        theta = k[:, np.newaxis] / zeta
         sigma = (2. / (zeta * beta)) ** .5
         mu = np.exp(- theta * dt)
-        x_new = x * mu + np.nan_to_num(np.sqrt((sigma ** 2. / (2. * theta)) * (1. - mu ** 2.))) * rand_noise
+        
+        # Calculate force drift term: μ(1 - e^(-θt))
+        # For non-zero modes: μ = force_projection/k, so drift = (force_projection/k)(1 - e^(-θt))
+        # For zero modes (k ≈ 0): drift reduces to (force_projection/ζ) * t
+        if isinstance(force_projection, np.ndarray):
+            force_drift = np.zeros_like(force_projection)
+            non_zero_mask = ~zero_modes_mask
+            
+            # Non-zero modes: (force_projection/k)(1 - e^(-θt))
+            force_drift[non_zero_mask] = (force_projection[non_zero_mask] / k[non_zero_mask, np.newaxis]) * (1 - mu[non_zero_mask])
+            
+            # Zero modes: (force_projection/ζ) * t
+            force_drift[zero_modes_mask] = (force_projection[zero_modes_mask] / zeta) * dt
+        else:
+            # force_projection is a scalar (0.0)
+            force_drift = 0.0
+        
+        # For non-zero modes: use standard Gillespie formula
+        noise_term = np.sqrt((sigma ** 2. / (2. * theta)) * (1. - mu ** 2.))
+        
+        # For zero modes (theta ≈ 0): analytically reduce to sqrt(sigma^2 * t)
+        # As theta -> 0: sqrt(sigma^2/(2*theta) * (1 - exp(-2*theta*t))) -> sqrt(sigma^2 * t)
+        noise_term[zero_modes_mask] = sigma * np.sqrt(dt)
+        
+        # Gillespie exact solution: X(t) = X(0)e^(-θt) + μ(1-e^(-θt)) + noise
+        x_new = x * mu + force_drift + noise_term * rand_noise
+    
+    # If user wants to fix COM (zero modes), set them to their initial values
+    if not update_zero_modes:
+        x_new[zero_modes_mask] = x[zero_modes_mask]
+    
     return x_new
 
 def construct_connectivity_matrix_rouse(n, k):
@@ -734,6 +807,146 @@ def a2dmap_theory(A, force_positive_definite=False):
     return dmap
 
 
+def a2dmap_theory_with_force_applied(A, force):
+    """
+    Return mean distance map given the connectivity matrix A with external force applied.
+    
+    This function computes the theoretical mean distance map when the polymer is under
+    constant external force. The equilibrium positions shift due to the force, and the
+    distance map reflects both this shift and thermal fluctuations.
+    
+    Theory:
+    -------
+    Without force: <(R_i - R_j)²> = Ω_ii + Ω_jj - 2Ω_ij, where Ω = -V * Λ^(-1) * V^T
+    
+    With force: Equilibrium positions shift by R_eq = A^(-1) * F = V * (V^T * F) / Λ
+    The mean squared distance becomes:
+    <(R_i - R_j)²> = (R_eq,i - R_eq,j)² + (Ω_ii + Ω_jj - 2Ω_ij)
+                   = equilibrium shift² + thermal fluctuations
+    
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Connectivity matrix (Laplacian-like, should have one zero eigenvalue)
+    force : dict
+        Dictionary specifying the force with keys:
+        - 'loci': list of int, indices where force is applied
+        - 'amplitude': float, magnitude of force
+        - 'direction': (3,) array_like, direction of force (will be normalized)
+    
+    Returns
+    -------
+    dmap : (N, N) ndarray
+        Mean distance map with force applied. dmap[i,j] is the mean distance
+        between beads i and j under the applied force.
+    
+    Examples
+    --------
+    >>> A = construct_connectivity_matrix_rouse(10, 1.0)
+    >>> force = {'loci': [0], 'amplitude': 5.0, 'direction': [1, 0, 0]}
+    >>> dmap = a2dmap_theory_with_force_applied(A, force)
+    >>> print(dmap.shape)  # (10, 10)
+    
+    Notes
+    -----
+    - For zero eigenvalues (COM mode), we set 1/λ = 0
+    - The function returns the total mean distance including both equilibrium
+      displacement and thermal fluctuations
+    - The mean distance is computed as: <d> = 2*sqrt(2/π) * σ
+      where σ² is the mean squared distance
+    """
+    TOL = 1e8
+    
+    # Validate force input
+    if not isinstance(force, dict):
+        raise TypeError("force must be a dictionary with keys: 'loci', 'amplitude', 'direction'")
+    required_keys = ['loci', 'amplitude', 'direction']
+    for key in required_keys:
+        if key not in force:
+            raise ValueError(f"force dictionary must contain key: {key}")
+    
+    # Extract force parameters
+    force_loci = force['loci']
+    force_amplitude = force['amplitude']
+    force_direction = np.array(force['direction'])
+    
+    # Normalize force direction
+    force_direction = force_direction / np.linalg.norm(force_direction)
+    
+    # Create force vector B in real space
+    N = A.shape[0]
+    B = np.zeros((N, 3))
+    for locus in force_loci:
+        if locus < 0 or locus >= N:
+            raise ValueError(f"force locus {locus} is out of range [0, {N-1}]")
+        B[locus] = force_amplitude * force_direction
+    
+    # Eigendecomposition
+    eigvalue, eigvector = scipy.linalg.eigh(A)
+    
+    # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
+    temp = -1.0 / eigvalue
+    
+    # Handle infinities and large values (zero eigenvalue handling)
+    temp[temp == -np.inf] = 0.0
+    temp[temp == np.inf] = 0.0
+    temp[np.abs(temp) >= TOL] = 0.0
+    
+    # Compute Ω matrix for thermal fluctuations: Ω = V * diag(-1/λ) * V^T
+    Omega = eigvector @ np.diag(temp) @ eigvector.T
+    Omega_diag = np.diag(Omega)
+    
+    # Thermal fluctuation contribution (variance in each dimension)
+    # σ² (per dimension) = Ω_ii + Ω_jj - 2Ω_ij
+    # This represents <(R_i - R_j)²> / 3 for thermal fluctuations
+    sigma_thermal = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
+    
+    # Compute equilibrium displacement due to force
+    # R_eq = A^(-1) * B = V * (V^T * B) / λ
+    # For zero eigenvalues, set 1/λ = 0
+    temp_force = 1.0 / eigvalue
+    temp_force[np.abs(temp_force) >= TOL] = 0.0
+    temp_force[np.isinf(temp_force)] = 0.0
+    
+    # Project force to eigenmode space: V^T * B
+    force_projection = eigvector.T @ B  # Shape: (n_modes, 3)
+    
+    # Compute equilibrium positions: R_eq = V * (V^T * B / λ)
+    X_eq = force_projection * temp_force[:, np.newaxis]  # Shape: (n_modes, 3)
+    R_eq = eigvector @ X_eq  # Shape: (N, 3)
+    
+    # Equilibrium displacement contribution: (R_eq,i - R_eq,j)
+    # This is the shift in mean position due to force
+    delta_R_eq = R_eq[:, np.newaxis, :] - R_eq[np.newaxis, :, :]  # Shape: (N, N, 3)
+    
+    # For the distance calculation, we need to consider that:
+    # - Thermal fluctuations contribute equally in all 3 dimensions: 3*σ²_thermal
+    # - Equilibrium shift is a fixed vector displacement
+    # 
+    # The mean distance for a 3D Gaussian with mean μ and isotropic variance σ² in each dim:
+    # If there's also a displacement d, the distribution becomes non-central chi
+    # For simplicity, we compute the squared distance from equilibrium positions
+    # and add thermal fluctuation variance
+    
+    # Compute squared equilibrium separation
+    delta_R_eq_sq = np.sum(delta_R_eq**2, axis=2)  # Shape: (N, N)
+    
+    # Combined variance: thermal variance (3*σ²) + equilibrium shift²
+    # σ²_total (in each dimension) remains sigma_thermal²
+    # But equilibrium shift adds a constant offset to the distance
+    
+    # For mean distance with both effects:
+    # We use: <|r|> = 2*sqrt(2/π) * sqrt(σ²_thermal + (Δr_eq/sqrt(3))²)
+    # where the equilibrium shift is distributed across 3 dimensions
+    
+    sigma_combined = np.sqrt(sigma_thermal**2 + delta_R_eq_sq / 3.0)
+    
+    # Mean distance: <d> = 2*sqrt(2/π) * σ_combined
+    dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma_combined
+    
+    return dmap
+
+
 def dmap2cmap(dmap, rc):
     """
     Return contact map given the mean distance map and the contact threshold
@@ -762,7 +975,9 @@ def a2a(a, fill_negative=False):
     temp = np.copy(a)
     if fill_negative:
         temp[temp < 0.0] = 0.0
-    np.fill_diagonal(temp, - np.sum(a, axis=1) + a.diagonal())
+    # Zero out diagonal first, then set diagonal to negative sum of off-diagonal elements
+    np.fill_diagonal(temp, 0.0)
+    np.fill_diagonal(temp, -np.sum(temp, axis=1))
     return temp
 
 
@@ -844,6 +1059,110 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
                                 np.random.randn(len(eigvalue), 3))
         positions.append(position)
 
+    return np.array(positions)
+
+def a2xyz_sample_with_force_applied(A, force, ensemble=1):
+    """
+    Generate ensemble of 3D structures with external force applied.
+    
+    This function generates equilibrium structures under constant external force.
+    The equilibrium position is determined by: R_eq = A^(-1) * F
+    where A is the connectivity matrix and F is the force vector.
+    
+    In eigenmode space: X_eq = (V^T * F) / λ, where λ are eigenvalues.
+    For zero eigenvalues (COM mode), we set 1/λ = 0, which means the COM
+    drifts freely and we sample it from the thermal distribution.
+    
+    Parameters
+    ----------
+    A : (N, N) array_like
+        Connectivity matrix (Laplacian-like, should have one zero eigenvalue)
+    force : dict
+        Dictionary specifying the force with keys:
+        - 'loci': list of int, indices where force is applied
+        - 'amplitude': float, magnitude of force
+        - 'direction': (3,) array_like, direction of force (will be normalized)
+    ensemble : int, optional
+        Number of independent samples to generate. Default is 1.
+    
+    Returns
+    -------
+    positions : (ensemble, N, 3) ndarray
+        Sampled bead coordinates with force applied
+    
+    Examples
+    --------
+    >>> A = construct_connectivity_matrix_rouse(10)
+    >>> force = {'loci': [0], 'amplitude': 1.0, 'direction': [1, 0, 0]}
+    >>> positions = a2xyz_sample_with_force_applied(A, force, ensemble=100)
+    >>> print(positions.shape)  # (100, 10, 3)
+    
+    Notes
+    -----
+    - The connectivity matrix A should have exactly one zero eigenvalue (COM mode)
+    - Zero eigenvalues are identified and their inverse set to 0
+    - The equilibrium structure represents the balance between elastic forces
+      and external forces
+    - Thermal fluctuations around equilibrium are sampled using Gaussian noise
+    """
+    TOL = 1e8
+    
+    # Validate force input
+    if not isinstance(force, dict):
+        raise TypeError("force must be a dictionary with keys: 'loci', 'amplitude', 'direction'")
+    required_keys = ['loci', 'amplitude', 'direction']
+    for key in required_keys:
+        if key not in force:
+            raise ValueError(f"force dictionary must contain key: {key}")
+    
+    # Extract force parameters
+    force_loci = force['loci']
+    force_amplitude = force['amplitude']
+    force_direction = np.array(force['direction'])
+    
+    # Normalize force direction
+    force_direction = force_direction / np.linalg.norm(force_direction)
+    
+    # Create force vector B in real space
+    N = A.shape[0]
+    B = np.zeros((N, 3))
+    for locus in force_loci:
+        if locus < 0 or locus >= N:
+            raise ValueError(f"force locus {locus} is out of range [0, {N-1}]")
+        B[locus] = force_amplitude * force_direction
+    
+    # Eigendecomposition
+    eigvalue, eigvector = scipy.linalg.eigh(A)
+    
+    # Compute 1/eigenvalue, handling zero eigenvalues
+    temp = 1.0 / eigvalue[:, np.newaxis]
+    
+    # Replace infinities and large values with zero (zero eigenvalue handling)
+    temp[temp == -np.inf] = 0.0
+    temp[temp == np.inf] = 0.0
+    temp[np.abs(temp) >= TOL] = 0.0
+    
+    # Project force into eigenmode space: V^T * B
+    force_projection = eigvector.T @ B  # Shape: (n_modes, 3)
+    
+    # Compute equilibrium eigenmode values: X_eq = (V^T * B) / λ
+    # For zero eigenvalues, this will be zero (COM drifts freely)
+    X_eq = force_projection * temp  # Broadcasting: (n_modes, 3) * (n_modes, 1)
+    
+    # Sample thermal fluctuations around equilibrium
+    positions = []
+    for _ in range(ensemble):
+        # Random thermal fluctuations in eigenmode space
+        # The variance is proportional to sqrt(-1/λ) for each mode
+        thermal_fluctuations = np.sqrt(-temp) * np.random.randn(len(eigvalue), 3)
+        
+        # Total eigenmode values = equilibrium + fluctuations
+        X_total = X_eq + thermal_fluctuations
+        
+        # Transform back to real space: R = V * X
+        position = eigvector @ X_total
+        positions.append(position)
+    
     return np.array(positions)
 
 def a2xyz_sample_fixed_end(A,
@@ -1324,7 +1643,7 @@ class Dynamics:
         self.beta = beta
         self.dt = dt
 
-    def updateModes(self, method='euler-maruyama'):
+    def updateModes(self, method='euler-maruyama', force_projection=None, update_zero_modes=True):
         try:
             self.zeta
             self.beta
@@ -1333,18 +1652,25 @@ class Dynamics:
             sys.stdout.write('Please run initialize() first')
             sys.exit(0)
 
-        self.modes = Ornstein_Uhlenbeck_update(self.modes, self.dt, - self.eigvalue, self.zeta, self.beta, method=method)
-        # self.modes = OU.OU(self.modes, self.dt, - self.eigvalue, self.zeta, self.beta)
+        # Pass force_projection directly to Ornstein_Uhlenbeck_update
+        # The function will handle the conversion to long-term mean internally
+        if force_projection is None:
+            force_projection = 0.0
+            
+        self.modes = Ornstein_Uhlenbeck_update(self.modes, self.dt, - self.eigvalue, self.zeta, self.beta, 
+                                             force_projection=force_projection, method=method, 
+                                             update_zero_modes=update_zero_modes)
 
     def updateXYZ(self):
         self.xyz = self.eigvector @ self.modes
 
-    def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama'):
+    def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
         """
         T: number of timesteps
         update: update x,y,z positions every this many timesteps
         every: save x,y,z positions to the trajectory every this many timesteps
         initial_conformation: initial conformation of the simulation
+        update_zero_modes: if True, COM will diffuse; if False, COM is fixed at initial position
         """
         if not isinstance(T, int):
             sys.stdout.write('Number of steps should be an integer')
@@ -1374,12 +1700,260 @@ class Dynamics:
                 self.traj.append(self.xyz)
                 #sys.stdout.write('\rTimestep {}'.format(t+1))
                 #sys.stdout.flush()
-            self.updateModes(method=method)
+            self.updateModes(method=method, update_zero_modes=update_zero_modes)
+
+        self.traj = np.array(self.traj)
+
+    def run_with_force(self, T, force_loci, force_amplitude, force_direction, force_duration=None, 
+                      update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
+        """
+        Run dynamics simulation with applied forces following the correct derivation.
+        
+        The equation of motion is: ξ dR/dt = A*R + B + f
+        In eigenmodes: ξ dX/dt = Λ*X + V^T*B + f̃
+        
+        Parameters
+        ----------
+        T : int
+            Total number of timesteps
+        force_loci : list of int
+            Indices of loci where force is applied
+        force_amplitude : float
+            Magnitude of the force
+        force_direction : (3,) array_like
+            Direction vector of the force (will be normalized)
+        force_duration : int, optional
+            Number of timesteps to apply force. If None, force is applied for entire simulation.
+        update : int, optional
+            Update x,y,z positions every this many timesteps
+        every : int, optional
+            Save x,y,z positions to the trajectory every this many timesteps
+        initial_conformation : (N, 3) array_like, optional
+            Initial conformation of the simulation
+        method : str, optional
+            Integration method ('euler-maruyama' or 'exact')
+        update_zero_modes : bool, optional
+            If True, COM will diffuse; if False, COM is fixed at initial position
+        """
+        if not isinstance(T, int):
+            sys.stdout.write('Number of steps should be an integer')
+            sys.exit(0)
+
+        if initial_conformation is None:
+            try:
+                self.xyz
+                self.modes
+            except AttributeError:
+                self.generateXYZ()
+        else:
+            if initial_conformation.shape[0] != self.N:
+                sys.stdout.write('Number of particles is not correct')
+                sys.exit(0)
+            if initial_conformation.shape[1] != 3:
+                sys.stdout.write('The dimension should be three')
+                sys.exit(0)
+            self.xyz = initial_conformation
+
+        # Normalize force direction
+        force_direction = np.array(force_direction)
+        force_direction = force_direction / np.linalg.norm(force_direction)
+        
+        # Create force vector B (following correct derivation)
+        B = np.zeros((self.N, 3))
+        for locus in force_loci:
+            B[locus] = force_amplitude * force_direction
+
+        # Project force onto eigenmodes: V^T * B
+        # V is self.eigvector, so V^T is self.eigvector.T
+        # This transforms forces from real space to eigenmode space
+        force_projection = self.eigvector.T @ B  # Shape: (n_modes, 3)
+
+        # Allow COM to move naturally due to force
+        # No COM constraint applied
+        
+        self.traj = []
+        for t in tqdm(range(T)):
+            if t % update == 0:
+                self.updateXYZ()
+            if t % every == 0:
+                self.updateXYZ()
+                self.traj.append(self.xyz.copy())
+            
+            # Apply force only during specified duration
+            if force_duration is None or t < force_duration:
+                self.updateModes(method=method, force_projection=force_projection, update_zero_modes=update_zero_modes)
+            else:
+                self.updateModes(method=method, update_zero_modes=update_zero_modes)
 
         self.traj = np.array(self.traj)
 
     def reset(self):
         self.generateXYZ()
+
+    def run_breakable_bond(self, T, cutoff_distance, update=1, every=1, initial_conformation=None, 
+                          method='euler-maruyama', update_zero_modes=True):
+        """
+        Run dynamics simulation with breakable bonds based on distance cutoff.
+        
+        IMPORTANT: Nearest-neighbor bonds (i, i+1) representing the polymer backbone are 
+        NEVER broken, regardless of distance. Only non-local interactions (i, j where j > i+1) 
+        are subject to the distance cutoff.
+        
+        At each time step:
+        1. Check distances between all pairs of loci
+        2. For nearest-neighbor bonds (i, i+1): always keep original connectivity value
+        3. For non-local bonds (i, j where j > i+1):
+           - If distance < cutoff: bond is present (use original connectivity value)
+           - If distance >= cutoff: bond is broken (set connectivity to zero)
+        4. Update connectivity matrix and recompute eigenvalues/eigenvectors
+        5. Update normal modes using the new connectivity matrix
+        
+        Parameters
+        ----------
+        T : int
+            Total number of timesteps
+        cutoff_distance : float
+            Distance threshold for breaking non-local bonds. Only applies to bonds 
+            between non-adjacent loci (i, j where j > i+1).
+        update : int, optional
+            Update x,y,z positions every this many timesteps
+        every : int, optional
+            Save x,y,z positions to the trajectory every this many timesteps
+        initial_conformation : (N, 3) array_like, optional
+            Initial conformation of the simulation
+        method : str, optional
+            Integration method ('euler-maruyama' or 'exact'). Default is 'euler-maruyama'.
+            NOTE: 'euler-maruyama' is STRONGLY RECOMMENDED for breakable bond simulations,
+            as broken bonds can create positive eigenvalues (unstable modes). The euler-maruyama
+            method handles these gracefully with controlled growth over small timesteps, while
+            the 'exact' method may produce numerical issues.
+        update_zero_modes : bool, optional
+            If True, COM will diffuse; if False, COM is fixed at initial position
+        
+        Notes
+        -----
+        The input connectivity matrix is preserved and not modified. All calculations 
+        use an internal copy (A_internal). Nearest-neighbor bonds are never broken 
+        to maintain polymer chain connectivity.
+        
+        **Handling Positive Eigenvalues:**
+        When bonds break, the connectivity matrix may develop positive eigenvalues (unstable modes).
+        This causes exponential growth in those modes. However, the feedback mechanism (bonds
+        break as distances increase) combined with small timesteps prevents catastrophic blowup.
+        The system remains stable because: (1) growth is incremental with small dt, and (2) as
+        distances grow, more bonds break, reducing the instability.
+        """
+        if not isinstance(T, int):
+            sys.stdout.write('Number of steps should be an integer')
+            sys.exit(0)
+        if not isinstance(cutoff_distance, (int, float)) or cutoff_distance <= 0:
+            sys.stdout.write('Cutoff distance should be a positive number')
+            sys.exit(0)
+
+        # Store original connectivity matrix for reference (keep input unchanged)
+        self.A_original = np.copy(self.A)
+        
+        # Create internal connectivity matrix for breakable bond calculations
+        self.A_internal = np.copy(self.A)
+        
+        if initial_conformation is None:
+            try:
+                self.xyz
+                self.modes
+            except AttributeError:
+                self.generateXYZ()
+        else:
+            if initial_conformation.shape[0] != self.N:
+                sys.stdout.write('Number of particles is not correct')
+                sys.exit(0)
+            if initial_conformation.shape[1] != 3:
+                sys.stdout.write('The dimension should be three')
+                sys.exit(0)
+            self.xyz = initial_conformation
+            self.modes = self.eigvector.T @ self.xyz
+
+        self.traj = []
+        for t in tqdm(range(T)):
+            if t % update == 0:
+                self.updateXYZ()
+            if t % every == 0:
+                self.updateXYZ()
+                self.traj.append(self.xyz.copy())
+            
+            # Update internal connectivity matrix based on current distances
+            self._update_connectivity_from_distances(cutoff_distance)
+            
+            # Update normal modes (eigvalue and eigvector already updated in _update_connectivity_from_distances)
+            self.updateModes(method=method, update_zero_modes=update_zero_modes)
+
+        self.traj = np.array(self.traj)
+
+    def _update_connectivity_from_distances(self, cutoff_distance):
+        """
+        Update internal connectivity matrix based on current pairwise distances.
+        
+        Nearest-neighbor bonds (i, i+1) are never broken - they represent the polymer backbone.
+        Only non-local interactions are subject to the distance cutoff.
+        
+        Parameters
+        ----------
+        cutoff_distance : float
+            Distance threshold for bond breaking (only applies to non-nearest-neighbor bonds)
+        """
+        # Calculate pairwise distances
+        distances = self._calculate_pairwise_distances()
+        
+        # Update internal connectivity matrix
+        # Only loop over non-local bonds (j > i+1) since nearest-neighbor bonds never break
+        for i in range(self.N):
+            for j in range(i+2, self.N):
+                # Non-local bonds: apply distance cutoff
+                if distances[i, j] < cutoff_distance:
+                    # Bond is present - use original connectivity value
+                    self.A_internal[i, j] = self.A_original[i, j]
+                    self.A_internal[j, i] = self.A_original[j, i]
+                else:
+                    # Bond is broken - set to zero
+                    self.A_internal[i, j] = 0.0
+                    self.A_internal[j, i] = 0.0
+        
+        # Update diagonal elements to maintain Laplacian property using a2a function
+        self.A_internal = a2a(self.A_internal, fill_negative=False)
+        
+        # Recompute eigenvalues and eigenvectors using internal matrix
+        self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A_internal)
+        
+        # Update modes to maintain consistency
+        self.modes = self.eigvector.T @ self.xyz
+
+    def _calculate_pairwise_distances(self):
+        """
+        Calculate pairwise distances between all loci using scipy.
+        
+        Returns
+        -------
+        distances : (N, N) ndarray
+            Matrix of pairwise distances. distances[i,j] is the distance between loci i and j.
+        """
+        # Use pdist+squareform for better performance on larger systems
+        # pdist computes condensed distance matrix, squareform converts to full symmetric matrix
+        distances = scipy.spatial.distance.squareform(
+            scipy.spatial.distance.pdist(self.xyz, metric='euclidean')
+        )
+        return distances
+
+    def restore_original_connectivity(self):
+        """
+        Restore the original connectivity matrix and recompute eigenvalues/eigenvectors.
+        This is useful after running breakable bond simulations to return to the original state.
+        """
+        if hasattr(self, 'A_original'):
+            self.A = np.copy(self.A_original)
+            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            # Update modes to maintain consistency
+            self.modes = self.eigvector.T @ self.xyz
+        else:
+            sys.stdout.write('No original connectivity matrix found. Cannot restore.')
 
 
 @click.command()

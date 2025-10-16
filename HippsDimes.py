@@ -818,6 +818,15 @@ def write2xyz(fout, xyzs):
             for idx, item in enumerate(xyz):
                 f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
 
+def write2xyz_traj(fout, traj):
+    natoms = traj.shape[1]
+
+    with open(fout, 'w') as f:
+        for snapshot in traj:
+            f.write(f"{natoms}\n\n")
+            for i, atom in enumerate(snapshot):
+                f.write(f"C {atom[0]} {atom[1]} {atom[2]}\n")
+
 
 def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """

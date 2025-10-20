@@ -234,18 +234,74 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   the two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
-### Use it as a package
-The python file `HippsDimes.py` can also be used as a package. You can do `import` as,
+### Use it as a Python Library
+
+The HIPPS-DIMES code can be used both as a command-line tool and as a Python library. This makes it easy to integrate into your Python workflows, Jupyter notebooks, and automated pipelines.
+
+#### Main Function: `run_optimization()`
+
+The core functionality is available through the `run_optimization()` function:
+
+```python
+from HippsDimes import run_optimization
+import numpy as np
+
+# Load your contact map
+cmap = np.loadtxt('contact_map.txt')
+
+# Run optimization programmatically
+results = run_optimization(
+    input_matrix=cmap,          # Provide matrix directly
+    input_type='cmap',
+    method='IS',
+    iteration=10000,
+    learning_rate=10.0,
+    ensemble=1000,
+    verbose=False               # Suppress console output
+)
+
+# Access results
+connectivity_matrix = results['connectivity_matrix']
+structures = results['xyzs']          # (ensemble, n_beads, 3)
+final_dmap = results['dmap_final']
+final_cmap = results['cmap_final']
+loss_history = results['loss']
+```
+
+#### Return Values
+
+The `run_optimization()` function returns a dictionary with:
+- `'connectivity_matrix'`: Final connectivity matrix (numpy array)
+- `'dmap_final'`: Final distance map (numpy array)
+- `'cmap_final'`: Final contact map (numpy array, if input_type='cmap')
+- `'xyzs'`: Generated conformations (numpy array)
+- `'loss'`: Loss history (pandas DataFrame)
+- `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
+
+#### Additional Utility Functions
+
+The package also provides helper functions for direct use:
 
 ```python
 import HippsDimes as HD
+
+# Generate structures from connectivity matrix
+structures = HD.a2xyz_sample(connectivity_matrix, ensemble=1000)
+
+# Convert connectivity matrix to distance map
+dmap = HD.a2dmap_theory(connectivity_matrix)
+
+# Convert connectivity matrix to contact map
+cmap = HD.a2cmap_theory(connectivity_matrix, rc=5.0)
+
+# Create a Rouse chain connectivity matrix
+A = HD.construct_connectivity_matrix_rouse(n=100, k=1.0)
 ```
 
-Some useful functions:
+#### Documentation and Examples
 
-`HippsDimes.a2xyz_sample`: use connectivity matrix to generate random samples of structures
-`HippsDimes.a2cmap_theory`: use connectivity matrix and a distance threshold to generate contact map
-`HippsDimes.a2dmap_theory`: use connectivity matrix to generate a mean distance map
+For comprehensive examples and advanced usage patterns, see:
+- `walkthrough.ipynb` - Interactive Jupyter notebook examples
 
 ------
 

@@ -1267,7 +1267,9 @@ class Optimize:
                 raise ValueError(
                     'The distance matrix is a not valid Euclidean distance matrix. Direct inversion method is not applicable. Please use optimization method such as Iterative scaling or gradient descent')
             self.A = ddmap2a_direct(self.ddmap_target)
-            loss_array.append(self.__compute_loss())
+            # Compute loss for direct inversion
+            ddmap_t = ((3. * np.pi) / 8.) * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+            loss_array.append(self.__compute_loss(ddmap_t))
 
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
@@ -1391,6 +1393,394 @@ class Dynamics:
         self.generateXYZ()
 
 
+def run_optimization(input_path=None,
+                     output_prefix=None,
+                     input_matrix=None,
+                     connectivity_matrix=None,
+                     ensemble=1000,
+                     alpha=4.0,
+                     selection=None,
+                     method='IS',
+                     lamd=0.0,
+                     reg='L2',
+                     iteration=10000,
+                     learning_rate=10.0,
+                     input_type='cmap',
+                     input_format='text',
+                     binsize=25000,
+                     hic_norm='KR',
+                     hic_unit='BP',
+                     log=False,
+                     no_xyzs=False,
+                     ignore_missing_data=False,
+                     balance=False,
+                     not_normalize=False,
+                     neighbor_balance=False,
+                     enforce_nonnegative_connectivity_matrix=False,
+                     verbose=True):
+    """
+    Core function to run HIPPS/DIMES optimization that can be called programmatically or from CLI.
+    
+    Parameters
+    ----------
+    input_path : str, optional
+        Path to the input file (required if input_matrix is not provided)
+    output_prefix : str, optional
+        Prefix for output files (if None, results are only returned, not saved)
+    input_matrix : np.ndarray, optional
+        Input matrix (contact map or distance map). If provided, input_path is ignored
+    connectivity_matrix : np.ndarray or str, optional
+        Initial connectivity matrix or path to file containing it
+    ensemble : int, default=1000
+        Number of conformations to generate
+    alpha : float, default=4.0
+        Exponent for cmap-to-dmap conversion
+    selection : str, optional
+        Region selection for cooler/hic files
+    method : str, default='IS'
+        Optimization method: 'IS' (Iterative Scaling), 'GD' (Gradient Descent), or 'DI' (Direct Inversion)
+    lamd : float, default=0.0
+        Regularization weight
+    reg : str, default='L2'
+        Regularization type: 'L1' or 'L2'
+    iteration : int, default=10000
+        Number of optimization iterations
+    learning_rate : float, default=10.0
+        Learning rate for optimization
+    input_type : str, default='cmap'
+        Type of input: 'cmap' (contact map) or 'dmap' (distance map)
+    input_format : str, default='text'
+        Format of input file: 'text', 'cooler', or 'hic'
+    binsize : int, default=25000
+        Bin size for .hic format in bp
+    hic_norm : str, default='KR'
+        Normalization for .hic: 'KR', 'VC', 'NONE'
+    hic_unit : str, default='BP'
+        Unit for .hic: 'BP' or 'FRAG'
+    log : bool, default=False
+        Whether to write log file
+    no_xyzs : bool, default=False
+        If True, skip writing conformations to file
+    ignore_missing_data : bool, default=False
+        Whether to ignore missing elements in contact/distance map
+    balance : bool, default=False
+        Apply matrix balancing for contact map (cooler format)
+    not_normalize : bool, default=False
+        Turn off auto normalization of contact map
+    neighbor_balance : bool, default=False
+        Apply neighbor balancing for contact map
+    enforce_nonnegative_connectivity_matrix : bool, default=False
+        Enforce non-negative spring constants
+    verbose : bool, default=True
+        Whether to print status messages
+        
+    Returns
+    -------
+    results : dict
+        Dictionary containing:
+        - 'loss': Loss values during optimization (pandas DataFrame or list)
+        - 'dmap_final': Final distance map (numpy array)
+        - 'connectivity_matrix': Final connectivity matrix (numpy array)
+        - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
+        - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
+        - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
+    
+    Examples
+    --------
+    >>> # Use as a library with a numpy array
+    >>> cmap = np.loadtxt('contact_map.txt')
+    >>> results = run_optimization(input_matrix=cmap, input_type='cmap', 
+    ...                            method='IS', iteration=5000)
+    >>> connectivity_matrix = results['connectivity_matrix']
+    >>> xyzs = results['xyzs']
+    
+    >>> # Use as a library with a file
+    >>> results = run_optimization(input_path='data.cool', 
+    ...                            input_type='cmap',
+    ...                            input_format='cooler',
+    ...                            selection='chr21',
+    ...                            output_prefix='output/chr21')
+    """
+    # Validate inputs
+    if input_matrix is None and input_path is None:
+        raise ValueError("Either input_matrix or input_path must be provided")
+    
+    # Initialize console for output
+    if verbose:
+        console = Console()
+        title = Text.assemble(("HIPPS-DIMES", "bold yellow"),
+                              ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction - Dynamics Prediction\n",
+                              "1. Shi, Guang, and D. Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.\n",
+                              "2. Shi, Guang, and D. Thirumalai. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nature Communications 14.1 (2023): 1150.\n",
+                              "3. Shi, Guang, Shin, Sucheol, and D. Thirumalai. Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes. Science Advances 11.31 (2025): eadx1763.")
+        console.print(Panel(title))
+    else:
+        console = None
+
+    # Load or use input matrix
+    if verbose and console:
+        status = console.status("[bold green]System initialization...")
+        status.start()
+    
+    try:
+        if input_type == 'dmap':
+            if verbose and console:
+                console.print("Reading distance matrix")
+            if input_matrix is not None:
+                # Use provided matrix
+                dmap_target = input_matrix
+                if dmap_target.ndim != 2 or dmap_target.shape[0] != dmap_target.shape[1]:
+                    raise ValueError("Distance map must be a square 2D array")
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+            elif input_format == 'text':
+                dmap_target = np.loadtxt(input_path)
+                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+            elif input_format == 'cooler':
+                raise ValueError('input-type=dmap only supports text format file or numpy array')
+        elif input_type == 'cmap':
+            if verbose and console:
+                console.print("Reading contact map")
+            if input_matrix is not None:
+                # Use provided matrix
+                cmap = input_matrix
+                if cmap.ndim != 2 or cmap.shape[0] != cmap.shape[1]:
+                    raise ValueError("Contact map must be a square 2D array")
+            elif input_format == 'text':
+                cmap = np.loadtxt(input_path)
+            elif input_format == 'cooler':
+                cmap_data = cooler.Cooler(input_path)
+                if verbose and console:
+                    console.print("Cooler file read completed")
+                cmap = cmap_data.matrix(balance=balance).fetch(selection)
+                if verbose and console:
+                    console.print("Cooler file selection completed")
+                if len(cmap) >= 5000:
+                    warning_msg = "The matrix size is {}x{}. It is too large. Please use smaller matrix".format(
+                        len(cmap), len(cmap))
+                    if verbose and console:
+                        console.print(warning_msg)
+                    raise ValueError(warning_msg)
+            elif input_format == 'hic':
+                # parse selection for .hic
+                if not selection or ',' not in selection:
+                    raise ValueError("For .hic input, --selection must be 'chr1:start1-end1,chr2:start2-end2'")
+                hic = hicstraw.HiCFile(input_path)
+                if verbose and console:
+                    console.print(".hic format file read completed")
+                reg1, reg2 = selection.split(',')
+                # strip optional 'chr' prefix for hicstraw
+                raw_chrom1, r1 = reg1.split(':')
+                raw_chrom2, r2 = reg2.split(':')
+                chrom1 = raw_chrom1[3:] if raw_chrom1.lower().startswith('chr') else raw_chrom1
+                chrom2 = raw_chrom2[3:] if raw_chrom2.lower().startswith('chr') else raw_chrom2
+                start1, end1 = map(int, r1.split('-'))
+                start2, end2 = map(int, r2.split('-'))
+                
+                # try efficient random-access API
+                matrix_obj = hic.getMatrixZoomData(chrom1, chrom2, 'observed', hic_norm, hic_unit, binsize)
+                if verbose and console:
+                    console.print("Fetched hic matrix zoom data")
+                try:
+                    cmap = matrix_obj.getRecordsAsMatrix(start1, end1, start2, end2)
+                except Exception:
+                    # fallback manual assembly via straw
+                    if verbose and console:
+                        console.print("Falling back to manual assembly via hicstraw.straw()...")
+                    region1 = f"{chrom1}:{start1}:{end1}"
+                    region2 = f"{chrom2}:{start2}:{end2}"
+                    result = hicstraw.straw('observed', hic_norm, input_path,
+                                             region1, region2,
+                                             hic_unit, binsize)
+                    # compute dimensions
+                    dim1 = (end1 - start1) // binsize + 1
+                    dim2 = (end2 - start2) // binsize + 1
+                    cmap = np.zeros((dim1, dim2))
+                    # build map
+                    desc = "Building hic contact map" if verbose else None
+                    for pt in tqdm(result, desc=desc, disable=not verbose):
+                        i = int((pt.binX - start1) / binsize)
+                        j = int((pt.binY - start2) / binsize)
+                        cmap[i, j] = pt.counts
+                    cmap = cmap + cmap.T
+
+                if verbose and console:
+                    console.print(".hic contact map extracted")
+            
+            # Apply neighbor balancing if requested
+            if neighbor_balance:
+                if verbose and console:
+                    console.print("Applying neighbor balancing to contact map (see Paggi, Zhang 2025)")
+                cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
+            
+            if ignore_missing_data:
+                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
+            else:
+                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
+            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+        else:
+            raise ValueError("Invalid input_type. Must be 'cmap' or 'dmap'")
+
+        # Load connectivity matrix if provided
+        if connectivity_matrix is not None:
+            if isinstance(connectivity_matrix, str):
+                connectivity_matrix = np.loadtxt(connectivity_matrix)
+            if verbose and console:
+                console.print("Loaded the provided connectivity matrix and will use it as initialization.")
+        
+        if verbose and console:
+            console.print("Initialization completed")
+            if hasattr(status, 'stop'):
+                status.stop()
+    except Exception as e:
+        if verbose and console and hasattr(status, 'stop'):
+            status.stop()
+        raise e
+
+    # Print parameter table if verbose
+    if verbose and console:
+        table = Table(title="Some Basic Parameters")
+        table.add_column("Input Source", no_wrap=False)
+        table.add_column("Input Type", no_wrap=False)
+        table.add_column("Input Format", no_wrap=False)
+        table.add_column("Optimization method", no_wrap=False)
+        table.add_column("Matrix Size", no_wrap=False)
+        table.add_column("Number of Iterations", no_wrap=False)
+        table.add_column("Regularization", no_wrap=False)
+        table.add_column("Ignore Missing Data", no_wrap=False)
+        table.add_column("Matrix Balancing", no_wrap=False)
+        table.add_column("Neighbor Balancing", no_wrap=False)
+        table.add_column("Matrix Normalization", no_wrap=False)
+        
+        input_source = input_path if input_path else "NumPy array"
+        table.add_row(input_source,
+                      "{}".format("Contact Map" if input_type ==
+                                  'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"),
+                      "{}".format("Text" if input_format ==
+                                  'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"),
+                      "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method ==
+                                  'GD' else "Direct Inversion" if method == 'DI' else "Unknown"),
+                      "{}".format("{}x{}".format(
+                          dmap_target.shape[0], dmap_target.shape[1])),
+                      "{}".format(iteration),
+                      "{}".format(reg if lamd > 0.0 else "No" if lamd ==
+                                  0.0 else "Unknown"),
+                      "{}".format("Yes" if ignore_missing_data else "No"),
+                      "{}".format("Yes" if balance else "No" if (
+                          balance is False and input_format == 'cooler') else "N/A"),
+                      "{}".format("Yes" if neighbor_balance else "No" if (
+                          neighbor_balance is False and input_type == 'cmap') else "N/A"),
+                      "{}".format("No" if (not_normalize is True and input_type == 'cmap') else "Yes" if (
+                          not_normalize is False and input_type == 'cmap') else "N/A")
+                      )
+        console.print(table)
+
+    # Run optimization
+    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix)
+    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
+                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix}
+
+    if method == 'IS' or method == 'GD':
+        general_method = 'optimization'
+    elif method == 'DI':
+        general_method = 'direct'
+
+    loss, dmap_maxent, final_connectivity_matrix = model.run(
+        iteration, general_method=general_method, **keyword_arguments)
+    
+    # Format loss data
+    try:
+        loss_df = pd.DataFrame(
+            np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
+    except IndexError:
+        loss_df = None
+
+    # Print regularization norms if requested
+    if verbose:
+        if reg == 'L2':
+            print('L2 norm of the connectivity matrix:', np.linalg.norm(
+                final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]))
+        elif reg == 'L1':
+            print('L1 norm of the connectivity matrix:', np.abs(
+                final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]).sum())
+
+        if loss_df is not None and console:
+            console.print("Final loss: {}".format(loss_df['loss'].values[-1]))
+
+    # Finalize results
+    results = {
+        'loss': loss_df if loss_df is not None else loss,
+        'dmap_final': dmap_maxent,
+        'connectivity_matrix': final_connectivity_matrix
+    }
+    
+    # Compute contact map if input was contact map
+    cmap_maxent = None
+    rc_optimal = None
+    if input_type == 'cmap':
+        cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
+            objective_func, args=(final_connectivity_matrix, cmap))
+        rc_optimal = cmap_rc_minimize_res.x
+        if verbose and console:
+            console.print('Optimized contact threshold distance: {}\n'.format(rc_optimal))
+        cmap_maxent = a2cmap_theory(final_connectivity_matrix, rc_optimal)
+        results['cmap_final'] = cmap_maxent
+        results['rc_optimal'] = rc_optimal
+
+    # Generate conformations if requested
+    xyzs = None
+    if not no_xyzs:
+        xyzs = a2xyz_sample(final_connectivity_matrix, ensemble=ensemble)
+        results['xyzs'] = xyzs
+
+    # Save output files if output_prefix is provided
+    if output_prefix is not None:
+        if verbose and console:
+            status = console.status("[bold green]Saving results...")
+            status.start()
+        
+        try:
+            if log and loss_df is not None:
+                loss_df.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+                if verbose and console:
+                    console.print(
+                        "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
+
+            np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
+            if verbose and console:
+                console.print(
+                    "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
+            
+            if input_type == 'cmap':
+                np.savetxt('{}_dmap_target.txt'.format(output_prefix), np.sqrt((8./(3.*np.pi))* dmap_target))
+                if verbose and console:
+                    console.print(
+                        "Target distance map saved to file: [bold magenta]{}_dmap_target.txt[/bold magenta]".format(output_prefix))
+                np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+                if verbose and console:
+                    console.print(
+                        "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
+            
+            np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), final_connectivity_matrix)
+            if verbose and console:
+                console.print(
+                    'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
+
+            if not no_xyzs and xyzs is not None:
+                write2xyz('{}.xyz'.format(output_prefix), xyzs)
+                if verbose and console:
+                    console.print(
+                        "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
+            
+            if verbose and console:
+                status.stop()
+        except Exception as e:
+            if verbose and console and hasattr(status, 'stop'):
+                status.stop()
+            raise e
+    
+    return results
+
+
 @click.command()
 @click.argument('input', nargs=1)
 @click.argument('output-prefix', nargs=1)
@@ -1421,197 +1811,42 @@ class Dynamics:
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, \
     input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix):
     """
-    Script to run HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map\n
-    INPUT: Specify the path to the input file\n
-    OUTPUT_PREFIX: Specify the prefix for output files\n\n
-    If you use this program in your publication, please cite this paper: https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051\n
+    Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
+    
+    INPUT: Specify the path to the input file
+    
+    OUTPUT_PREFIX: Specify the prefix for output files
+    
+    If you use this program in your publication, please cite this paper: https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
     """
-    console = Console()
-
-    title = Text.assemble(("HIPPS-DIMES", "bold yellow"),
-                          ": Maximum Entropy Based HI-C/Distance Map - Polymer Physics - Structures Reconstruction - Dynamics Prediction\n",
-                          "1. Shi, Guang, and D. Thirumalai. From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes. Physical Review X 11.1 (2021): 011051.\n",
-                          "2. Shi, Guang, and D. Thirumalai. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nature Communications 14.1 (2023): 1150.\n",
-                          "3. Shi, Guang, Shin, Sucheol, and D. Thirumalai. Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes. Science Advances 11.31 (2025): eadx1763.")
-    console.print(Panel(title))
-
-    with console.status("[bold green]System initialization...") as status:
-        if input_type == 'dmap':
-            console.print("Reading distance matrix from file")
-            if input_format == 'text':
-                dmap_target = np.loadtxt(input)
-                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-            elif input_format == 'cooler':
-                click.echo('input-type=dmap only support text format file')
-        elif input_type == 'cmap':
-            console.print("Reading contact map from file")
-            if input_format == 'text':
-                cmap = np.loadtxt(input)
-            elif input_format == 'cooler':
-                cmap = cooler.Cooler(input)
-                console.print("Cooler file read completed")
-                cmap = cmap.matrix(balance=balance).fetch(selection)
-                console.print("Cooler file selection completed")
-                if len(cmap) >= 5000:
-                    console.print("The matrix size is {}x{}. It is too large. Please use smaller matrix".format(
-                        len(cmap), len(cmap)))
-                    exit(0)
-            elif input_format == 'hic':
-                # parse selection for .hic
-                if not selection or ',' not in selection:
-                    console.print("[red]For .hic input, --selection must be 'chr1:start1-end1,chr2:start2-end2'")
-                    sys.exit(1)
-                hic = hicstraw.HiCFile(input)
-                console.print(".hic format file read completed")
-                reg1, reg2 = selection.split(',')
-                # strip optional 'chr' prefix for hicstraw
-                raw_chrom1, r1 = reg1.split(':')
-                raw_chrom2, r2 = reg2.split(':')
-                chrom1 = raw_chrom1[3:] if raw_chrom1.lower().startswith('chr') else raw_chrom1
-                chrom2 = raw_chrom2[3:] if raw_chrom2.lower().startswith('chr') else raw_chrom2
-                start1, end1 = map(int, r1.split('-'))
-                start2, end2 = map(int, r2.split('-'))
-                
-                # try efficient random-access API
-                matrix_obj = hic.getMatrixZoomData(chrom1, chrom2, 'observed', hic_norm, hic_unit, binsize)
-                console.print("Fetched hic matrix zoom data")
-                try:
-                    cmap = matrix_obj.getRecordsAsMatrix(start1, end1, start2, end2)
-                except Exception:
-                    # fallback manual assembly via straw
-                    console.print("Falling back to manual assembly via hicstraw.straw()...")
-                    region1 = f"{chrom1}:{start1}:{end1}"
-                    region2 = f"{chrom2}:{start2}:{end2}"
-                    result = hicstraw.straw('observed', hic_norm, input,
-                                             region1, region2,
-                                             hic_unit, binsize)
-                    # compute dimensions
-                    dim1 = (end1 - start1) // binsize + 1
-                    dim2 = (end2 - start2) // binsize + 1
-                    cmap = np.zeros((dim1, dim2))
-                    # build map
-                    for pt in tqdm(result, desc="Building hic contact map"):
-                        i = int((pt.binX - start1) / binsize)
-                        j = int((pt.binY - start2) / binsize)
-                        cmap[i, j] = pt.counts
-                    cmap = cmap + cmap.T
-
-                console.print(".hic contact map extracted")
-            
-            # Apply neighbor balancing if requested
-            if neighbor_balance:
-                console.print("Applying neighbor balancing to contact map (see Paggi, Zhang 2025)")
-                cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
-            
-            if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
-            else:
-                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
-        else:
-            console.print("[red]Invalid input_type")
-            sys.exit(1)
-
-        if connectivity_matrix is not None:
-            connectivity_matrix = np.loadtxt(connectivity_matrix)
-            console.print("Load the provided connectivity matrix and will use it as initialization.")
-        console.print("Initialization completed")
-
-
-    table = Table(title="Some Basic Parameters")
-    table.add_column("Input File", no_wrap=False)
-    table.add_column("Input Type", no_wrap=False)
-    table.add_column("Input Format", no_wrap=False)
-    table.add_column("Optimization method", no_wrap=False)
-    table.add_column("Matrix Size", no_wrap=False)
-    table.add_column("Number of Iterations", no_wrap=False)
-    table.add_column("Regularization", no_wrap=False)
-    table.add_column("Ignore Missing Data", no_wrap=False)
-    table.add_column("Matrix Balancing", no_wrap=False)
-    table.add_column("Neighbor Balancing", no_wrap=False)
-    table.add_column("Matrix Normalization", no_wrap=False)
-    table.add_row(input,
-                  "{}".format("Contact Map" if input_type ==
-                              'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"),
-                  "{}".format("Text" if input_format ==
-                              'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"),
-                  "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method ==
-                              'GD' else "Direct Inversion" if method == 'DI' else "Unknown"),
-                  "{}".format("{}x{}".format(
-                      dmap_target.shape[0], dmap_target.shape[1])),
-                  "{}".format(iteration),
-                  "{}".format(reg if lamd > 0.0 else "No" if lamd ==
-                              0.0 else "Unknown"),
-                  "{}".format("Yes" if ignore_missing_data else "No"),
-                  "{}".format("Yes" if balance else "No" if (
-                      balance is False and input_format == 'cooler') else "N/A"),
-                  "{}".format("Yes" if neighbor_balance else "No" if (
-                      neighbor_balance is False and input_type == 'cmap') else "N/A"),
-                  "{}".format("No" if (not_normalize is True and input_type == 'cmap') else "Yes" if (
-                      not_normalize is False and input_type == 'cmap') else "N/A")
-                  )
-    console.print(table)
-
-    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix)
-    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix}
-
-    if method == 'IS' or method == 'GD':
-        general_method = 'optimization'
-    elif method == 'DI':
-        general_method = 'direct'
-
-    loss, dmap_maxent, connectivity_matrix = model.run(
-        iteration, general_method=general_method, **keyword_arguments)
-    try:
-        loss = pd.DataFrame(
-            np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
-    except IndexError:
-        pass
-
-    if reg == 'L2':
-        print('L2 norm of the connectivity matrix:', np.linalg.norm(
-            connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]))
-    elif reg == 'L1':
-        print('L1 norm of the connectivity matrix:', np.abs(
-            connectivity_matrix[np.triu_indices_from(connectivity_matrix, k=1)]).sum())
-
-    console.print("Final loss: {}".format(loss['loss'].values[-1]))
-
-    with console.status("[bold green]System finalizing...") as status:
-        if input_type == 'cmap':
-            cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
-                objective_func, args=(connectivity_matrix, cmap))
-            console.print('Optimized contact threshold distance: {}\n'.format(
-                cmap_rc_minimize_res.x))
-            cmap_maxent = a2cmap_theory(
-                connectivity_matrix, cmap_rc_minimize_res.x)
-
-        if log:
-            loss.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
-            console.print(
-                "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
-
-        np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
-        console.print(
-            "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
-        if input_type == 'cmap':
-            np.savetxt('{}_dmap_target.txt'.format(output_prefix), np.sqrt((8./(3.*np.pi))* dmap_target))
-            console.print(
-                "Target distance map saved to file: [bold magenta]{}_dmap_target.txt[/bold magenta]".format(output_prefix))
-            np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
-            console.print(
-                "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
-        np.savetxt('{}_connectivity_matrix.txt'.format(
-            output_prefix), connectivity_matrix)
-        console.print(
-            'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
-
-        if not no_xyzs:
-            xyzs = a2xyz_sample(connectivity_matrix, ensemble=ensemble)
-            write2xyz('{}.xyz'.format(output_prefix), xyzs)
-            console.print(
-                "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
+    # Call the core function
+    run_optimization(
+        input_path=input,
+        output_prefix=output_prefix,
+        input_matrix=None,
+        connectivity_matrix=connectivity_matrix,
+        ensemble=ensemble,
+        alpha=alpha,
+        selection=selection,
+        method=method,
+        lamd=lamd,
+        reg=reg,
+        iteration=iteration,
+        learning_rate=learning_rate,
+        input_type=input_type,
+        input_format=input_format,
+        binsize=binsize,
+        hic_norm=hic_norm,
+        hic_unit=hic_unit,
+        log=log,
+        no_xyzs=no_xyzs,
+        ignore_missing_data=ignore_missing_data,
+        balance=balance,
+        not_normalize=not_normalize,
+        neighbor_balance=neighbor_balance,
+        enforce_nonnegative_connectivity_matrix=enforce_nonnegative_connectivity_matrix,
+        verbose=True
+    )
 
 
 if __name__ == '__main__':

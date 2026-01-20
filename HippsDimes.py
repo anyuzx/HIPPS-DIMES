@@ -1522,7 +1522,7 @@ class Optimize:
                 np.power((ddmap_t - self.ddmap_target)/self.ddmap_target, 2.)) ** .5
         return loss
 
-    def __update_parameter(self, t, learning_rate, lamd=0.0, reg='l2', method='IS', enforce_nonnegative_connectivity_matrix=False):
+    def __update_parameter(self, t, learning_rate, lamd=0.0, reg='l2', method='IS', enforce_nonnegative_connectivity_matrix=False, momentum=0.0):
         # updating using Iterative Scaling
 
         # compute the mean squared distance matrix at current iteration step
@@ -1547,8 +1547,27 @@ class Optimize:
                 gradient_t = np.nan_to_num(
                     np.log(compare_ratio), posinf=0., neginf=0.) / fhash
 
-            # update the connectivity matrix
-            self.A += learning_rate * gradient_t
+            # enforce symmetry and apply optional off-diagonal mask
+            gradient_t = 0.5 * (gradient_t + gradient_t.T)
+            if self.edge_mask is not None:
+                gradient_t *= self.edge_mask
+
+            # Apply momentum if enabled (Polyak's heavy ball method)
+            # v_{t+1} = momentum * v_t + gradient_t
+            # A_{t+1} = A_t + learning_rate * v_{t+1}
+            if momentum > 0.0:
+                # Initialize velocity on first iteration
+                if t == 0:
+                    self.velocity = np.zeros_like(self.A)
+                
+                # Update velocity with momentum
+                self.velocity = momentum * self.velocity + gradient_t
+                
+                # Update connectivity matrix using velocity
+                self.A += learning_rate * self.velocity
+            else:
+                # Standard update without momentum
+                self.A += learning_rate * gradient_t
         elif method == 'GD':
             if t == 0:
                 self.theta = np.copy(self.A)
@@ -1595,6 +1614,29 @@ class Optimize:
     def run(self, epoch, general_method='optimization', **kwargs):
         """
         Main function to run the optimization
+        
+        Parameters
+        ----------
+        epoch : int
+            Number of iterations
+        general_method : str
+            'optimization' or 'direct'
+        **kwargs
+            Additional arguments passed to __update_parameter:
+            - learning_rate : float
+                Learning rate for optimization
+            - lamd : float
+                Regularization weight
+            - reg : str
+                Regularization type ('L1' or 'L2')
+            - method : str
+                Optimization method ('IS' or 'GD')
+            - enforce_nonnegative_connectivity_matrix : bool
+                Enforce non-negative spring constants
+            - momentum : float, optional
+                Momentum coefficient for IS method (default: 0.0, i.e., no momentum).
+                Typical values are 0.8-0.95. Higher values give more acceleration
+                but may cause overshooting. Only applies when method='IS'.
         """
 
         console = Console()
@@ -2006,6 +2048,7 @@ def run_optimization(input_path=None,
                      reg='L2',
                      iteration=10000,
                      learning_rate=10.0,
+                     momentum=0.0,
                      input_type='cmap',
                      input_format='text',
                      binsize=25000,
@@ -2048,6 +2091,11 @@ def run_optimization(input_path=None,
         Number of optimization iterations
     learning_rate : float, default=10.0
         Learning rate for optimization
+    momentum : float, default=0.0
+        Momentum coefficient for IS method (Polyak's heavy ball).
+        Set to 0.0 for no momentum (default). Typical values are 0.8-0.95.
+        Higher values give more acceleration but may cause overshooting.
+        Only applies when method='IS'.
     input_type : str, default='cmap'
         Type of input: 'cmap' (contact map) or 'dmap' (distance map)
     input_format : str, default='text'
@@ -2278,7 +2326,8 @@ def run_optimization(input_path=None,
     # Run optimization
     model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix)
     keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix}
+                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
+                         'momentum': momentum}
 
     if method == 'IS' or method == 'GD':
         general_method = 'optimization'
@@ -2397,6 +2446,8 @@ def run_optimization(input_path=None,
 @click.option('-r', '--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. \
     If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. \
         It should be a very small value (such as 1e-8) when using gradient descent optimization')
+@click.option('--momentum', type=click.FloatRange(0, 1), default=0.0, show_default=True, help='Momentum coefficient for IS method (Polyak heavy ball). \
+    Set to 0.0 for no momentum (default). Typical values are 0.8-0.95. Higher values give faster convergence but may cause overshooting. Only applies when method=IS.')
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
@@ -2409,7 +2460,7 @@ def run_optimization(input_path=None,
 @click.option('--neighbor-balance', is_flag=True, default=False, show_default=True, help='Turn on neighbor balancing for contact map. Only effective when input_type == cmap. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. see Paggi, Zhang 2025 for method details')
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, input_type, \
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, momentum, input_type, \
     input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix):
     """
     Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
@@ -2434,6 +2485,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         reg=reg,
         iteration=iteration,
         learning_rate=learning_rate,
+        momentum=momentum,
         input_type=input_type,
         input_format=input_format,
         binsize=binsize,

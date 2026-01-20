@@ -780,9 +780,27 @@ def ddmap2a_direct(ddmap):
     return a_direct
 
 
-def a2dmap_theory(A, force_positive_definite=False):
+def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     """
     Return mean distance map given the connectivity matrix A theoretically
+    
+    Parameters
+    ----------
+    A : np.ndarray
+        Connectivity matrix (should be symmetric, negative semi-definite)
+    force_positive_definite : bool, optional
+        If True, replace negative temp values with zero. Default is False.
+    return_eigenvalues : bool, optional
+        If True, also return the eigenvalues of A. This is useful for avoiding
+        redundant eigendecomposition when eigenvalues are needed elsewhere
+        (e.g., for entropy computation). Default is False.
+    
+    Returns
+    -------
+    dmap : np.ndarray
+        Mean distance map
+    eigvalue : np.ndarray, optional
+        Eigenvalues of A (only returned if return_eigenvalues=True)
     """
     TOL = 10**8
     eigvalue, eigvector = scipy.linalg.eigh(A)
@@ -804,6 +822,9 @@ def a2dmap_theory(A, force_positive_definite=False):
     sigma = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
 
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma
+    
+    if return_eigenvalues:
+        return dmap, eigvalue
     return dmap
 
 
@@ -1505,8 +1526,9 @@ class Optimize:
         # updating using Iterative Scaling
 
         # compute the mean squared distance matrix at current iteration step
-        ddmap_t = ((3. * np.pi) / 8.) * \
-            np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+        # Also get eigenvalues of A to reuse for entropy computation (avoiding double eigendecomposition)
+        dmap_t, eigvals_A = a2dmap_theory(self.A, force_positive_definite=True, return_eigenvalues=True)
+        ddmap_t = ((3. * np.pi) / 8.) * np.power(dmap_t, 2.)
         # compute the ratio between the current value and the target
         compare_ratio = ddmap_t / self.ddmap_target
         # compute the prefactor for iterative scaling
@@ -1564,6 +1586,11 @@ class Optimize:
 
         # compute the loss
         self.loss = self.__compute_loss(ddmap_t)
+        
+        # Compute entropy reusing eigenvalues from a2dmap_theory
+        # Note: eigenvalues of K = -A are simply -eigvals_A (no need for second eigendecomposition)
+        eigvals_K = -eigvals_A
+        self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
 
     def run(self, epoch, general_method='optimization', **kwargs):
         """

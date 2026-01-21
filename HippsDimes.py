@@ -2069,7 +2069,7 @@ class Optimize:
         self.entropy = float(cp.sum(log_terms))
         
         # Sync A back to CPU (needed for saving/display)
-        cp.cuda.Stream.null.synchronize()
+        # Note: asnumpy() already synchronizes, no need for explicit sync
         self.A = cp.asnumpy(self._A_gpu)
 
     def __update_parameter_gpu_gd(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False):
@@ -2142,7 +2142,7 @@ class Optimize:
         self.entropy = float(cp.sum(log_terms))
         
         # Sync A back to CPU (needed for saving/display)
-        cp.cuda.Stream.null.synchronize()
+        # Note: asnumpy() already synchronizes, no need for explicit sync
         self.A = cp.asnumpy(self._A_gpu)
 
     def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):

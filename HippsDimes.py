@@ -2056,18 +2056,21 @@ class Optimize:
         off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
         
-        # Sync back to CPU for loss calculation and storage
+        # Compute loss on GPU (avoid CPU transfer for ddmap)
+        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        self.loss = float(loss_gpu)
+        
+        # Compute entropy on GPU using eigenvalues already on GPU
+        # K = -A, so eigenvalues of K = -eigenvalues of A
+        # entropy = -sum(log(λ_i)) for positive eigenvalues λ_i of K
+        eigvals_K_gpu = -eigvals_A_gpu
+        positive_mask = eigvals_K_gpu > 1e-12
+        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
+        self.entropy = float(cp.sum(log_terms))
+        
+        # Sync A back to CPU (needed for saving/display)
         cp.cuda.Stream.null.synchronize()
         self.A = cp.asnumpy(self._A_gpu)
-        ddmap_t = cp.asnumpy(ddmap_t_gpu)
-        eigvals_A = cp.asnumpy(eigvals_A_gpu)
-        
-        # Compute loss on CPU
-        self.loss = self.__compute_loss(ddmap_t)
-        
-        # Compute entropy
-        eigvals_K = -eigvals_A
-        self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
 
     def __update_parameter_gpu_gd(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False):
         """GPU-accelerated version of __update_parameter for GD method using CuPy."""
@@ -2126,18 +2129,21 @@ class Optimize:
         off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
         
-        # Sync back to CPU for loss calculation and storage
+        # Compute loss on GPU (avoid CPU transfer for ddmap)
+        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        self.loss = float(loss_gpu)
+        
+        # Compute entropy on GPU using eigenvalues already on GPU
+        # K = -A, so eigenvalues of K = -eigenvalues of A
+        # entropy = -sum(log(λ_i)) for positive eigenvalues λ_i of K
+        eigvals_K_gpu = -eigvals_A_gpu
+        positive_mask = eigvals_K_gpu > 1e-12
+        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
+        self.entropy = float(cp.sum(log_terms))
+        
+        # Sync A back to CPU (needed for saving/display)
         cp.cuda.Stream.null.synchronize()
         self.A = cp.asnumpy(self._A_gpu)
-        ddmap_t = cp.asnumpy(ddmap_t_gpu)
-        eigvals_A = cp.asnumpy(eigvals_A_gpu)
-        
-        # Compute loss on CPU
-        self.loss = self.__compute_loss(ddmap_t)
-        
-        # Compute entropy
-        eigvals_K = -eigvals_A
-        self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
 
     def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
         """

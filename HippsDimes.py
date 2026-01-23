@@ -1692,6 +1692,8 @@ class Optimize:
         # initialize the loss
         self.loss = None
 
+        # initialize the entropy
+        self.entropy = None
 
         # Optional off-diagonal mask: True means keep/update A[i,j]; False means freeze at 0
         # Diagonal entries are always recomputed by a2a()
@@ -2016,6 +2018,11 @@ class Optimize:
             elif lamd == 0.0:
                 gradient_t = (ddmap_t - self.ddmap_target)
 
+            # enforce symmetry and apply optional off-diagonal mask
+            gradient_t = 0.5 * (gradient_t + gradient_t.T)
+            if self.edge_mask is not None:
+                gradient_t *= self.edge_mask
+
             # perform Nesterov update rule
             # gradient descent state
             theta_previous = np.copy(self.theta)
@@ -2031,6 +2038,10 @@ class Optimize:
 
         # convert all nan to zero
         self.A = np.nan_to_num(self.A)
+
+        # keep symmetry (numerical) and freeze masked edges before rebuilding diagonals
+        self.A = 0.5 * (self.A + self.A.T)
+        self._freeze_masked_edges()
 
         self.A = a2a(self.A, fill_negative=enforce_nonnegative_connectivity_matrix)
         # project to be negative semidefinite
@@ -2233,14 +2244,16 @@ class Optimize:
         console = Console()
 
         loss_array = []
+        entropy_array = []
 
         if general_method == 'optimization':
             with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
                 for t in pbar:
                     self.__update_parameter(t, **kwargs)
                     # display loss at each iterations
-                    pbar.set_postfix(loss=self.loss)
+                    pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
                     loss_array.append(self.loss)
+                    entropy_array.append(self.entropy if self.entropy is not None else np.nan)
         elif general_method == 'direct':
             if not checkEMD(self.ddmap_target):
                 raise ValueError(
@@ -2249,10 +2262,13 @@ class Optimize:
             # Compute loss for direct inversion
             ddmap_t = ((3. * np.pi) / 8.) * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
             loss_array.append(self.__compute_loss(ddmap_t))
+            # Compute entropy for direct inversion
+            eigvals_K = scipy.linalg.eigh(-self.A, eigvals_only=True)
+            entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
 
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
-        return loss_array, dmap_maxent, self.A
+        return loss_array, entropy_array, dmap_maxent, self.A
 
 class Dynamics:
     def __init__(self, input, M=None, k=None, model=None):
@@ -2972,13 +2988,14 @@ def run_optimization(input_path=None,
     elif method == 'DI':
         general_method = 'direct'
 
-    loss, dmap_maxent, final_connectivity_matrix = model.run(
+    loss, entropy, dmap_maxent, final_connectivity_matrix = model.run(
         iteration, general_method=general_method, **keyword_arguments)
     
-    # Format loss data
+    # Format loss/entropy data
     try:
         loss_df = pd.DataFrame(
-            np.dstack((np.arange(1, len(loss)+1), loss))[0], columns=['iteration', 'loss'])
+            np.dstack((np.arange(1, len(loss)+1), loss, entropy))[0],
+            columns=['iteration', 'loss', 'entropy'])
     except IndexError:
         loss_df = None
 
@@ -2993,10 +3010,12 @@ def run_optimization(input_path=None,
 
         if loss_df is not None and console:
             console.print("Final loss: {}".format(loss_df['loss'].values[-1]))
+            console.print("Final entropy: {}".format(loss_df['entropy'].values[-1]))
 
     # Finalize results
     results = {
         'loss': loss_df if loss_df is not None else loss,
+        'entropy': loss_df if loss_df is not None else entropy,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }

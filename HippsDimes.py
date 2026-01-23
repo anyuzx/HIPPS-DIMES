@@ -1742,28 +1742,6 @@ class Optimize:
         np.fill_diagonal(freeze, False)
         self.A[freeze] = 0.0
 
-    #def run_masked(self, epoch, edge_mask, ddmap_target_masked=None, general_method='optimization', **kwargs):
-        """Run optimization with a fixed off-diagonal mask (useful for greedy pruning).
-
-        Parameters
-        ----------
-        epoch : int
-            Number of iterations.
-        edge_mask : (n,n) bool
-            Off-diagonal mask; False => freeze A_ij = 0 for i!=j.
-        ddmap_target_masked : (n,n) float or None
-            If provided, overrides self.ddmap_target. Use NaN on unconstrained pairs.
-        general_method : str
-            Only 'optimization' is supported for masked runs. ('direct' requires full EMD).
-        """
-    #    if ddmap_target_masked is not None:
-    #        if ddmap_target_masked.shape != (self.n, self.n):
-    #            raise ValueError("ddmap_target_masked must match the current system size")
-    #        self.ddmap_target = ddmap_target_masked
-
-    #    self.set_edge_mask(edge_mask)
-    #    return self.run(epoch, general_method=general_method, **kwargs)
-
     def run_masked(self, epoch, edge_mask, ddmap_target_masked=None, general_method='optimization', **kwargs):
         """Run optimization with a fixed off-diagonal mask, optimized for *sparse* constraints.
 

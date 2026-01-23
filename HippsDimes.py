@@ -1677,7 +1677,7 @@ class Optimize:
     >>> loss, entropy, dmap, A = opt.run(1000, learning_rate=10.0, method='IS', momentum=0.9)
     """
     
-    def __init__(self, ddmap_target, connectivity_matrix=None, use_gpu=False):
+    def __init__(self, ddmap_target, connectivity_matrix=None, use_gpu=False, gpu_float32=False):
         # ddmap_target is the targeted matrix we would like to match
         # note that ddmap_taret is the mean SQUARED distance matrix, not mean distance matrix
         self.ddmap_target = ddmap_target
@@ -1712,9 +1712,12 @@ class Optimize:
             console.print("[yellow]Warning: use_gpu=True but CuPy is not available. Falling back to CPU.[/yellow]")
         
         if self.use_gpu:
+            # Optional float32 mode on GPU (faster on many GPUs, but can slightly change numerics)
+            self.gpu_float32 = bool(gpu_float32)
+            self._gpu_dtype = cp.float32 if self.gpu_float32 else cp.float64
             # Move data to GPU
-            self._A_gpu = cp.asarray(self.A)
-            self._ddmap_target_gpu = cp.asarray(self.ddmap_target)
+            self._A_gpu = cp.asarray(self.A, dtype=self._gpu_dtype)
+            self._ddmap_target_gpu = cp.asarray(self.ddmap_target, dtype=self._gpu_dtype)
             self._velocity_gpu = None
             # Cached GPU masks (to avoid per-iteration cp.asarray allocations)
             self._edge_mask_gpu = None
@@ -1723,6 +1726,8 @@ class Optimize:
             self._theta_gpu = None
             cp.cuda.Stream.null.synchronize()
         else:
+            self.gpu_float32 = False
+            self._gpu_dtype = None
             self._edge_mask_gpu = None
             self._freeze_mask_gpu = None
             self._theta_gpu = None
@@ -2061,7 +2066,9 @@ class Optimize:
         """GPU-accelerated version of __update_parameter for IS method using CuPy."""
         # Compute mean squared distance matrix on GPU
         dmap_t_gpu, eigvals_A_gpu = _a2dmap_theory_gpu(self._A_gpu, force_positive_definite=True, return_eigenvalues=True)
-        ddmap_t_gpu = ((3. * cp.pi) / 8.) * cp.power(dmap_t_gpu, 2.)
+        # Keep dtype stable (avoid implicit float64 upcast when using cp.pi)
+        dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
+        ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
         
         # Compute ratio and gradient on GPU
         compare_ratio_gpu = ddmap_t_gpu / self._ddmap_target_gpu
@@ -2146,7 +2153,8 @@ class Optimize:
         
         # Compute mean squared distance matrix on GPU
         dmap_t_gpu, eigvals_A_gpu = _a2dmap_theory_gpu(self._A_gpu, force_positive_definite=True, return_eigenvalues=True)
-        ddmap_t_gpu = ((3. * cp.pi) / 8.) * cp.power(dmap_t_gpu, 2.)
+        dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
+        ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
         
         # Compute gradient for GD
         if lamd > 0.0:
@@ -2689,6 +2697,7 @@ def run_optimization(input_path=None,
                      momentum=0.0,
                      nesterov=False,
                      use_gpu=False,
+                     gpu_float32=False,
                      input_type='cmap',
                      input_format='text',
                      binsize=25000,
@@ -3053,10 +3062,11 @@ def run_optimization(input_path=None,
             console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
-    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu)
+    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
     
     if use_gpu and model.use_gpu and verbose:
-        console.print(f"[green]GPU acceleration enabled ({get_gpu_name()})[/green]")
+        dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
+        console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
     
     keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
                          'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
@@ -3214,6 +3224,7 @@ def _parse_save_steps(save_steps_str):
     Enables higher momentum (0.95) without divergence. RECOMMENDED: Use with --momentum 0.95 for fastest convergence.')
 @click.option('--use-gpu', is_flag=True, default=False, show_default=True, help='Use GPU acceleration via CuPy. \
     Provides 2-4x speedup for large matrices (n >= 200). Requires CuPy: conda install -c conda-forge cupy')
+@click.option('--gpu-float32', is_flag=True, default=False, show_default=True, help='When using --use-gpu, run GPU math/eigendecomposition in float32 (often faster, slightly different numerics).')
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
@@ -3229,7 +3240,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, \
-    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, quiet):
+    gpu_float32, input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, quiet):
     """
     Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
     
@@ -3254,6 +3265,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         momentum=momentum,
         nesterov=nesterov,
         use_gpu=use_gpu,
+        gpu_float32=gpu_float32,
         input_type=input_type,
         input_format=input_format,
         binsize=binsize,

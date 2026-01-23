@@ -2694,7 +2694,7 @@ def run_optimization(input_path=None,
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
         If True and CuPy is installed, use GPU acceleration for eigendecomposition.
-        Provides 40-180x speedup for matrices with n >= 200.
+        Provides 2-4x speedup for matrices with n >= 200.
         Requires: conda install -c conda-forge cupy
     input_type : str, default='cmap'
         Type of input: 'cmap' (contact map) or 'dmap' (distance map)
@@ -2953,9 +2953,9 @@ def run_optimization(input_path=None,
     if verbose:
         if is_gpu_available() and not use_gpu:
             gpu_name = get_gpu_name()
-            console.print(f"[cyan]Tip: GPU detected ({gpu_name}). Use --use-gpu (CLI) or use_gpu=True for 40-180x speedup on large matrices (n >= 200).[/cyan]")
+            console.print(f"[cyan]Tip: GPU detected ({gpu_name}). Use --use-gpu (CLI) or use_gpu=True for 2-4x speedup on large matrices (n >= 200).[/cyan]")
         elif not is_gpu_available() and dmap_target.shape[0] >= 200:
-            console.print("[cyan]Tip: For large matrices, GPU acceleration can provide 40-180x speedup. Install CuPy to enable: conda install -c conda-forge cupy[/cyan]")
+            console.print("[cyan]Tip: For large matrices, GPU acceleration can provide 2-4x speedup. Install CuPy to enable: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
     model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu)

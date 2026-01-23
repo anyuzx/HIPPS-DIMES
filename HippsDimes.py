@@ -111,7 +111,9 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
     if force_positive_definite:
         temp = cp.where(temp < 0.0, 0.0, temp)
     
-    Omega = eigvector @ cp.diag(temp) @ eigvector.T
+    # Avoid materializing a dense diagonal matrix:
+    # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
+    Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = cp.diag(Omega)
     sigma = cp.sqrt(Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega)
     dmap = 2.0 * cp.sqrt(2.0 / cp.pi) * sigma
@@ -902,7 +904,9 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     if force_positive_definite:
         temp[temp < 0.0] = 0.0
 
-    Omega = eigvector @ np.diag(temp) @ eigvector.T
+    # Avoid materializing a dense diagonal matrix:
+    # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
+    Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = np.diag(Omega)
     sigma = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
 
@@ -999,7 +1003,8 @@ def a2dmap_theory_with_force_applied(A, force):
     temp[np.abs(temp) >= TOL] = 0.0
     
     # Compute Ω matrix for thermal fluctuations: Ω = V * diag(-1/λ) * V^T
-    Omega = eigvector @ np.diag(temp) @ eigvector.T
+    # Avoid materializing a dense diagonal matrix:
+    Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = np.diag(Omega)
     
     # Thermal fluctuation contribution (variance in each dimension)
@@ -1709,7 +1714,16 @@ class Optimize:
             self._A_gpu = cp.asarray(self.A)
             self._ddmap_target_gpu = cp.asarray(self.ddmap_target)
             self._velocity_gpu = None
+            # Cached GPU masks (to avoid per-iteration cp.asarray allocations)
+            self._edge_mask_gpu = None
+            self._freeze_mask_gpu = None
+            # Theta for GD GPU path
+            self._theta_gpu = None
             cp.cuda.Stream.null.synchronize()
+        else:
+            self._edge_mask_gpu = None
+            self._freeze_mask_gpu = None
+            self._theta_gpu = None
 
     def set_edge_mask(self, edge_mask):
         """Set/update the off-diagonal mask for optimization.
@@ -1723,6 +1737,9 @@ class Optimize:
         """
         if edge_mask is None:
             self.edge_mask = None
+            if self.use_gpu:
+                self._edge_mask_gpu = None
+                self._freeze_mask_gpu = None
             return
 
         m = np.array(edge_mask, dtype=bool, copy=True)
@@ -1733,6 +1750,11 @@ class Optimize:
         m = np.logical_and(m, m.T)
         np.fill_diagonal(m, False)
         self.edge_mask = m
+        # Cache GPU copies of masks (mask is typically constant across iterations)
+        if self.use_gpu:
+            self._edge_mask_gpu = cp.asarray(self.edge_mask)
+            self._freeze_mask_gpu = ~self._edge_mask_gpu
+            cp.fill_diagonal(self._freeze_mask_gpu, False)
 
     def _freeze_masked_edges(self):
         """Force masked (disallowed) off-diagonals to be exactly zero."""
@@ -2057,8 +2079,8 @@ class Optimize:
         
         # Apply optional edge mask (if set, need to transfer to GPU)
         if self.edge_mask is not None:
-            edge_mask_gpu = cp.asarray(self.edge_mask)
-            gradient_t_gpu *= edge_mask_gpu
+            # Use cached mask to avoid per-iteration host->device transfer
+            gradient_t_gpu *= self._edge_mask_gpu
         
         # Apply update with optional momentum (standard or Nesterov)
         if momentum > 0.0:
@@ -2081,9 +2103,8 @@ class Optimize:
         
         # Apply edge mask freeze (if set)
         if self.edge_mask is not None:
-            freeze_gpu = ~cp.asarray(self.edge_mask)
-            cp.fill_diagonal(freeze_gpu, False)
-            self._A_gpu = cp.where(freeze_gpu, 0.0, self._A_gpu)
+            # Use cached freeze mask
+            self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
         
         # Rebuild diagonal (a2a operation on GPU)
         # a2a sets diagonal to negative sum of off-diagonal elements in each row
@@ -2110,9 +2131,9 @@ class Optimize:
         log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
         self.entropy = float(cp.sum(log_terms))
         
-        # Sync A back to CPU (needed for saving/display)
-        # Note: asnumpy() already synchronizes, no need for explicit sync
-        self.A = cp.asnumpy(self._A_gpu)
+        # NOTE: We intentionally do NOT sync self.A back to CPU here.
+        # Syncing an (n,n) matrix every iteration can dominate runtime for n~1000.
+        # We sync only when needed (save_steps) and once at the end of run().
 
     def __update_parameter_gpu_gd(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False):
         """GPU-accelerated version of __update_parameter for GD method using CuPy."""
@@ -2138,8 +2159,7 @@ class Optimize:
         
         # Apply optional edge mask
         if self.edge_mask is not None:
-            edge_mask_gpu = cp.asarray(self.edge_mask)
-            gradient_t_gpu *= edge_mask_gpu
+            gradient_t_gpu *= self._edge_mask_gpu
         
         # Nesterov-like update (built into GD method)
         theta_previous_gpu = self._theta_gpu.copy()
@@ -2157,9 +2177,7 @@ class Optimize:
         
         # Apply edge mask freeze (if set)
         if self.edge_mask is not None:
-            freeze_gpu = ~cp.asarray(self.edge_mask)
-            cp.fill_diagonal(freeze_gpu, False)
-            self._A_gpu = cp.where(freeze_gpu, 0.0, self._A_gpu)
+            self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
         
         # Rebuild diagonal (a2a operation on GPU)
         if enforce_nonnegative_connectivity_matrix:
@@ -2183,9 +2201,8 @@ class Optimize:
         log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
         self.entropy = float(cp.sum(log_terms))
         
-        # Sync A back to CPU (needed for saving/display)
-        # Note: asnumpy() already synchronizes, no need for explicit sync
-        self.A = cp.asnumpy(self._A_gpu)
+        # NOTE: We intentionally do NOT sync self.A back to CPU here.
+        # Sync only when needed (save_steps) and once at the end of run().
 
     def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
         """
@@ -2256,6 +2273,9 @@ class Optimize:
                     # Save connectivity matrix at specified iteration steps
                     # Note: t is 0-indexed, so we check for t+1 to match iteration number
                     if save_steps_set is not None and (t + 1) in save_steps_set:
+                        # For GPU mode, sync to CPU only when needed
+                        if self.use_gpu:
+                            self.A = cp.asnumpy(self._A_gpu)
                         filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, t + 1)
                         np.savetxt(filename, self.A)
                         console.print(f"[green]Saved connectivity matrix at iteration {t + 1} to {filename}[/green]")
@@ -2271,6 +2291,9 @@ class Optimize:
             eigvals_K = scipy.linalg.eigh(-self.A, eigvals_only=True)
             entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
 
+        # Ensure self.A is up-to-date on CPU before returning / computing dmap
+        if self.use_gpu:
+            self.A = cp.asnumpy(self._A_gpu)
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
         return loss_array, entropy_array, dmap_maxent, self.A

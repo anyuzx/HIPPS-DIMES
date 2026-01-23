@@ -2750,7 +2750,7 @@ def run_optimization(input_path=None,
     
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
-    - Provides 40-180x speedup for matrices with n >= 200
+    - In practice, this provides 2-4x speedup for matrices with n >= 200
     - For n < 200, CPU may be faster due to GPU transfer overhead
     - Install CuPy: conda install -c conda-forge cupy
     

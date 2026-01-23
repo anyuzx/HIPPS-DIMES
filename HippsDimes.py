@@ -1577,6 +1577,59 @@ def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilo
 #------------------------------------------------------------------#
 
 
+def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
+    """Compute the entropy of the maximum entropy model from connectivity matrix A.
+    
+    The model is a multivariate Gaussian distribution. The entropy is:
+        H = constant + log(det(K+))
+    where K = -A is the positive semi-definite matrix, and K+ is its pseudo-inverse.
+    
+    For numerical stability, we compute:
+        log(det(K+)) = sum_i log(1/λ_i) = -sum_i log(λ_i)
+    for all non-zero eigenvalues λ_i of K.
+    
+    Parameters
+    ----------
+    A : (n,n) array
+        Connectivity matrix (negative semi-definite, Laplacian-like).
+    zero_tol : float, default=1e-12
+        Tolerance for identifying zero eigenvalues.
+    eigvals : array_like, optional
+        Precomputed eigenvalues of K = -A. If provided, avoids recomputing eigenvalues.
+    
+    Returns
+    -------
+    entropy : float
+        log(det(K+)) where K = -A and K+ is pseudo-inverse.
+    """
+    K = -A
+    
+    if eigvals is not None:
+        eigvals = np.asarray(eigvals)
+    else:
+        eigvals = scipy.linalg.eigh(K, eigvals_only=True)
+    
+    positive_mask = eigvals > zero_tol
+    positive_eigvals = eigvals[positive_mask]
+    
+    if len(positive_eigvals) == 0:
+        max_eigval = np.max(eigvals) if len(eigvals) > 0 else 0.0
+        if max_eigval < zero_tol:
+            return -np.inf
+        return np.nan
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log_terms = -np.log(positive_eigvals)
+    
+    if np.any(~np.isfinite(log_terms)):
+        return np.nan
+    
+    entropy = np.sum(log_terms)
+    if not np.isfinite(entropy):
+        return np.nan
+    return entropy
+
+
 class Optimize:
     """
     Optimizer for finding connectivity matrix A that matches target distance constraints.

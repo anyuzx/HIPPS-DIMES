@@ -6,25 +6,25 @@ This note documents the convergence and performance changes implemented in `Hipp
 
 The optimization targets the maximum-entropy Gaussian model whose connectivity matrix `A` (Laplacian-like, negative semidefinite) reproduces a target mean-squared distance map:
 
-```
+```text
 ddmap[i,j] = <||x_i - x_j||^2>
 ```
 
 The model-predicted mean-squared distances are computed from the mean distance map:
 
-```
+```text
 ddmap = (3*pi/8) * (dmap)^2
 ```
 
 For IS, the update is driven by the log-ratio between current and target ddmaps:
 
-```
+```text
 gradient = log(ddmap_current / ddmap_target) / fhash
 ```
 
 For GD, the update is driven by the residual:
 
-```
+```text
 gradient = ddmap_current - ddmap_target
 ```
 
@@ -78,6 +78,7 @@ else:
 ```
 
 **Recommended settings:**
+
 - `momentum=0.95, nesterov=True` (fastest stable setting)
 - `momentum=0.9` (conservative)
 
@@ -158,7 +159,7 @@ self._A_gpu = self._theta_gpu + momentum_rate * (self._theta_gpu - theta_previou
 
 Entropy is computed from eigenvalues of `K = -A` as:
 
-```
+```text
 H = -sum_i log(λ_i),   λ_i > 0
 ```
 

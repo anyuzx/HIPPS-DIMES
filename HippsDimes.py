@@ -2197,6 +2197,11 @@ class Optimize:
             Number of iterations
         general_method : str
             'optimization' or 'direct'
+        save_steps : list of int, optional
+            Iteration steps at which to save the connectivity matrix.
+            Files will be saved as '{output_prefix}_connectivity_matrix_iter{step}.txt'
+        output_prefix : str, optional
+            Prefix for output files (required if save_steps is provided)
         **kwargs
             Additional arguments passed to __update_parameter:
             - learning_rate : float
@@ -2223,6 +2228,21 @@ class Optimize:
 
         loss_array = []
         entropy_array = []
+        
+        # Convert save_steps to a set for fast lookup and validate
+        save_steps_set = None
+        if save_steps is not None:
+            save_steps_list = list(save_steps)
+            # Filter out invalid steps (must be positive and <= epoch)
+            valid_steps = [s for s in save_steps_list if 1 <= s <= epoch]
+            if len(valid_steps) < len(save_steps_list):
+                invalid = [s for s in save_steps_list if s < 1 or s > epoch]
+                console.print(f"[yellow]Warning: Some save_steps are out of range and will be ignored: {invalid}[/yellow]")
+            save_steps_set = set(valid_steps)
+            if output_prefix is None:
+                raise ValueError("output_prefix must be provided when save_steps is specified")
+            if len(save_steps_set) > 0:
+                console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
         if general_method == 'optimization':
             with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
@@ -2232,6 +2252,13 @@ class Optimize:
                     pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
                     loss_array.append(self.loss)
                     entropy_array.append(self.entropy if self.entropy is not None else np.nan)
+                    
+                    # Save connectivity matrix at specified iteration steps
+                    # Note: t is 0-indexed, so we check for t+1 to match iteration number
+                    if save_steps_set is not None and (t + 1) in save_steps_set:
+                        filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, t + 1)
+                        np.savetxt(filename, self.A)
+                        console.print(f"[green]Saved connectivity matrix at iteration {t + 1} to {filename}[/green]")
         elif general_method == 'direct':
             if not checkEMD(self.ddmap_target):
                 raise ValueError(
@@ -2648,6 +2675,7 @@ def run_optimization(input_path=None,
                      not_normalize=False,
                      neighbor_balance=False,
                      enforce_nonnegative_connectivity_matrix=False,
+                     save_steps=None,
                      verbose=True):
     """
     Core function to run HIPPS/DIMES optimization that can be called programmatically or from CLI.
@@ -2714,6 +2742,10 @@ def run_optimization(input_path=None,
         Apply neighbor balancing for contact map
     enforce_nonnegative_connectivity_matrix : bool, default=False
         Enforce non-negative spring constants
+    save_steps : list of int, optional
+        Iteration steps at which to save the connectivity matrix.
+        Files will be saved as '{output_prefix}_connectivity_matrix_iter{step}.txt'
+        Requires output_prefix to be set.
     verbose : bool, default=True
         Whether to print status messages
         
@@ -2967,7 +2999,8 @@ def run_optimization(input_path=None,
         general_method = 'direct'
 
     loss, entropy, dmap_maxent, final_connectivity_matrix = model.run(
-        iteration, general_method=general_method, **keyword_arguments)
+        iteration, general_method=general_method, save_steps=save_steps, 
+        output_prefix=output_prefix, **keyword_arguments)
     
     # Format loss/entropy data
     try:
@@ -3066,6 +3099,31 @@ def run_optimization(input_path=None,
     return results
 
 
+def _parse_save_steps(save_steps_str):
+    """Parse comma-separated save_steps string into list of integers.
+    
+    Parameters
+    ----------
+    save_steps_str : str or None
+        Comma-separated list of iteration steps, e.g., "1000,5000,10000"
+    
+    Returns
+    -------
+    list of int or None
+        List of iteration steps
+    """
+    if not save_steps_str:
+        return None
+    
+    try:
+        steps = [int(s.strip()) for s in save_steps_str.split(',')]
+        # Remove duplicates and sort
+        steps = sorted(list(set(steps)))
+        return steps
+    except ValueError as e:
+        raise ValueError(f"Invalid save_steps format: '{save_steps_str}'. Expected comma-separated integers, e.g., '1000,5000,10000'") from e
+
+
 @click.command()
 @click.argument('input', nargs=1)
 @click.argument('output-prefix', nargs=1)
@@ -3140,6 +3198,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         not_normalize=not_normalize,
         neighbor_balance=neighbor_balance,
         enforce_nonnegative_connectivity_matrix=enforce_nonnegative_connectivity_matrix,
+        save_steps=_parse_save_steps(save_steps) if save_steps else None,
         verbose=True
     )
 

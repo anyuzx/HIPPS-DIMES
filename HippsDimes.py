@@ -2937,51 +2937,94 @@ def run_optimization(input_path=None,
             status.stop()
         raise e
 
-    # Print parameter table if verbose
+    # Print parameter tables if verbose
     if verbose and console:
-        table = Table(title="Some Basic Parameters")
-        table.add_column("Input Source", no_wrap=False)
-        table.add_column("Input Type", no_wrap=False)
-        table.add_column("Input Format", no_wrap=False)
-        table.add_column("Optimization method", no_wrap=False)
-        table.add_column("Matrix Size", no_wrap=False)
-        table.add_column("Number of Iterations", no_wrap=False)
-        table.add_column("Regularization", no_wrap=False)
-        table.add_column("Ignore Missing Data", no_wrap=False)
-        table.add_column("Matrix Balancing", no_wrap=False)
-        table.add_column("Neighbor Balancing", no_wrap=False)
-        table.add_column("Matrix Normalization", no_wrap=False)
+        # Table 1: Input & Data Settings
+        input_table = Table(title="Input & Data Settings", show_header=True, header_style="bold cyan")
+        input_table.add_column("Parameter", style="dim", width=20)
+        input_table.add_column("Value", style="green")
         
         input_source = input_path if input_path else "NumPy array"
-        table.add_row(input_source,
-                      "{}".format("Contact Map" if input_type ==
-                                  'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"),
-                      "{}".format("Text" if input_format ==
-                                  'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"),
-                      "{}".format("Iterative Scaling" if method == 'IS' else "Gradient Descent" if method ==
-                                  'GD' else "Direct Inversion" if method == 'DI' else "Unknown"),
-                      "{}".format("{}x{}".format(
-                          dmap_target.shape[0], dmap_target.shape[1])),
-                      "{}".format(iteration),
-                      "{}".format(reg if lamd > 0.0 else "No" if lamd ==
-                                  0.0 else "Unknown"),
-                      "{}".format("Yes" if ignore_missing_data else "No"),
-                      "{}".format("Yes" if balance else "No" if (
-                          balance is False and input_format == 'cooler') else "N/A"),
-                      "{}".format("Yes" if neighbor_balance else "No" if (
-                          neighbor_balance is False and input_type == 'cmap') else "N/A"),
-                      "{}".format("No" if (not_normalize is True and input_type == 'cmap') else "Yes" if (
-                          not_normalize is False and input_type == 'cmap') else "N/A")
-                      )
-        console.print(table)
+        input_type_str = "Contact Map" if input_type == 'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"
+        input_format_str = "Text" if input_format == 'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"
+        
+        input_table.add_row("Input Source", input_source)
+        input_table.add_row("Input Type", input_type_str)
+        input_table.add_row("Input Format", input_format_str)
+        input_table.add_row("Matrix Size", f"{dmap_target.shape[0]} × {dmap_target.shape[1]}")
+        if input_type == 'cmap':
+            input_table.add_row("Alpha (cmap→dmap)", f"{alpha}")
+            input_table.add_row("Matrix Balancing", "Yes" if balance else "No" if input_format == 'cooler' else "N/A")
+            input_table.add_row("Neighbor Balancing", "Yes" if neighbor_balance else "No")
+            input_table.add_row("Auto Normalization", "No" if not_normalize else "Yes")
+        input_table.add_row("Ignore Missing Data", "Yes" if ignore_missing_data else "No")
+        
+        console.print(input_table)
+        console.print()  # spacing
+        
+        # Table 2: Optimization Settings
+        opt_table = Table(title="Optimization Settings", show_header=True, header_style="bold cyan")
+        opt_table.add_column("Parameter", style="dim", width=20)
+        opt_table.add_column("Value", style="green")
+        
+        method_str = "Iterative Scaling (IS)" if method == 'IS' else "Gradient Descent (GD)" if method == 'GD' else "Direct Inversion (DI)" if method == 'DI' else "Unknown"
+        opt_table.add_row("Method", method_str)
+        
+        if method != 'DI':
+            opt_table.add_row("Iterations", f"{iteration:,}")
+            opt_table.add_row("Learning Rate", f"{learning_rate}")
+            
+            # Momentum and Nesterov (only for IS)
+            if method == 'IS':
+                if momentum > 0:
+                    momentum_str = f"{momentum}"
+                    if nesterov:
+                        momentum_str += " [bold green](+ Nesterov)[/bold green]"
+                    opt_table.add_row("Momentum", momentum_str)
+                else:
+                    opt_table.add_row("Momentum", "Disabled")
+            
+            # Regularization
+            if lamd > 0.0:
+                opt_table.add_row("Regularization", f"{reg} (λ = {lamd})")
+            else:
+                opt_table.add_row("Regularization", "None")
+        
+        # GPU
+        gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
+        if use_gpu and is_gpu_available():
+            gpu_status += f" ({get_gpu_name()})"
+        elif use_gpu and not is_gpu_available():
+            gpu_status = "[red]Requested but CuPy not available[/red]"
+        opt_table.add_row("GPU Acceleration", gpu_status)
+        
+        # Constraints
+        opt_table.add_row("Nonnegative Springs", "Yes" if enforce_nonnegative_connectivity_matrix else "No")
+        
+        console.print(opt_table)
+        console.print()  # spacing
+        
+        # Table 3: Output Settings
+        output_table = Table(title="Output Settings", show_header=True, header_style="bold cyan")
+        output_table.add_column("Parameter", style="dim", width=20)
+        output_table.add_column("Value", style="green")
+        
+        output_table.add_row("Ensemble Size", f"{ensemble:,} structures")
+        output_table.add_row("Output Prefix", output_prefix if output_prefix else "[dim]None (results returned only)[/dim]")
+        output_table.add_row("Write XYZ File", "No" if no_xyzs else "Yes")
+        output_table.add_row("Write Log File", "Yes" if log else "No")
+        if save_steps:
+            output_table.add_row("Save Steps", ", ".join(str(s) for s in save_steps))
+        
+        console.print(output_table)
 
-    # GPU availability reminder
+    # GPU availability tip (only if not using GPU and it's available or could help)
     if verbose:
         if is_gpu_available() and not use_gpu:
             gpu_name = get_gpu_name()
-            console.print(f"[cyan]Tip: GPU detected ({gpu_name}). Use --use-gpu (CLI) or use_gpu=True for 2-4x speedup on large matrices (n >= 200).[/cyan]")
+            console.print(f"\n[cyan]💡 Tip: GPU detected ({gpu_name}). Use --use-gpu for 2-4x speedup on large matrices.[/cyan]")
         elif not is_gpu_available() and dmap_target.shape[0] >= 200:
-            console.print("[cyan]Tip: For large matrices, GPU acceleration can provide 2-4x speedup. Install CuPy to enable: conda install -c conda-forge cupy[/cyan]")
+            console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
     model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu)

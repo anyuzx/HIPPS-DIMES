@@ -890,7 +890,9 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
         Eigenvalues of A (only returned if return_eigenvalues=True)
     """
     TOL = 10**8
-    eigvalue, eigvector = scipy.linalg.eigh(A)
+    # check_finite=False avoids extra scans of the matrix and is safe here
+    # (A is generated/updated numerically and we already nan_to_num() in optimization)
+    eigvalue, eigvector = scipy.linalg.eigh(A, check_finite=False)
 
     temp = -1.0 / eigvalue
 
@@ -992,7 +994,7 @@ def a2dmap_theory_with_force_applied(A, force):
         B[locus] = force_amplitude * force_direction
     
     # Eigendecomposition
-    eigvalue, eigvector = scipy.linalg.eigh(A)
+    eigvalue, eigvector = scipy.linalg.eigh(A, check_finite=False)
     
     # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
     temp = -1.0 / eigvalue
@@ -1612,7 +1614,7 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
     if eigvals is not None:
         eigvals = np.asarray(eigvals)
     else:
-        eigvals = scipy.linalg.eigh(K, eigvals_only=True)
+        eigvals = scipy.linalg.eigh(K, eigvals_only=True, check_finite=False)
     
     positive_mask = eigvals > zero_tol
     positive_eigvals = eigvals[positive_mask]
@@ -2063,7 +2065,8 @@ class Optimize:
         
         # Compute ratio and gradient on GPU
         compare_ratio_gpu = ddmap_t_gpu / self._ddmap_target_gpu
-        fhash = float(cp.nansum(ddmap_t_gpu) / 2.)
+        # Keep fhash on GPU to avoid an extra device->host sync each iteration
+        fhash = cp.nansum(ddmap_t_gpu) / 2.
         
         # Compute gradient
         if lamd > 0.0:

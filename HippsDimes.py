@@ -3201,8 +3201,9 @@ def _parse_save_steps(save_steps_str):
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
+@click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, \
-    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps):
+    input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, quiet):
     """
     Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
     
@@ -3242,7 +3243,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         neighbor_balance=neighbor_balance,
         enforce_nonnegative_connectivity_matrix=enforce_nonnegative_connectivity_matrix,
         save_steps=_parse_save_steps(save_steps) if save_steps else None,
-        verbose=True
+        verbose=not quiet
     )
 
 

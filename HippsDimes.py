@@ -3210,8 +3210,6 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     INPUT: Specify the path to the input file
     
     OUTPUT_PREFIX: Specify the prefix for output files
-    
-    If you use this program in your publication, please cite this paper: https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
     """
     # Call the core function
     run_optimization(

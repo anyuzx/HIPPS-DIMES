@@ -3089,7 +3089,7 @@ def run_optimization(input_path=None,
 @click.option('--nesterov', is_flag=True, default=False, show_default=True, help='Use Nesterov Accelerated Gradient (NAG). \
     Enables higher momentum (0.95) without divergence. RECOMMENDED: Use with --momentum 0.95 for fastest convergence.')
 @click.option('--use-gpu', is_flag=True, default=False, show_default=True, help='Use GPU acceleration via CuPy. \
-    Provides 40-180x speedup for large matrices (n >= 200). Requires CuPy: conda install -c conda-forge cupy')
+    Provides 2-4x speedup for large matrices (n >= 200). Requires CuPy: conda install -c conda-forge cupy')
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')

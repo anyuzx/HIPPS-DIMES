@@ -1724,6 +1724,11 @@ class Optimize:
             self._freeze_mask_gpu = None
             # Theta for GD GPU path
             self._theta_gpu = None
+            # Loss/entropy scalars on GPU (avoid per-iteration device->host sync)
+            self._loss_gpu = None
+            self._entropy_gpu = None
+            # How often to sync loss/entropy for tqdm display (syncing every iter can dominate runtime)
+            self.gpu_display_every = 10
             cp.cuda.Stream.null.synchronize()
         else:
             self.gpu_float32 = False
@@ -1731,6 +1736,9 @@ class Optimize:
             self._edge_mask_gpu = None
             self._freeze_mask_gpu = None
             self._theta_gpu = None
+            self._loss_gpu = None
+            self._entropy_gpu = None
+            self.gpu_display_every = None
 
     def set_edge_mask(self, edge_mask):
         """Set/update the off-diagonal mask for optimization.
@@ -2131,7 +2139,7 @@ class Optimize:
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
         loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
-        self.loss = float(loss_gpu)
+        self._loss_gpu = loss_gpu
         
         # Compute entropy on GPU using eigenvalues already on GPU
         # K = -A, so eigenvalues of K = -eigenvalues of A
@@ -2139,7 +2147,7 @@ class Optimize:
         eigvals_K_gpu = -eigvals_A_gpu
         positive_mask = eigvals_K_gpu > 1e-12
         log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self.entropy = float(cp.sum(log_terms))
+        self._entropy_gpu = cp.sum(log_terms)
         
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Syncing an (n,n) matrix every iteration can dominate runtime for n~1000.
@@ -2202,7 +2210,7 @@ class Optimize:
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
         loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
-        self.loss = float(loss_gpu)
+        self._loss_gpu = loss_gpu
         
         # Compute entropy on GPU using eigenvalues already on GPU
         # K = -A, so eigenvalues of K = -eigenvalues of A
@@ -2210,7 +2218,7 @@ class Optimize:
         eigvals_K_gpu = -eigvals_A_gpu
         positive_mask = eigvals_K_gpu > 1e-12
         log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self.entropy = float(cp.sum(log_terms))
+        self._entropy_gpu = cp.sum(log_terms)
         
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Sync only when needed (save_steps) and once at the end of run().
@@ -2254,8 +2262,14 @@ class Optimize:
 
         console = Console()
 
-        loss_array = []
-        entropy_array = []
+        # For GPU runs we keep loss/entropy histories on device and copy once at the end,
+        # avoiding per-iteration device->host synchronization.
+        if self.use_gpu:
+            loss_hist_gpu = cp.empty(epoch, dtype=self._gpu_dtype)
+            entropy_hist_gpu = cp.empty(epoch, dtype=self._gpu_dtype)
+        else:
+            loss_array = []
+            entropy_array = []
         
         # Convert save_steps to a set for fast lookup and validate
         save_steps_set = None
@@ -2276,10 +2290,21 @@ class Optimize:
             with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
                 for t in pbar:
                     self.__update_parameter(t, **kwargs)
-                    # display loss at each iterations
-                    pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
-                    loss_array.append(self.loss)
-                    entropy_array.append(self.entropy if self.entropy is not None else np.nan)
+                    if self.use_gpu:
+                        # Record without syncing to host
+                        loss_hist_gpu[t] = self._loss_gpu
+                        entropy_hist_gpu[t] = self._entropy_gpu
+
+                        # Only sync occasionally for display (tqdm set_postfix wants Python scalars)
+                        if (t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch):
+                            self.loss = float(self._loss_gpu)
+                            self.entropy = float(self._entropy_gpu)
+                            pbar.set_postfix(loss=self.loss, entropy=self.entropy)
+                    else:
+                        # CPU path
+                        pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
+                        loss_array.append(self.loss)
+                        entropy_array.append(self.entropy if self.entropy is not None else np.nan)
                     
                     # Save connectivity matrix at specified iteration steps
                     # Note: t is 0-indexed, so we check for t+1 to match iteration number
@@ -2301,6 +2326,14 @@ class Optimize:
             # Compute entropy for direct inversion
             eigvals_K = scipy.linalg.eigh(-self.A, eigvals_only=True)
             entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
+
+        # Finalize loss/entropy arrays for GPU runs
+        if self.use_gpu:
+            loss_array = cp.asnumpy(loss_hist_gpu).tolist()
+            entropy_array = cp.asnumpy(entropy_hist_gpu).tolist()
+            # Ensure latest scalars are synced for callers that read model.loss/entropy
+            self.loss = float(self._loss_gpu) if self._loss_gpu is not None else None
+            self.entropy = float(self._entropy_gpu) if self._entropy_gpu is not None else None
 
         # Ensure self.A is up-to-date on CPU before returning / computing dmap
         if self.use_gpu:

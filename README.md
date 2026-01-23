@@ -253,6 +253,53 @@ The jupyter notebook `walkthrough.ipynb` in this repository contains additional 
   the two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
+### Determining the Number of Iterations (Convergence)
+
+The number of iterations needed for convergence varies depending on your data. We recommend the following approach to determine the optimal number of iterations:
+
+1. **Run a trial optimization** with a moderate number of iterations (e.g., 10,000–50,000) and enable the log file with `--log`:
+   ```bash
+   HippsDimes input.cool test --input-type cmap --input-format cooler -i 50000 --log
+   ```
+
+2. **Plot the entropy vs. iterations** from the generated log file (`test_loss.csv`). The log file contains columns for `iteration`, `loss`, and `entropy`.
+
+3. **Analyze the entropy curve**. In practice, two common patterns are observed:
+
+   - **Peak pattern**: Entropy increases initially, reaches a maximum, and then decreases. In this case, the optimal number of iterations is when the entropy is **maximized**. Running beyond this point may lead to overfitting.
+   
+   - **Plateau pattern**: Entropy increases and then levels off to a plateau. In this case, the optimal number of iterations is when the plateau is reached. Running beyond this point provides no additional benefit.
+
+4. **Re-run with the optimal iterations** once you've identified the convergence point from the entropy plot.
+
+Example Python code to visualize convergence:
+```python
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load the log file
+df = pd.read_csv('test_loss.csv')
+
+# Plot entropy vs iterations
+plt.figure(figsize=(10, 4))
+plt.subplot(1, 2, 1)
+plt.plot(df['iteration'], df['entropy'])
+plt.xlabel('Iteration')
+plt.ylabel('Entropy')
+plt.title('Entropy vs Iteration')
+
+# Plot loss vs iterations
+plt.subplot(1, 2, 2)
+plt.plot(df['iteration'], df['loss'])
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('Loss vs Iteration')
+plt.tight_layout()
+plt.show()
+```
+
+> **Note**: The entropy is a measure of the "randomness" or "uncertainty" in the predicted ensemble. The maximum entropy principle seeks to find the distribution that maximizes entropy while satisfying the constraints (the input contact/distance map). Therefore, the entropy at convergence represents the most unbiased prediction consistent with your data.
+
 ### Use it as a Python Library
 
 The HIPPS-DIMES code can be used both as a command-line tool and as a Python library. This makes it easy to integrate into your Python workflows, Jupyter notebooks, and automated pipelines.

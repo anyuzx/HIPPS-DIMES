@@ -51,7 +51,7 @@ The package requires:
 - `Scipy` - Scientific computing
 - `Pandas` - Data manipulation
 - `Tqdm` - Progress bars
-- `Cooler` - Hi-C data format support
+- `Cooler` - .mcool or .cool data format support
 - `Rich` - Rich terminal output
 - `hic-straw` - .hic format support
 
@@ -396,21 +396,97 @@ model.run(int(1e5), every = 10)
 
 Trajectory data can be accessed through `model.traj`. It is a `TxNx3` numpy array. `T` is the number of snapshots. `N` is the number of loci and 3 corresponds to coordinates at x, y, z dimensions.
 
+### Dynamics under external force: `Dynamics.run_with_force(...)`
+
+In addition to passive dynamics (`Dynamics.run`), you can simulate trajectories with a constant external force applied to selected loci.
+
+- **Key parameters**
+  - `force_loci`: list of locus indices where the force is applied
+  - `force_amplitude`: force magnitude
+  - `force_direction`: `(3,)` direction vector (it is normalized internally)
+  - `force_duration`: optional number of timesteps to apply the force (if `None`, force is applied for the whole run)
+
+#### Example: forced dynamics
+
+```python
+import numpy as np
+from HippsDimes import Dynamics
+
+# 'a' is the connectivity matrix (e.g., load from disk or obtain from run_optimization)
+a = np.loadtxt("my_connectivity_matrix.txt")
+model = Dynamics(a)  # a is the connectivity matrix
+model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+
+# Pull locus 10 along +x for the first 2e4 steps (then release)
+model.run_with_force(
+    T=int(1e5),
+    force_loci=[10],
+    force_amplitude=1.0,
+    force_direction=[1.0, 0.0, 0.0],
+    force_duration=int(2e4),
+    every=10,
+)
+
+traj = model.traj  # shape: (n_snapshots, N, 3)
+```
+
+## Modulus calculation
+
+HIPPS-DIMES also provides utilities to compute **linear viscoelastic moduli** from a connectivity matrix `a`. These routines decompose the polymer into normal modes (excluding the zero/center-of-mass mode) and evaluate the frequency-dependent **storage modulus** \(G'(\omega)\) and **loss modulus** \(G''(\omega)\).
+
+> **Note on units**: `freq` is interpreted as **angular frequency** \(\omega\). The returned moduli are in the model’s internal units and depend on the friction coefficient `zeta` used to define relaxation times.
+
+### `compute_modulus(a, freq, zeta=1.0)`
+
+Computes *system-level* moduli by summing contributions from all non-zero normal modes.
+
+- **Inputs**
+  - `a`: `(N, N)` symmetric connectivity matrix
+  - `freq`: `(n_freq,)` array of angular frequencies \(\omega\)
+  - `zeta`: friction coefficient (default `1.0`)
+- **Returns**
+  - `(freq, G_storage)` as a `(n_freq, 2)` array (`[omega, G'(omega)]`)
+  - `(freq, G_loss)` as a `(n_freq, 2)` array (`[omega, G''(omega)]`)
+
+### `compute_monomer_modulus(a, freq, zeta=1.0)`
+
+Computes *per-locus* moduli, i.e. how each locus contributes to the viscoelastic response.
+
+- **Returns**
+  - `freq`: `(n_freq,)`
+  - `G_prime_i`: `(n_freq, N)` array where `G_prime_i[k, i] = G'_i(freq[k])`
+  - `G_double_prime_i`: `(n_freq, N)` array where `G_double_prime_i[k, i] = G''_i(freq[k])`
+
+#### Example: compute moduli
+
+```python
+import numpy as np
+from HippsDimes import run_optimization, compute_modulus, compute_monomer_modulus
+
+# Example: obtain a connectivity matrix 'a' from HIPPS-DIMES
+# (you can also load a saved matrix from disk with np.loadtxt)
+results = run_optimization(input_matrix=np.loadtxt("contact_map.txt"), input_type="cmap", iteration=10000, verbose=False)
+a = results["connectivity_matrix"]
+
+# (1) Compute bulk moduli G'(ω), G''(ω)
+freq = np.logspace(-3, 3, 200)  # angular frequencies ω
+G_storage, G_loss = compute_modulus(a, freq, zeta=1.0)
+
+# (2) Compute per-locus moduli
+freq_out, Gp_i, Gpp_i = compute_monomer_modulus(a, freq, zeta=1.0)
+```
+
 ## How to cite
 
 If you used this program in your publication, please cite from the following
 reference:
 
-* _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
-Organization of Interphase Human Chromosomes." Physical Review X 11.1
-(2021): 011051._
+* _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051._
 
 * _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._
 
 * _Shi, G., Shin, S., and Thirumalai, D. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advances 11.31 (2025): eadx1763._
 
-[^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional
-Organization of Interphase Human Chromosomes." Physical Review X 11.1
-(2021): 011051._
+[^1]: _Shi, Guang, and D. Thirumalai. "From Hi-C Contact Map to Three-dimensional Organization of Interphase Human Chromosomes." Physical Review X 11.1 (2021): 011051._
 [^2]: _Shi, G., Thirumalai, D. A maximum-entropy model to predict 3D structural ensembles of chromatin from pairwise distances with applications to interphase chromosomes and structural variants. Nat Commun 14, 1150 (2023)._
 [^3]: _Shi, G., Shin, S., and Thirumalai, D. Static Three-Dimensional Structures Determine Fast Dynamics Between Distal Loci Pairs in Interphase Chromosomes. bioRxiv (2025)._

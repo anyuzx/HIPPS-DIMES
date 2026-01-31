@@ -4,7 +4,7 @@ This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3].
 
 In addition to reconstructing static 3D chromatin structures, the code now includes **dynamics prediction functionality** based on polymer physics and the Ornstein–Uhlenbeck process. This allows you to simulate time-dependent properties such as autocorrelation functions (ACF) and mean-square displacement (MSD) of individual loci, providing insights into the dynamic behavior of chromatin.
 
-**New in this version:** The optimization now supports **momentum and Nesterov acceleration** for faster convergence (~50% speedup), **GPU acceleration** via CuPy for large matrices, and **entropy tracking** during optimization. 
+**New version 2.3:** The optimization now supports **momentum and Nesterov acceleration** for faster convergence (~50% speedup), **GPU acceleration** via CuPy for large matrices, and **entropy tracking** during optimization. 
 
 The theory and applications of this method can be found in our work published:
 

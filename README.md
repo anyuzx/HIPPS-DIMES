@@ -19,7 +19,7 @@ Other applications of this method can be found in:
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 
 ## Install
 
@@ -46,7 +46,7 @@ python module. Once installed, you can call `HippsDimes` directly in the termina
 ### Dependencies
 
 The package requires:
-- Python 3.8+
+- Python 3.9+
 - `Click` - Command line interface
 - `Numpy` - Numerical computing
 - `Scipy` - Scientific computing

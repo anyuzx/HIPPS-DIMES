@@ -49,7 +49,8 @@ python module. Once installed, you can call `HippsDimes` directly in the termina
 
 The package requires:
 - Python 3.9+
-- `Click` - Command line interface
+- `Click` - Command line interface (fallback when rich-click is not installed)
+- `Rich-Click` - Rich-styled CLI (used when installed; falls back to Click otherwise)
 - `Numpy` - Numerical computing
 - `Scipy` - Scientific computing
 - `Pandas` - Data manipulation

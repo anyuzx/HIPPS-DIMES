@@ -8,6 +8,7 @@ https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 3. Shi, Guang, Sucheol, Shin, and D. Thirumalai. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advance 11 (31), eadx1763
 """
 
+import os
 import sys
 import warnings
 import itertools
@@ -124,6 +125,21 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
 
 
 #------------------------------------------------------------------#
+# Thread control for eigenvalue (eigh) and other BLAS/LAPACK operations
+def set_eigh_num_threads(n):
+    """
+    Set the number of threads used by BLAS/LAPACK for eigenvalue and linear algebra.
+    Must be called before any np.linalg.eigh (or similar) to take effect.
+    Sets: OPENBLAS_NUM_THREADS, MKL_NUM_THREADS, OMP_NUM_THREADS, VECLIB_MAXIMUM_THREADS.
+    """
+    s = str(int(n))
+    os.environ['OPENBLAS_NUM_THREADS'] = s
+    os.environ['MKL_NUM_THREADS'] = s
+    os.environ['OMP_NUM_THREADS'] = s
+    os.environ['VECLIB_MAXIMUM_THREADS'] = s
+
+
+#------------------------------------------------------------------#
 # Helper functions
 def compute_acf_general_theory(i, j, t, a, zeta=1.0):
     """
@@ -149,7 +165,7 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
     two_point_msd : np.ndarray
         2D array. First column is time `t`, second column is the two-point MSD at each time
     """
-    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue, eigvector = np.linalg.eigh(a)
     eigvalue_inv = 1.0 / eigvalue
 
     # difference in eigenvector components for monomers i and j
@@ -200,7 +216,7 @@ def compute_m1_i(i, t, a, zeta=1.0):
         2D array. First column is time `t`, second column is the MSD for 
         monomer i at those times.
     """
-    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue, eigvector = np.linalg.eigh(a)
     eigvalue_inv = 1.0 / eigvalue
     vpi = eigvector[i, :]
 
@@ -266,7 +282,7 @@ def compute_m1_all(a, t, zeta=1.0, tol=1e-12):
     n = a.shape[0]
     
     # Eigendecomposition
-    lam, V = scipy.linalg.eigh(a)  # lam: eigenvalues, V: eigenvectors
+    lam, V = np.linalg.eigh(a)  # lam: eigenvalues, V: eigenvectors
     
     # Find zero (CM) mode
     p0 = np.argmin(np.abs(lam))
@@ -350,7 +366,7 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
         raise ValueError("a must be a square matrix")
 
     # Eigen-decomposition of the connectivity matrix
-    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue, eigvector = np.linalg.eigh(a)
     
     # Discard zero mode
     eigvalue = eigvalue[1:]
@@ -619,7 +635,7 @@ def compute_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple
         raise ValueError("zeta must be a positive number")
         
     # Compute eigenvalues and eigenvectors
-    eigvalue, eigvector = scipy.linalg.eigh(a)
+    eigvalue, eigvector = np.linalg.eigh(a)
     
     # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
     eigvalue = eigvalue[:-1]             # Shape: (n_modes,)
@@ -678,7 +694,7 @@ def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) 
         raise ValueError("zeta must be a positive number")
     
     # Compute eigenvalues and eigenvectors
-    eigvals, eigvecs = scipy.linalg.eigh(a)
+    eigvals, eigvecs = np.linalg.eigh(a)
     
     # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
     eigvals = eigvals[:-1]             # Shape: (n_modes,)
@@ -892,7 +908,7 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     TOL = 10**8
     # check_finite=False avoids extra scans of the matrix and is safe here
     # (A is generated/updated numerically and we already nan_to_num() in optimization)
-    eigvalue, eigvector = scipy.linalg.eigh(A, check_finite=False)
+    eigvalue, eigvector = np.linalg.eigh(A)
 
     temp = -1.0 / eigvalue
 
@@ -994,7 +1010,7 @@ def a2dmap_theory_with_force_applied(A, force):
         B[locus] = force_amplitude * force_direction
     
     # Eigendecomposition
-    eigvalue, eigvector = scipy.linalg.eigh(A, check_finite=False)
+    eigvalue, eigvector = np.linalg.eigh(A)
     
     # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
     temp = -1.0 / eigvalue
@@ -1161,7 +1177,7 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     Function to generate an ensemble of configurations given the connectivity matrix
     """
     TOL = 10**8.0
-    eigvalue, eigvector = scipy.linalg.eigh(A)
+    eigvalue, eigvector = np.linalg.eigh(A)
     temp = 1.0/eigvalue[:, np.newaxis]
 
     # replace close zero eigvenvalue with zero
@@ -1254,7 +1270,7 @@ def a2xyz_sample_with_force_applied(A, force, ensemble=1):
         B[locus] = force_amplitude * force_direction
     
     # Eigendecomposition
-    eigvalue, eigvector = scipy.linalg.eigh(A)
+    eigvalue, eigvector = np.linalg.eigh(A)
     
     # Compute 1/eigenvalue, handling zero eigenvalues
     temp = 1.0 / eigvalue[:, np.newaxis]
@@ -1320,7 +1336,7 @@ def a2xyz_sample_fixed_end(A,
     A_copy[-1, -1]   += w
 
     # 2) Eigendecompose
-    evals, evecs = scipy.linalg.eigh(A_copy)
+    evals, evecs = np.linalg.eigh(A_copy)
 
     # 3) Build the "temp" = 1/λ matrix, clean up infinities and huge values
     temp = 1.0 / evals[:, None]
@@ -1434,7 +1450,7 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
 
 
 def nearestNSD(X, delta):
-    v, w = scipy.linalg.eigh(X)
+    v, w = np.linalg.eigh(X)
     v_new = np.minimum(v, delta)
     return w @ np.diag(v_new) @ w.T
 
@@ -1457,7 +1473,7 @@ def dmap2cov(dmap):
 def checkEMD(ddmap):
     # check whether a squared distance map is a valid Euclidean matrix
     cov = ddmap2cov(ddmap)
-    eigvalue, eigvector = scipy.linalg.eigh(cov)
+    eigvalue, eigvector = np.linalg.eigh(cov)
     # print(eigvalue)
     if np.all(eigvalue >= -0.1):
         if eigvalue.min() < 0.0:
@@ -1614,7 +1630,7 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
     if eigvals is not None:
         eigvals = np.asarray(eigvals)
     else:
-        eigvals = scipy.linalg.eigh(K, eigvals_only=True, check_finite=False)
+        eigvals = np.linalg.eigh(K, eigvals_only=True)
     
     positive_mask = eigvals > zero_tol
     positive_eigvals = eigvals[positive_mask]
@@ -1849,7 +1865,7 @@ class Optimize:
             dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
             # Compute entropy
             K = -self.A
-            eigvals_K = scipy.linalg.eigh(K, eigvals_only=True)
+            eigvals_K = np.linalg.eigh(K, eigvals_only=True)
             entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
             return [], [entropy], dmap_maxent, self.A
 
@@ -1895,7 +1911,7 @@ class Optimize:
                     X = scipy.linalg.cho_solve((c, lower), B, check_finite=False)
                 except np.linalg.LinAlgError:
                     # Fallback: eigen-based pseudo-inverse on the grounded system
-                    w, V = scipy.linalg.eigh(Lg, check_finite=False)
+                    w, V = np.linalg.eigh(Lg)
                     w_inv = np.zeros_like(w)
                     good = w > jitter
                     w_inv[good] = 1.0 / w[good]
@@ -1944,7 +1960,7 @@ class Optimize:
                 
                 # Compute entropy using eigenvalues of -A (K = -A)
                 K = -self.A
-                eigvals_K = scipy.linalg.eigh(K, eigvals_only=True)
+                eigvals_K = np.linalg.eigh(K, eigvals_only=True)
                 entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
                 self.entropy = entropy
                 
@@ -2324,7 +2340,7 @@ class Optimize:
             ddmap_t = ((3. * np.pi) / 8.) * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
             loss_array.append(self.__compute_loss(ddmap_t))
             # Compute entropy for direct inversion
-            eigvals_K = scipy.linalg.eigh(-self.A, eigvals_only=True)
+            eigvals_K = np.linalg.eigh(-self.A, eigvals_only=True)
             entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
 
         # Finalize loss/entropy arrays for GPU runs
@@ -2353,7 +2369,7 @@ class Dynamics:
                 sys.exit(0)
 
             self.A = construct_connectivity_matrix_rouse(input, k)
-            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input
         elif isinstance(input, int) and M is not None and k is not None:
             if not isinstance(k, int) and not isinstance(k, float):
@@ -2366,7 +2382,7 @@ class Dynamics:
                 sys.stdout.write("Please specify model to be 'random'")
                 sys.exit(0)
             self.A = construct_connectivity_matrix_random(input, M, k)
-            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input
         elif isinstance(input, np.ndarray) and M is None and k is None:
             if len(input.shape) !=2 or input.shape[0] != input.shape[1]:
@@ -2377,7 +2393,7 @@ class Dynamics:
                 sys.exit(0)
 
             self.A = input
-            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input.shape[0]
 
     def generateXYZ(self, force_positive_definite = False):
@@ -2680,7 +2696,7 @@ class Dynamics:
         self.A_internal = a2a(self.A_internal, fill_negative=False)
         
         # Recompute eigenvalues and eigenvectors using internal matrix
-        self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A_internal)
+        self.eigvalue, self.eigvector = np.linalg.eigh(self.A_internal)
         
         # Update modes to maintain consistency
         self.modes = self.eigvector.T @ self.xyz
@@ -2708,7 +2724,7 @@ class Dynamics:
         """
         if hasattr(self, 'A_original'):
             self.A = np.copy(self.A_original)
-            self.eigvalue, self.eigvector = scipy.linalg.eigh(self.A)
+            self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             # Update modes to maintain consistency
             self.modes = self.eigvector.T @ self.xyz
         else:
@@ -2744,6 +2760,7 @@ def run_optimization(input_path=None,
                      neighbor_balance=False,
                      enforce_nonnegative_connectivity_matrix=False,
                      save_steps=None,
+                     eigh_threads=None,
                      verbose=True):
     """
     Core function to run HIPPS/DIMES optimization that can be called programmatically or from CLI.
@@ -2814,6 +2831,10 @@ def run_optimization(input_path=None,
         Iteration steps at which to save the connectivity matrix.
         Files will be saved as '{output_prefix}_connectivity_matrix_iter{step}.txt'
         Requires output_prefix to be set.
+    eigh_threads : int, optional
+        Number of threads for eigenvalue (eigh) and BLAS/LAPACK.
+        If None, backend default is used. Set to 1 for single-threaded.
+        Must be set before any eigh call (e.g. via set_eigh_num_threads) for effect.
     verbose : bool, default=True
         Whether to print status messages
         
@@ -3066,6 +3087,10 @@ def run_optimization(input_path=None,
             gpu_status = "[red]Requested but CuPy not available[/red]"
         opt_table.add_row("GPU Acceleration", gpu_status)
         
+        # Eigh/BLAS threads
+        eigh_threads_str = str(eigh_threads) if eigh_threads is not None else "backend default"
+        opt_table.add_row("Eigh/BLAS Threads", eigh_threads_str)
+        
         # Constraints
         opt_table.add_row("Nonnegative Springs", "Yes" if enforce_nonnegative_connectivity_matrix else "No")
         
@@ -3271,9 +3296,10 @@ def _parse_save_steps(save_steps_str):
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
+@click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
 def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, \
-    gpu_float32, input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, quiet):
+    gpu_float32, input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, eigh_threads, quiet):
     """
     Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
     
@@ -3281,6 +3307,8 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     
     OUTPUT_PREFIX: Specify the prefix for output files
     """
+    if eigh_threads is not None:
+        set_eigh_num_threads(eigh_threads)
     # Call the core function
     run_optimization(
         input_path=input,
@@ -3312,6 +3340,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         neighbor_balance=neighbor_balance,
         enforce_nonnegative_connectivity_matrix=enforce_nonnegative_connectivity_matrix,
         save_steps=_parse_save_steps(save_steps) if save_steps else None,
+        eigh_threads=eigh_threads,
         verbose=not quiet
     )
 

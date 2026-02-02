@@ -23,7 +23,8 @@ import scipy.interpolate
 import scipy.optimize
 import scipy.spatial.distance
 import pandas as pd
-import click
+#import click
+import rich_click as click
 import cooler # for cooler format of HiC data
 import hicstraw # for .hic format of HiC data
 from rich import print

@@ -1,8 +1,10 @@
-![Imgur](https://i.imgur.com/tYexBe2.jpeg)
+![Imgur](doc/source/schematic.jpg)
+
+[**Installation**](#install) | [**Quick Start**](#how-to-use) | [**Chromatin Dynamics**](#dynamics-prediction-functionality) | [**Chromatin Mechanics**](#modulus-calculation)
 
 This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generates an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares.
 
-In addition to reconstructing static 3D chromatin structures, the code now includes **dynamics prediction functionality** based on polymer physics and the Ornstein–Uhlenbeck process. This allows you to simulate time-dependent properties such as autocorrelation functions (ACF) and mean-square displacement (MSD) of individual loci, providing insights into the dynamic behavior of chromatin.
+In addition to reconstructing static 3D chromatin structures, the model is also able to predict **chromatin loci dynamics** as well as **chromatin loci mechanics** based on polymer physics and the Ornstein–Uhlenbeck process. This allows you to simulate time-dependent properties such as autocorrelation functions (ACF), mean-square displacement (MSD) of individual loci and modulus of individual loci, providing insights into the dynamic behavior of chromatin.
 
 The theory and applications of this method can be found in our work published:
 

@@ -1835,13 +1835,13 @@ class Optimize:
 
         if general_method != 'optimization':
             self.set_edge_mask(edge_mask)
-            loss_array, entropy_array, dmap_maxent, A_final = self.run(epoch, general_method=general_method, **kwargs)
+            loss_array, entropy_array, dmap_maxent, A_final, _ = self.run(epoch, general_method=general_method, **kwargs)
             return loss_array, entropy_array, dmap_maxent, A_final
 
         method = kwargs.get('method', 'IS')
         if method != 'IS':
             self.set_edge_mask(edge_mask)
-            loss_array, entropy_array, dmap_maxent, A_final = self.run(epoch, general_method=general_method, **kwargs)
+            loss_array, entropy_array, dmap_maxent, A_final, _ = self.run(epoch, general_method=general_method, **kwargs)
             return loss_array, entropy_array, dmap_maxent, A_final
 
         learning_rate = float(kwargs.get('learning_rate', 1.0))
@@ -1856,7 +1856,8 @@ class Optimize:
         # -------- Determine constrained pairs (i<j) --------
         tgt = np.array(self.ddmap_target, dtype=float, copy=False)
         if self.edge_mask is None:
-            return self.run(epoch, general_method=general_method, **kwargs)
+            loss_array, entropy_array, dmap_maxent, A_final, _ = self.run(epoch, general_method=general_method, **kwargs)
+            return loss_array, entropy_array, dmap_maxent, A_final
 
         finite = np.isfinite(tgt) & (tgt > 0.0)
         allow = self.edge_mask & finite
@@ -2253,10 +2254,12 @@ class Optimize:
         general_method : str
             'optimization' or 'direct'
         save_steps : list of int, optional
-            Iteration steps at which to save the connectivity matrix.
-            Files will be saved as '{output_prefix}_connectivity_matrix_iter{step}.txt'
+            Iteration steps at which to capture the connectivity matrix.
+            Matrices are returned in the 5th return value (dict step -> matrix).
+            If output_prefix is set, files are also saved as
+            '{output_prefix}_connectivity_matrix_iter{step}.txt'
         output_prefix : str, optional
-            Prefix for output files (required if save_steps is provided)
+            Prefix for output files when saving connectivity matrix at save_steps
         **kwargs
             Additional arguments passed to __update_parameter:
             - learning_rate : float
@@ -2277,6 +2280,16 @@ class Optimize:
                 If True and momentum > 0, use Nesterov Accelerated Gradient (NAG).
                 NAG enables higher momentum (0.95) without divergence.
                 RECOMMENDED: Use with momentum=0.95 for ~50% faster convergence.
+
+        Returns
+        -------
+        loss_array : list of float
+        entropy_array : list of float
+        dmap_maxent : np.ndarray
+        A : np.ndarray
+            Final connectivity matrix.
+        connectivity_at_steps : dict of int -> np.ndarray
+            Connectivity matrix at each step in save_steps (empty dict if save_steps not set).
         """
 
         console = Console()
@@ -2292,6 +2305,7 @@ class Optimize:
         
         # Convert save_steps to a set for fast lookup and validate
         save_steps_set = None
+        connectivity_at_steps = {}  # step -> matrix (for library use and/or file save)
         if save_steps is not None:
             save_steps_list = list(save_steps)
             # Filter out invalid steps (must be positive and <= epoch)
@@ -2300,8 +2314,6 @@ class Optimize:
                 invalid = [s for s in save_steps_list if s < 1 or s > epoch]
                 console.print(f"[yellow]Warning: Some save_steps are out of range and will be ignored: {invalid}[/yellow]")
             save_steps_set = set(valid_steps)
-            if output_prefix is None:
-                raise ValueError("output_prefix must be provided when save_steps is specified")
             if len(save_steps_set) > 0:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
@@ -2331,9 +2343,12 @@ class Optimize:
                         # For GPU mode, sync to CPU only when needed
                         if self.use_gpu:
                             self.A = cp.asnumpy(self._A_gpu)
-                        filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, t + 1)
-                        np.savetxt(filename, self.A)
-                        console.print(f"[green]Saved connectivity matrix at iteration {t + 1} to {filename}[/green]")
+                        step = t + 1
+                        connectivity_at_steps[step] = np.copy(self.A)
+                        if output_prefix is not None:
+                            filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, step)
+                            np.savetxt(filename, self.A)
+                            console.print(f"[green]Saved connectivity matrix at iteration {step} to {filename}[/green]")
         elif general_method == 'direct':
             if not checkEMD(self.ddmap_target):
                 raise ValueError(
@@ -2359,7 +2374,7 @@ class Optimize:
             self.A = cp.asnumpy(self._A_gpu)
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
-        return loss_array, entropy_array, dmap_maxent, self.A
+        return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
 
 class Dynamics:
     def __init__(self, input, M=None, k=None, model=None):
@@ -2831,9 +2846,10 @@ def run_optimization(input_path=None,
     enforce_nonnegative_connectivity_matrix : bool, default=False
         Enforce non-negative spring constants
     save_steps : list of int, optional
-        Iteration steps at which to save the connectivity matrix.
-        Files will be saved as '{output_prefix}_connectivity_matrix_iter{step}.txt'
-        Requires output_prefix to be set.
+        Iteration steps at which to capture the connectivity matrix.
+        When set, results include ``connectivity_matrix_at_steps`` (dict: step -> matrix)
+        for library use. If ``output_prefix`` is also set, files are saved as
+        ``{output_prefix}_connectivity_matrix_iter{step}.txt``.
     eigh_threads : int, optional
         Number of threads for eigenvalue (eigh) and BLAS/LAPACK.
         If None, backend default is used. Set to 1 for single-threaded.
@@ -2848,6 +2864,7 @@ def run_optimization(input_path=None,
         - 'loss': Loss values during optimization (pandas DataFrame or list)
         - 'dmap_final': Final distance map (numpy array)
         - 'connectivity_matrix': Final connectivity matrix (numpy array)
+        - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)
         - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
         - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
         - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
@@ -3138,8 +3155,8 @@ def run_optimization(input_path=None,
     elif method == 'DI':
         general_method = 'direct'
 
-    loss, entropy, dmap_maxent, final_connectivity_matrix = model.run(
-        iteration, general_method=general_method, save_steps=save_steps, 
+    loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
+        iteration, general_method=general_method, save_steps=save_steps,
         output_prefix=output_prefix, **keyword_arguments)
     
     # Format loss/entropy data
@@ -3170,6 +3187,8 @@ def run_optimization(input_path=None,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }
+    if connectivity_at_steps:
+        results['connectivity_matrix_at_steps'] = connectivity_at_steps
     
     # Compute contact map if input was contact map
     cmap_maxent = None

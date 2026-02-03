@@ -142,7 +142,9 @@ This script will generate several files:
 - `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
 - `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
 - `--use-gpu`: Enable GPU acceleration via CuPy. Provides 2-4x speedup for large matrices (n ≥ 200). Requires CuPy to be installed.
-- `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`.
+- `--gpu-float32`: When using `--use-gpu`, run GPU math and eigendecomposition in float32 (often faster; slightly different numerics). Default: false.
+- `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`. When used as a library (without `output_prefix`), connectivity matrices at these steps are still returned in `results['connectivity_matrix_at_steps']`.
+- `--eigh-threads`: Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, the backend default is used. Set to 1 for single-threaded runs.
 - `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
 - `--input-format`: The format of the input file. Options: `text`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, or a pure text-based file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only supports the text-based file in which each line represents the row of the mean distance map. This option is required.
 - `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
@@ -155,6 +157,7 @@ This script will generate several files:
 - `--neighbor-balance`: Turn on neighbor balancing for contact map. Only effective when `input_type == cmap`. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. See Paggi, Zhang 2025 for method details.
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
 - `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
+- `-q, --quiet`: Quiet mode: disable fancy tables display, keep only the progress bar.
 
 ### Examples
 

@@ -1,6 +1,6 @@
 ![Imgur](doc/source/schematic.jpg)
 
-[**Installation**](#install) | [**Quick Start**](#how-to-use) | [**Chromatin Dynamics**](#dynamics-prediction-functionality) | [**Chromatin Mechanics**](#modulus-calculation)
+[**Installation**](#install) | [**Quick Start**](#quick-start) | [**API**](#api) | [**Chromatin Dynamics**](#dynamics-prediction-functionality) | [**Chromatin Mechanics**](#modulus-calculation)
 
 This python program is the implementation of the HIPPS-DIMES method[^1][^2][^3]. HIPPS-DIMES is a computational method based on the maximum entropy principle, with experimental measured contact map or pair-wise distances as constraints, to generate a unique ensemble of <ins>3D chromatin structures</ins>. In a nutshell, this program accepts the input file of a mean spatial distance map (which can be measured in Multiplexed FISH experiment) or a Hi-C contact map (which is converted to distance map internally), and generates an ensemble of individual chromatin conformations that are consistent with the input. The output conformations are stored as `.xyz` format files, and can be used to calculate quantities of interest and can be visualized using `VMD` or other compatible softwares.
 
@@ -69,10 +69,9 @@ conda install -c conda-forge cupy
 pip install cupy-cuda11x  # Replace with your CUDA version
 ```
 
-## How to use
+## Quick start
 
-To get started, please go through the jupyter notebook **`walkthrough.ipynb`**
-in this repository.
+The quickest way to get started is to run our example notebook in [Google Colab](https://colab.research.google.com/drive/1w7cK6S3z2_D5Mzgq2-SZgl4FoDjT9EC5?usp=sharing)
 
 In addition, it is helpful to view the help information for each arguments and
 options. To display help information, use
@@ -80,6 +79,8 @@ options. To display help information, use
 ```bash
 HippsDimes --help
 ```
+
+## API
 
 ### Input files
 
@@ -106,6 +107,54 @@ This script will generate several files:
 - A `.xyz` formatted file for the ensemble of genome structures generated (can
   be turned off)
 - A csv formatted file for cost versus iteration data (can be turned off)
+
+### Explanation of the arguments and options
+
+#### Arguments
+
+- `INPUT`: File path for the input file. The input file can be a Hi-C contact
+  map or a mean spatial distance map as measured in Multiplexed FISH experiment.
+- `OUTPUT_PREFIX`: Prefix for output files. For instance, if one specifies it to be
+  `TEST`, then all the output files will start with `TEST_`.
+
+#### Options
+
+- `-k, --connectivity-matrix`: Provide the path to the existing connectivity
+  matrix one would like to use as initialization. Useful if restarting using the
+  result from the previous run.
+- `-e, --ensemble`: Number of individual conformations to be generated. This
+  script will generate an ensemble of structures consistent with the input Hi-C
+  contact map or the mean spatial distance map. Each individual conformations
+  are different from each other. You can specify how many such individual
+  conformations you want to generate. Default: 1000.
+- `-a, --alpha`: Value of the contact map to distance map conversion
+  exponent. If the input file is Hi-C contact map, the method first converts the
+  contact map to a mean spatial distance map. The equation of the conversion is
+  d_{ij} ~ c_{ij}^{1/\alpha}. The default value of α is 4.0, estimated in
+  this work 10.1126/science.aaf8084. Default: 4.0.
+- `-s, --selection`: Specify chromosome or region. This option is required
+  when the input file has `cooler` or `.hic` format. For cooler files, the value is passed to the `cooler.Cooler.matrix().fetch()` method. For .hic files, use format "chr1:start1-end1,chr2:start2-end2". For details on cooler selectors, please refer to their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
+- `-m, --method`: Specify the method used for optimization. Options: IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
+- `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. Regularization is typically used to avoid over-fitting.
+- `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
+- `-i, --iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slows down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed for good convergence is larger. Default: 10000.
+- `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
+- `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
+- `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
+- `--use-gpu`: Enable GPU acceleration via CuPy. Provides 2-4x speedup for large matrices (n ≥ 200). Requires CuPy to be installed.
+- `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`.
+- `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
+- `--input-format`: The format of the input file. Options: `text`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, or a pure text-based file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only supports the text-based file in which each line represents the row of the mean distance map. This option is required.
+- `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
+- `--norm`: Normalization for .hic format. Options: KR, VC, NONE. Default: KR.
+- `--unit`: Unit for .hic format. Options: BP, FRAG. Default: BP.
+- `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
+- `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
+- `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite numbers in the contact map or distance map.
+- `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`.
+- `--neighbor-balance`: Turn on neighbor balancing for contact map. Only effective when `input_type == cmap`. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. See Paggi, Zhang 2025 for method details.
+- `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
+- `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
 
 ### Examples
 
@@ -172,61 +221,9 @@ HippsDimes mydata.hic test \
   -i 10000 -e 10
 ```
 
-#### Additional examples
-
-The jupyter notebook `walkthrough.ipynb` in this repository contains additional examples. 
-
 > In particular, if you would like see an example of direct application of HIPPS-DIMES on imaging data, please go through the notebook.
 
-### Explanation of the arguments and options
-
-#### Arguments
-
-- `INPUT`: File path for the input file. The input file can be a Hi-C contact
-  map or a mean spatial distance map as measured in Multiplexed FISH experiment.
-- `OUTPUT_PREFIX`: Prefix for output files. For instance, if one specifies it to be
-  `TEST`, then all the output files will start with `TEST_`.
-
-#### Options
-
-- `-k, --connectivity-matrix`: Provide the path to the existing connectivity
-  matrix one would like to use as initialization. Useful if restarting using the
-  result from the previous run.
-- `-e, --ensemble`: Number of individual conformations to be generated. This
-  script will generate an ensemble of structures consistent with the input Hi-C
-  contact map or the mean spatial distance map. Each individual conformations
-  are different from each other. You can specify how many such individual
-  conformations you want to generate. Default: 1000.
-- `-a, --alpha`: Value of the contact map to distance map conversion
-  exponent. If the input file is Hi-C contact map, the method first converts the
-  contact map to a mean spatial distance map. The equation of the conversion is
-  d_{ij} ~ c_{ij}^{1/\alpha}. The default value of α is 4.0, estimated in
-  this work 10.1126/science.aaf8084. Default: 4.0.
-- `-s, --selection`: Specify chromosome or region. This option is required
-  when the input file has `cooler` or `.hic` format. For cooler files, the value is passed to the `cooler.Cooler.matrix().fetch()` method. For .hic files, use format "chr1:start1-end1,chr2:start2-end2". For details on cooler selectors, please refer to their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
-- `-m, --method`: Specify the method used for optimization. Options: IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
-- `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. Regularization is typically used to avoid over-fitting.
-- `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
-- `-i, --iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slows down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed for good convergence is larger. Default: 10000.
-- `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
-- `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
-- `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
-- `--use-gpu`: Enable GPU acceleration via CuPy. Provides 2-4x speedup for large matrices (n ≥ 200). Requires CuPy to be installed.
-- `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`.
-- `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
-- `--input-format`: The format of the input file. Options: `text`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, or a pure text-based file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only supports the text-based file in which each line represents the row of the mean distance map. This option is required.
-- `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
-- `--norm`: Normalization for .hic format. Options: KR, VC, NONE. Default: KR.
-- `--unit`: Unit for .hic format. Options: BP, FRAG. Default: BP.
-- `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
-- `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
-- `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite numbers in the contact map or distance map.
-- `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`.
-- `--neighbor-balance`: Turn on neighbor balancing for contact map. Only effective when `input_type == cmap`. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. See Paggi, Zhang 2025 for method details.
-- `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
-- `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
-
-### Tips for using this program
+### Tips
 
 - In practice, a contact map or distance map larger than 5000x5000 is too large
   for the method to converge. If your matrix is larger than 5000x5000, I suggest
@@ -369,11 +366,6 @@ cmap = HD.a2cmap_theory(connectivity_matrix, rc=5.0)
 # Create a Rouse chain connectivity matrix
 A = HD.construct_connectivity_matrix_rouse(n=100, k=1.0)
 ```
-
-#### Documentation and Examples
-
-For comprehensive examples and advanced usage patterns, see:
-- `walkthrough.ipynb` - Interactive Jupyter notebook examples
 
 ------
 

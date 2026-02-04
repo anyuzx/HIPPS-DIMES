@@ -22,8 +22,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Biophysics",
-    "Topic :: Scientific/Engineering :: Computational Biology",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Physics",
 ]
 requires-python = ">=3.9"
 dependencies = [

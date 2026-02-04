@@ -1140,13 +1140,16 @@ def optimal_rotate(P, Q, return_rotation=False, allow_reflection=False):
         return np.array(P * U + Qc), U
 
 
-def write2xyz(fout, xyzs, allow_reflection=True):
+def write2xyz(fout, xyzs, alignment=True, allow_reflection=True):
     natoms = xyzs.shape[1] # number of atoms
     xyz0 = xyzs[0]
 
     with open(fout, 'w') as f:
         for snapshot in xyzs:
-            xyz = optimal_rotate(snapshot, xyz0, allow_reflection=allow_reflection)
+            if alignment:
+                xyz = optimal_rotate(snapshot, xyz0, allow_reflection=allow_reflection)
+            else:
+                xyz = snapshot
             f.write('{}\n\n'.format(natoms))
             for idx, item in enumerate(xyz):
                 f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))

@@ -753,11 +753,8 @@ def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, meth
     For Euler-Maruyama: directly use force_projection/ζ
     For exact method: calculate μ = force_projection/k (handling division by zero for zero modes)
     
-    **Unstable Modes (k < 0):**
-    When the connectivity matrix has positive eigenvalues (e.g., from broken bonds), k < 0.
-    This causes exponential growth in those modes. The 'euler-maruyama' method handles this
-    with controlled growth over small time steps. The 'exact' method should NOT be used with
-    unstable modes as the noise term becomes undefined.
+    For standard connectivity matrices (e.g. Rouse), eigenvalues are non-positive, so
+    k = -eigvalue ≥ 0 and all modes are stable or zero; both methods are then appropriate.
     """
     if isinstance(x, np.ndarray):
         rand_noise = np.random.randn(*x.shape)
@@ -766,18 +763,8 @@ def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, meth
     
     theta = k[:, np.newaxis] / zeta
     
-    # Identify zero eigenvalue modes and unstable modes (k < 0)
+    # Identify zero eigenvalue modes
     zero_modes_mask = np.abs(k) < zero_mode_tol
-    unstable_modes_mask = k < -zero_mode_tol  # Negative spring constants = positive eigenvalues
-    
-    # Warn if using exact method with unstable modes
-    if method == 'exact' and np.any(unstable_modes_mask):
-        import warnings
-        warnings.warn(
-            f"Detected {np.sum(unstable_modes_mask)} unstable modes (positive eigenvalues) with 'exact' method. "
-            "This may cause numerical issues. Consider using 'euler-maruyama' method for systems with broken bonds.",
-            RuntimeWarning
-        )
 
     if method == 'euler-maruyama':
         # Euler-Maruyama: dX = -θX dt + (force_projection/ζ) dt + σ dW
@@ -2483,6 +2470,7 @@ class Dynamics:
                 sys.stdout.write('The dimension should be three')
                 sys.exit(0)
             self.xyz = initial_conformation
+            self.modes = self.eigvector.T @ self.xyz
 
         self.traj = []
         for t in tqdm(range(T)):
@@ -2490,9 +2478,7 @@ class Dynamics:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
-                self.traj.append(self.xyz)
-                #sys.stdout.write('\rTimestep {}'.format(t+1))
-                #sys.stdout.flush()
+                self.traj.append(self.xyz.copy())
             self.updateModes(method=method, update_zero_modes=update_zero_modes)
 
         self.traj = np.array(self.traj)
@@ -2546,6 +2532,7 @@ class Dynamics:
                 sys.stdout.write('The dimension should be three')
                 sys.exit(0)
             self.xyz = initial_conformation
+            self.modes = self.eigvector.T @ self.xyz
 
         # Normalize force direction
         force_direction = np.array(force_direction)

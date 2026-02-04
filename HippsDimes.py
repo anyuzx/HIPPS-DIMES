@@ -1922,13 +1922,7 @@ class Optimize:
 
                 g = log_ratio
 
-                # Regularization (matches __update_parameter() on allowed edges)
-                if lamd > 0.0:
-                    aij = A_sym[ii, jj]
-                    if reg == 'L2':
-                        g = g - 2.0 * lamd * aij
-                    elif reg == 'L1':
-                        g = g + lamd * np.sign(-aij)
+                # Regularization (proximal L1 handled after update)
 
                 g = g / fhash
 
@@ -1937,6 +1931,14 @@ class Optimize:
                 self.A[jj, ii] += learning_rate * g
 
                 # Cleanup + enforce mask + rebuild diagonal
+                if lamd > 0.0:
+                    if reg == 'L2':
+                        shrink = 1.0 / (1.0 + learning_rate * lamd)
+                        self.A = self.A * shrink
+                    elif reg == 'L1':
+                        thresh = learning_rate * lamd
+                        self.A = np.sign(self.A) * np.maximum(np.abs(self.A) - thresh, 0.0)
+
                 self.A = np.nan_to_num(self.A)
                 self.A = 0.5 * (self.A + self.A.T)
                 self._freeze_masked_edges()
@@ -1989,16 +1991,8 @@ class Optimize:
 
         if method == 'IS':
             # compute the gradient
-            if lamd > 0.0:
-                if reg == 'L2':
-                    gradient_t = (np.nan_to_num(
-                        np.log(compare_ratio), posinf=0., neginf=0.) - 2. * lamd * self.A) / fhash
-                elif reg == 'L1':
-                    gradient_t = (np.nan_to_num(
-                        np.log(compare_ratio), posinf=0., neginf=0.) + lamd * np.sign(- self.A)) / fhash
-            elif lamd == 0.0:
-                gradient_t = np.nan_to_num(
-                    np.log(compare_ratio), posinf=0., neginf=0.) / fhash
+            gradient_t = np.nan_to_num(
+                np.log(compare_ratio), posinf=0., neginf=0.) / fhash
 
             # enforce symmetry and apply optional off-diagonal mask
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
@@ -2024,20 +2018,19 @@ class Optimize:
             else:
                 # Standard update without momentum
                 self.A = self.A + learning_rate * gradient_t
+            if lamd > 0.0:
+                if reg == 'L2':
+                    shrink = 1.0 / (1.0 + learning_rate * lamd)
+                    self.A = self.A * shrink
+                elif reg == 'L1':
+                    thresh = learning_rate * lamd
+                    self.A = np.sign(self.A) * np.maximum(np.abs(self.A) - thresh, 0.0)
         elif method == 'GD':
             if t == 0:
                 self.theta = np.copy(self.A)
 
             # compute the gradient
-            if lamd > 0.0:
-                if reg == 'L2':
-                    gradient_t = (ddmap_t - self.ddmap_target -
-                                  2. * lamd * self.A)
-                elif reg == 'L1':
-                    gradient_t = (ddmap_t - self.ddmap_target +
-                                  lamd * np.sign(- self.A))
-            elif lamd == 0.0:
-                gradient_t = (ddmap_t - self.ddmap_target)
+            gradient_t = (ddmap_t - self.ddmap_target)
 
             # enforce symmetry and apply optional off-diagonal mask
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
@@ -2056,6 +2049,16 @@ class Optimize:
 
             # update the connectivity matrix
             self.A = self.theta + (t/(t+3)) * (self.theta - theta_previous)
+
+            if lamd > 0.0:
+                if reg == 'L2':
+                    shrink = 1.0 / (1.0 + learning_rate * lamd)
+                    self.A = self.A * shrink
+                    self.theta = self.theta * shrink
+                elif reg == 'L1':
+                    thresh = learning_rate * lamd
+                    self.A = np.sign(self.A) * np.maximum(np.abs(self.A) - thresh, 0.0)
+                    self.theta = np.sign(self.theta) * np.maximum(np.abs(self.theta) - thresh, 0.0)
 
         # convert all nan to zero
         self.A = np.nan_to_num(self.A)
@@ -2076,17 +2079,17 @@ class Optimize:
         eigvals_K = -eigvals_A
         self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
 
-    def __update_parameter_noisy(self, t, learning_rate, sigma2, method='IS', enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
+    def __update_parameter_noisy(self, t, learning_rate, gaussian_noise_variance, method='IS', enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
         """
         Update parameters with Gaussian-noise regularization on constraints.
 
         Uses a proximal L2 shrink step after the standard IS/GD update:
-        A <- (A + lr * grad) / (1 + lr * sigma2)
+        A <- (A + lr * grad) / (1 + lr * gaussian_noise_variance)
         """
         if self.use_gpu and method == 'IS':
-            return self.__update_parameter_noisy_gpu(t, learning_rate, sigma2, enforce_nonnegative_connectivity_matrix, momentum, nesterov)
+            return self.__update_parameter_noisy_gpu(t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix, momentum, nesterov)
         elif self.use_gpu and method == 'GD':
-            return self.__update_parameter_noisy_gpu_gd(t, learning_rate, sigma2, enforce_nonnegative_connectivity_matrix)
+            return self.__update_parameter_noisy_gpu_gd(t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix)
 
         dmap_t, eigvals_A = a2dmap_theory(self.A, force_positive_definite=True, return_eigenvalues=True)
         ddmap_t = ((3. * np.pi) / 8.) * np.power(dmap_t, 2.)
@@ -2122,8 +2125,8 @@ class Optimize:
             self.theta = self.A + learning_rate * gradient_t
             self.A = self.theta + (t / (t + 3)) * (self.theta - theta_previous)
 
-        if sigma2 > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * sigma2)
+        if gaussian_noise_variance > 0.0:
+            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
             self.A = self.A * shrink
             if method == 'GD' and self.theta is not None:
                 self.theta = self.theta * shrink
@@ -2151,13 +2154,7 @@ class Optimize:
         fhash = cp.nansum(ddmap_t_gpu) / 2.
         
         # Compute gradient
-        if lamd > 0.0:
-            if reg == 'L2':
-                gradient_t_gpu = (cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) - 2. * lamd * self._A_gpu) / fhash
-            elif reg == 'L1':
-                gradient_t_gpu = (cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) + lamd * cp.sign(-self._A_gpu)) / fhash
-        else:
-            gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
+        gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
         
         # Enforce symmetry
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
@@ -2180,6 +2177,14 @@ class Optimize:
         else:
             self._A_gpu = self._A_gpu + learning_rate * gradient_t_gpu
         
+        if lamd > 0.0:
+            if reg == 'L2':
+                shrink = 1.0 / (1.0 + learning_rate * lamd)
+                self._A_gpu = self._A_gpu * shrink
+            elif reg == 'L1':
+                thresh = learning_rate * lamd
+                self._A_gpu = cp.sign(self._A_gpu) * cp.maximum(cp.abs(self._A_gpu) - thresh, 0.0)
+
         # Clean up NaN values
         self._A_gpu = cp.nan_to_num(self._A_gpu)
         
@@ -2220,7 +2225,7 @@ class Optimize:
         # Syncing an (n,n) matrix every iteration can dominate runtime for n~1000.
         # We sync only when needed (save_steps) and once at the end of run().
 
-    def __update_parameter_noisy_gpu(self, t, learning_rate, sigma2, enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
+    def __update_parameter_noisy_gpu(self, t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
         """GPU-accelerated version of noisy update for IS method using CuPy."""
         dmap_t_gpu, eigvals_A_gpu = _a2dmap_theory_gpu(self._A_gpu, force_positive_definite=True, return_eigenvalues=True)
         dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
@@ -2245,10 +2250,8 @@ class Optimize:
         else:
             self._A_gpu = self._A_gpu + learning_rate * gradient_t_gpu
 
-        if sigma2 > 0.0:
-            #print(learning_rate, sigma2)
-            shrink = 1.0 / (1.0 + learning_rate * sigma2)
-            #shrink = 1.0 / (1.0 + sigma2)
+        if gaussian_noise_variance > 0.0:
+            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
             self._A_gpu = self._A_gpu * shrink
 
         self._A_gpu = cp.nan_to_num(self._A_gpu)
@@ -2285,13 +2288,7 @@ class Optimize:
         ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
         
         # Compute gradient for GD
-        if lamd > 0.0:
-            if reg == 'L2':
-                gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu - 2. * lamd * self._A_gpu
-            elif reg == 'L1':
-                gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu + lamd * cp.sign(-self._A_gpu)
-        else:
-            gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
+        gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
         
         # Enforce symmetry
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
@@ -2308,6 +2305,16 @@ class Optimize:
         momentum_rate = t / (t + 3)
         self._A_gpu = self._theta_gpu + momentum_rate * (self._theta_gpu - theta_previous_gpu)
         
+        if lamd > 0.0:
+            if reg == 'L2':
+                shrink = 1.0 / (1.0 + learning_rate * lamd)
+                self._A_gpu = self._A_gpu * shrink
+                self._theta_gpu = self._theta_gpu * shrink
+            elif reg == 'L1':
+                thresh = learning_rate * lamd
+                self._A_gpu = cp.sign(self._A_gpu) * cp.maximum(cp.abs(self._A_gpu) - thresh, 0.0)
+                self._theta_gpu = cp.sign(self._theta_gpu) * cp.maximum(cp.abs(self._theta_gpu) - thresh, 0.0)
+
         # Clean up NaN values
         self._A_gpu = cp.nan_to_num(self._A_gpu)
         
@@ -2343,7 +2350,7 @@ class Optimize:
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Sync only when needed (save_steps) and once at the end of run().
 
-    def __update_parameter_noisy_gpu_gd(self, t, learning_rate, sigma2, enforce_nonnegative_connectivity_matrix=False):
+    def __update_parameter_noisy_gpu_gd(self, t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix=False):
         """GPU-accelerated version of noisy update for GD method using CuPy."""
         if t == 0:
             self._theta_gpu = self._A_gpu.copy()
@@ -2362,8 +2369,8 @@ class Optimize:
         momentum_rate = t / (t + 3)
         self._A_gpu = self._theta_gpu + momentum_rate * (self._theta_gpu - theta_previous_gpu)
 
-        if sigma2 > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * sigma2)
+        if gaussian_noise_variance > 0.0:
+            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
             self._A_gpu = self._A_gpu * shrink
             self._theta_gpu = self._theta_gpu * shrink
 
@@ -2521,7 +2528,7 @@ class Optimize:
 
         return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
 
-    def run_noisy(self, epoch, sigma2, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
+    def run_noisy(self, epoch, gaussian_noise_variance, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
         """
         Run optimization with independent Gaussian noise on constraints.
 
@@ -2529,7 +2536,7 @@ class Optimize:
         ----------
         epoch : int
             Number of iterations
-        sigma2 : float
+        gaussian_noise_variance : float
             Noise variance for constraints (L2 shrink strength).
         general_method : str
             Only 'optimization' is supported for the noisy solver.
@@ -2577,7 +2584,7 @@ class Optimize:
 
         with trange(epoch, desc="Performing noisy optimization", unit="iteration") as pbar:
             for t in pbar:
-                self.__update_parameter_noisy(t, sigma2=sigma2, **kwargs)
+                self.__update_parameter_noisy(t, gaussian_noise_variance=gaussian_noise_variance, **kwargs)
                 if self.use_gpu:
                     loss_hist_gpu[t] = self._loss_gpu
                     entropy_hist_gpu[t] = self._entropy_gpu
@@ -2993,7 +3000,7 @@ def run_optimization(input_path=None,
                      method='IS',
                      lamd=0.0,
                      reg='L2',
-                     sigma2=0.0,
+                     gaussian_noise_variance=0.0,
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -3040,7 +3047,7 @@ def run_optimization(input_path=None,
         Regularization weight
     reg : str, default='L2'
         Regularization type: 'L1' or 'L2'
-    sigma2 : float, default=0.0
+    gaussian_noise_variance : float, default=0.0
         Noise variance for independent Gaussian noise on constraints.
     iteration : int, default=10000
         Number of optimization iterations
@@ -3151,12 +3158,12 @@ def run_optimization(input_path=None,
     # Validate inputs
     if input_matrix is None and input_path is None:
         raise ValueError("Either input_matrix or input_path must be provided")
-    if sigma2 < 0.0:
-        raise ValueError("sigma2 must be non-negative")
-    if sigma2 > 0.0 and method == 'DI':
-        raise ValueError("sigma2 is only supported for optimization methods (IS/GD), not DI")
-    if sigma2 > 0.0 and lamd > 0.0:
-        raise ValueError("sigma2 (noise variance) cannot be combined with lamd regularization")
+    if gaussian_noise_variance < 0.0:
+        raise ValueError("gaussian_noise_variance must be non-negative")
+    if gaussian_noise_variance > 0.0 and method == 'DI':
+        raise ValueError("gaussian_noise_variance is only supported for optimization methods (IS/GD), not DI")
+    if gaussian_noise_variance > 0.0 and lamd > 0.0:
+        raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
     
     # Initialize console for output
     if verbose:
@@ -3341,8 +3348,8 @@ def run_optimization(input_path=None,
                 opt_table.add_row("Regularization", f"{reg} (λ = {lamd})")
             else:
                 opt_table.add_row("Regularization", "None")
-            if sigma2 > 0.0:
-                opt_table.add_row("Noise Variance", f"{sigma2}")
+            if gaussian_noise_variance > 0.0:
+                opt_table.add_row("Noise Variance", f"{gaussian_noise_variance}")
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -3400,7 +3407,7 @@ def run_optimization(input_path=None,
     elif method == 'DI':
         general_method = 'direct'
 
-    if sigma2 > 0.0:
+    if gaussian_noise_variance > 0.0:
         keyword_arguments_noisy = {
             'learning_rate': learning_rate,
             'method': method,
@@ -3409,7 +3416,7 @@ def run_optimization(input_path=None,
             'nesterov': nesterov
         }
         loss, entropy, dmap_maxent, final_connectivity_matrix = model.run_noisy(
-            iteration, sigma2=sigma2, general_method=general_method, save_steps=save_steps,
+            iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
             output_prefix=output_prefix, **keyword_arguments_noisy)
         connectivity_at_steps = {}  # run_noisy doesn't return connectivity_at_steps
     else:
@@ -3544,6 +3551,9 @@ def _parse_save_steps(save_steps_str):
 @click.command()
 @click.argument('input', nargs=1)
 @click.argument('output-prefix', nargs=1)
+@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
+@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
+@click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Number of iterations')
 @click.option('-k', '--connectivity-matrix', type=str, required=False, help='Use provided connectivity matrix as initialization. Useful when restart from previous run')
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
@@ -3552,8 +3562,7 @@ def _parse_save_steps(save_steps_str):
     Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.')
 @click.option('-l', '--lamd', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Specify the weight for the regularization.')
 @click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
-@click.option('--sigma2', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Noise variance for independent Gaussian noise on constraints (IS/GD only). Cannot be combined with --lamd.')
-@click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Number of iterations')
+@click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Noise variance for independent Gaussian noise on constraints (IS/GD only). Cannot be combined with --lamd.')
 @click.option('--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. \
     If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. \
         It should be a very small value (such as 1e-8) when using gradient descent optimization')
@@ -3564,8 +3573,6 @@ def _parse_save_steps(save_steps_str):
 @click.option('--use-gpu', is_flag=True, default=False, show_default=True, help='Use GPU acceleration via CuPy. \
     Provides 2-4x speedup for large matrices (n >= 200). Requires CuPy: conda install -c conda-forge cupy')
 @click.option('--gpu-float32', is_flag=True, default=False, show_default=True, help='When using --use-gpu, run GPU math/eigendecomposition in float32 (often faster, slightly different numerics).')
-@click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map or dmap: distance map')
-@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
 @click.option('--norm', 'hic_norm', type=str, default='KR', show_default=True, help='Normalization for .hic: KR, VC, NONE')
 @click.option('--unit', 'hic_unit', type=click.Choice(['BP', 'FRAG'], case_sensitive=False), default='BP', show_default=True, help='Unit for .hic: BP or FRAG')
@@ -3579,7 +3586,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, sigma2, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, \
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, \
     gpu_float32, input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, eigh_threads, quiet):
     """
     Command-line interface for HIPPS/DIMES to generate ensemble of genome structures from either contact map or mean distance map.
@@ -3602,7 +3609,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         method=method,
         lamd=lamd,
         reg=reg,
-        sigma2=sigma2,
+        gaussian_noise_variance=gaussian_noise_variance,
         iteration=iteration,
         learning_rate=learning_rate,
         momentum=momentum,

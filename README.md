@@ -71,10 +71,12 @@ pip install cupy-cuda11x  # Replace with your CUDA version
 
 ## Quick start
 
-The quickest way to get started is to run our example notebook in [Google Colab](https://colab.research.google.com/drive/1w7cK6S3z2_D5Mzgq2-SZgl4FoDjT9EC5?usp=sharing)
+The quickest way to get started is to run our example notebook in Google Colab. Here are some starter notebooks:
 
-In addition, it is helpful to view the help information for each arguments and
-options. To display help information, use
+- [Quick start](https://colab.research.google.com/drive/1w7cK6S3z2_D5Mzgq2-SZgl4FoDjT9EC5?usp=sharing)
+- [Chromatin Dynamics and Mechanics](https://colab.research.google.com/drive/1DsTIJTkiKc1vRq6lBncEg4nvPh4hQ4hp?usp=sharing)
+
+In addition, it is helpful to view the help information for each arguments andoptions. To display help information, use
 
 ```bash
 HippsDimes --help

@@ -3511,10 +3511,10 @@ def run_optimization(input_path=None,
                     'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
 
             if not no_xyzs and xyzs is not None:
-                write2xyz('{}.xyz'.format(output_prefix), xyzs)
+                write2xyz('{}.xyz'.format(output_prefix), xyzs, alignment=True, allow_reflection=True)
                 if verbose and console:
                     console.print(
-                        "Ensemble of structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
+                        "Ensemble of (aligned) structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
             
             if verbose and console:
                 status.stop()

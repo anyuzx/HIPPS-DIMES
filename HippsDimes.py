@@ -1154,11 +1154,13 @@ def write2xyz(fout, xyzs, alignment=True, allow_reflection=True):
             for idx, item in enumerate(xyz):
                 f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
 
-def write2xyz_traj(fout, traj):
+def write2xyz_traj(fout, traj, recenter = False):
     natoms = traj.shape[1]
 
     with open(fout, 'w') as f:
         for snapshot in traj:
+            if recenter:
+                snapshot = snapshot - snapshot.mean(axis=0)
             f.write(f"{natoms}\n\n")
             for i, atom in enumerate(snapshot):
                 f.write(f"C {atom[0]} {atom[1]} {atom[2]}\n")

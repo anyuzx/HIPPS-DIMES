@@ -1479,20 +1479,18 @@ def dmap2cov(dmap):
     ddmap = (3. * np.pi / 8.) * np.power(dmap, 2.)
     return ddmap2cov(ddmap)
 
-
-def checkEMD(ddmap):
-    # check whether a squared distance map is a valid Euclidean matrix
+def checkEMD(ddmap, neg_tol=1e-10):
+    # check whether a squared distance map is a valid EDM (avg of EDMs is EDM in some dim; tiny neg evals = numerical noise)
     cov = ddmap2cov(ddmap)
     eigvalue, eigvector = np.linalg.eigh(cov)
-    # print(eigvalue)
-    if np.all(eigvalue >= -0.1):
-        if eigvalue.min() < 0.0:
-            console.print("[red]Warning: The smallest eigenvalue of the covariance matrix is negative. \
+    min_eig = eigvalue.min()
+    if min_eig < -0.1:  # unacceptably non-PSD
+        return False
+    if min_eig < -neg_tol:  # meaningfully negative but within tolerance → warn
+        print("[red]Warning: The smallest eigenvalue of the covariance matrix is negative. \
 Direct inversion method [italic]may[/italic] not work. Check the final results. \
 If the results are not good enough, please try iterative scaling or gradient descent method.")
-        return True
-    else:
-        return False
+    return True
     
 def subnetwork_schur(A, keep, tol=1e-12):
     """

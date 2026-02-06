@@ -84,7 +84,10 @@ def run_optimization(input_path=None,
         Provides 2-4x speedup for matrices with n >= 200.
         Requires: conda install -c conda-forge cupy
     input_type : str, default='cmap'
-        Type of input: 'cmap' (contact map) or 'dmap' (distance map)
+        Type of input:
+        - 'cmap': contact map
+        - 'dmap': mean distance map (converted internally to mean squared distance map)
+        - 'ddmap': mean squared distance map (used directly)
     input_format : str, default='text'
         Format of input file: 'text', 'cooler', or 'hic'
     binsize : int, default=25000
@@ -176,8 +179,8 @@ def run_optimization(input_path=None,
     # Validate inputs
     if input_matrix is None and input_path is None:
         raise ValueError("Either input_matrix or input_path must be provided")
-    if input_type not in {'cmap', 'dmap'}:
-        raise ValueError("Invalid input_type. Must be 'cmap' or 'dmap'")
+    if input_type not in {'cmap', 'dmap', 'ddmap'}:
+        raise ValueError("Invalid input_type. Must be 'cmap', 'dmap', or 'ddmap'")
     if gaussian_noise_variance < 0.0:
         raise ValueError("gaussian_noise_variance must be non-negative")
     if gaussian_noise_variance > 0.0 and method == 'DI':
@@ -205,21 +208,38 @@ def run_optimization(input_path=None,
     try:
         if input_type == 'dmap':
             if verbose and console:
-                console.print("Reading distance matrix")
+                console.print("Reading mean distance matrix")
             if input_matrix is not None:
                 # Use provided matrix
-                dmap_target = input_matrix
-                if dmap_target.ndim != 2 or dmap_target.shape[0] != dmap_target.shape[1]:
+                ddmap_target = input_matrix
+                if ddmap_target.ndim != 2 or ddmap_target.shape[0] != ddmap_target.shape[1]:
                     raise ValueError("Distance map must be a square 2D array")
-                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format == 'text':
-                dmap_target = np.loadtxt(input_path)
-                dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+                ddmap_target = np.loadtxt(input_path)
+                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format in {'cooler', 'hic'}:
                 raise ValueError("input_type='dmap' only supports input_format='text' (or provide input_matrix)")
             else:
                 raise ValueError(
                     f"Invalid input_format '{input_format}' for input_type='dmap'. "
+                    "Supported: 'text' (or provide input_matrix)."
+                )
+        elif input_type == 'ddmap':
+            if verbose and console:
+                console.print("Reading mean squared distance matrix")
+            if input_matrix is not None:
+                # Use provided matrix directly as ddmap constraints
+                ddmap_target = input_matrix
+                if ddmap_target.ndim != 2 or ddmap_target.shape[0] != ddmap_target.shape[1]:
+                    raise ValueError("Squared distance map must be a square 2D array")
+            elif input_format == 'text':
+                ddmap_target = np.loadtxt(input_path)
+            elif input_format in {'cooler', 'hic'}:
+                raise ValueError("input_type='ddmap' only supports input_format='text' (or provide input_matrix)")
+            else:
+                raise ValueError(
+                    f"Invalid input_format '{input_format}' for input_type='ddmap'. "
                     "Supported: 'text' (or provide input_matrix)."
                 )
         elif input_type == 'cmap':
@@ -314,10 +334,10 @@ def run_optimization(input_path=None,
                 cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
             
             if ignore_missing_data:
-                dmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
+                ddmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             else:
-                dmap_target = cmap2dmap(cmap, alpha, not_normalize)
-            dmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
+                ddmap_target = cmap2dmap(cmap, alpha, not_normalize)
+            ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
         # Load connectivity matrix if provided
         if connectivity_matrix is not None:
             if isinstance(connectivity_matrix, str):
@@ -342,13 +362,18 @@ def run_optimization(input_path=None,
         input_table.add_column("Value", style="green")
         
         input_source = input_path if input_path else "NumPy array"
-        input_type_str = "Contact Map" if input_type == 'cmap' else "Distance Map" if input_type == 'dmap' else "Unknown"
+        input_type_str = (
+            "Contact Map" if input_type == 'cmap'
+            else "Distance Map" if input_type == 'dmap'
+            else "Squared Distance Map" if input_type == 'ddmap'
+            else "Unknown"
+        )
         input_format_str = "Text" if input_format == 'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"
         
         input_table.add_row("Input Source", input_source)
         input_table.add_row("Input Type", input_type_str)
         input_table.add_row("Input Format", input_format_str)
-        input_table.add_row("Matrix Size", f"{dmap_target.shape[0]} × {dmap_target.shape[1]}")
+        input_table.add_row("Matrix Size", f"{ddmap_target.shape[0]} × {ddmap_target.shape[1]}")
         if input_type == 'cmap':
             input_table.add_row("Alpha (cmap→dmap)", f"{alpha}")
             input_table.add_row("Matrix Balancing", "Yes" if balance else "No" if input_format == 'cooler' else "N/A")
@@ -426,11 +451,11 @@ def run_optimization(input_path=None,
         if is_gpu_available() and not use_gpu:
             gpu_name = get_gpu_name()
             console.print(f"\n[cyan]💡 Tip: GPU detected ({gpu_name}). Use --use-gpu for 2-4x speedup on large matrices.[/cyan]")
-        elif not is_gpu_available() and dmap_target.shape[0] >= 200:
+        elif not is_gpu_available() and ddmap_target.shape[0] >= 200:
             console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
-    model = Optimize(dmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
+    model = Optimize(ddmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
     
     if use_gpu and model.use_gpu and verbose:
         dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
@@ -539,10 +564,6 @@ def run_optimization(input_path=None,
                     "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
             
             if input_type == 'cmap':
-                np.savetxt('{}_dmap_target.txt'.format(output_prefix), np.sqrt((8./(3.*np.pi))* dmap_target))
-                if verbose and console:
-                    console.print(
-                        "Target distance map saved to file: [bold magenta]{}_dmap_target.txt[/bold magenta]".format(output_prefix))
                 np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
                 if verbose and console:
                     console.print(

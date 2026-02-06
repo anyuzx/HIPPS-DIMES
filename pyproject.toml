@@ -60,7 +60,7 @@ Repository = "https://github.com/anyuzx/HIPPS-DIMES.git"
 "Bug Tracker" = "https://github.com/anyuzx/HIPPS-DIMES/issues"
 
 [project.scripts]
-HippsDimes = "HippsDimes:main"
+HippsDimes = "hipps_dimes.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]
@@ -108,4 +108,4 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --cov=HippsDimes --cov-report=term-missing --cov-report=html" 
+addopts = "-v --cov=hipps_dimes --cov=HippsDimes --cov-report=term-missing --cov-report=html"

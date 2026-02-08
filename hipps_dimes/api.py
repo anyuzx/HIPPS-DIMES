@@ -126,7 +126,7 @@ def run_optimization(input_path=None,
     -------
     results : dict
         Dictionary containing:
-        - 'loss': Loss values during optimization (pandas DataFrame or list)
+        - 'log': Optimization log as a DataFrame with columns ['iteration', 'loss', 'entropy']
         - 'dmap_final': Final distance map (numpy array)
         - 'connectivity_matrix': Final connectivity matrix (numpy array)
         - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)

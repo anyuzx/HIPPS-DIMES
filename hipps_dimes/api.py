@@ -489,11 +489,11 @@ def run_optimization(input_path=None,
     
     # Format loss/entropy data
     try:
-        loss_df = pd.DataFrame(
+        log_df = pd.DataFrame(
             np.dstack((np.arange(1, len(loss)+1), loss, entropy))[0],
             columns=['iteration', 'loss', 'entropy'])
     except IndexError:
-        loss_df = None
+        log_df = None
 
     # Print regularization norms if requested
     if verbose:
@@ -504,14 +504,12 @@ def run_optimization(input_path=None,
             print('L1 norm of the connectivity matrix:', np.abs(
                 final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]).sum())
 
-        if loss_df is not None and console:
-            console.print("Final loss: {}".format(loss_df['loss'].values[-1]))
-            console.print("Final entropy: {}".format(loss_df['entropy'].values[-1]))
+        if log_df is not None and console:
+            console.print("Final loss: {}".format(log_df['loss'].values[-1]))
+            console.print("Final entropy: {}".format(log_df['entropy'].values[-1]))
 
     # Finalize results
-    if loss_df is not None:
-        log_df = loss_df
-    else:
+    if log_df is None:
         log_df = pd.DataFrame({
             'iteration': np.arange(1, len(loss) + 1),
             'loss': loss,
@@ -552,8 +550,8 @@ def run_optimization(input_path=None,
             status.start()
         
         try:
-            if log and loss_df is not None:
-                loss_df.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+            if log and log_df is not None:
+                log_df.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
                 if verbose and console:
                     console.print(
                         "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))

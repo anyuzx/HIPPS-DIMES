@@ -177,10 +177,24 @@ def run_optimization(input_path=None,
     ...                            momentum=0.9)
     """
     # Validate inputs
+    valid_input_types = {'cmap', 'dmap', 'ddmap'}
+    valid_input_formats = {'text', 'cooler', 'hic'}
     if input_matrix is None and input_path is None:
         raise ValueError("Either input_matrix or input_path must be provided")
-    if input_type not in {'cmap', 'dmap', 'ddmap'}:
-        raise ValueError("Invalid input_type. Must be 'cmap', 'dmap', or 'ddmap'")
+    if input_type not in valid_input_types:
+        raise ValueError(
+            f"Invalid input_type '{input_type}'. Must be one of {sorted(valid_input_types)}"
+        )
+    if input_format not in valid_input_formats:
+        # Common user mistake: swapping input_type and input_format when using numpy arrays.
+        if input_matrix is not None and input_format in valid_input_types:
+            raise ValueError(
+                f"input_format='{input_format}' is invalid. Did you mean input_type='{input_format}'? "
+                "For numpy arrays, keep input_format as 'text' (default)."
+            )
+        raise ValueError(
+            f"Invalid input_format '{input_format}'. Must be one of {sorted(valid_input_formats)}"
+        )
     if gaussian_noise_variance < 0.0:
         raise ValueError("gaussian_noise_variance must be non-negative")
     if gaussian_noise_variance > 0.0 and method == 'DI':

@@ -1,5 +1,7 @@
 """High-level programmatic API for HIPPS-DIMES."""
 
+import time
+
 import numpy as np
 import pandas as pd
 import scipy
@@ -176,6 +178,8 @@ def run_optimization(input_path=None,
     ...                            output_prefix='output/chr21',
     ...                            momentum=0.9)
     """
+    start_time = time.perf_counter()
+
     # Validate inputs
     valid_input_types = {'cmap', 'dmap', 'ddmap'}
     valid_input_formats = {'text', 'cooler', 'hic'}
@@ -598,5 +602,11 @@ def run_optimization(input_path=None,
             if verbose and console and hasattr(status, 'stop'):
                 status.stop()
             raise e
+
+    elapsed_seconds = time.perf_counter() - start_time
+    if verbose and console:
+        console.print(f"Total walltime: {elapsed_seconds:.2f} seconds")
+    else:
+        print(f"Total walltime: {elapsed_seconds:.2f} seconds")
     
     return results

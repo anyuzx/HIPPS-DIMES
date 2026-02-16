@@ -27,7 +27,7 @@ def _parse_save_steps(save_steps_str):
 @click.argument('input', nargs=1)
 @click.argument('output-prefix', nargs=1)
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap', 'ddmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map, dmap: mean distance map, or ddmap: mean squared distance map')
-@click.option('--input-format', required=True, type=click.Choice(['text', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, cooler, or hic')
+@click.option('--input-format', required=True, type=click.Choice(['text', 'npy', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, npy, cooler, or hic')
 @click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Number of iterations')
 @click.option('-k', '--connectivity-matrix', type=str, required=False, help='Use provided connectivity matrix as initialization. Useful when restart from previous run')
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')

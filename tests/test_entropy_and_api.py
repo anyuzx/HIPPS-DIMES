@@ -57,3 +57,52 @@ def test_run_optimization_smoke_dmap():
     assert A_est.shape == (n, n)
     assert np.allclose(A_est, A_est.T)
     assert np.allclose(np.sum(A_est, axis=1), 0.0, atol=1e-8)
+
+
+def test_run_optimization_smoke_dmap_npy_input(tmp_path):
+    """run_optimization should accept dmap input from a .npy file."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    dmap_path = tmp_path / "dmap.npy"
+    np.save(dmap_path, dmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_path=str(dmap_path),
+        input_type="dmap",
+        input_format="npy",
+        method="IS",
+        iteration=5,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+    )
+
+    assert "dmap_final" in results
+    assert "connectivity_matrix" in results
+    assert results["connectivity_matrix"].shape == (n, n)
+
+
+def test_run_optimization_smoke_cmap_npy_input(tmp_path):
+    """run_optimization should accept cmap input from a .npy file."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    cmap_path = tmp_path / "cmap.npy"
+    np.save(cmap_path, cmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_path=str(cmap_path),
+        input_type="cmap",
+        input_format="npy",
+        method="IS",
+        iteration=5,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+    )
+
+    assert "dmap_final" in results
+    assert "connectivity_matrix" in results
+    assert "cmap_final" in results
+    assert "rc_optimal" in results

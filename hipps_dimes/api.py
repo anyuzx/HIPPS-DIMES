@@ -91,7 +91,7 @@ def run_optimization(input_path=None,
         - 'dmap': mean distance map (converted internally to mean squared distance map)
         - 'ddmap': mean squared distance map (used directly)
     input_format : str, default='text'
-        Format of input file: 'text', 'cooler', or 'hic'
+        Format of input file: 'text', 'npy', 'cooler', or 'hic'
     binsize : int, default=25000
         Bin size for .hic format in bp
     hic_norm : str, default='KR'
@@ -182,7 +182,7 @@ def run_optimization(input_path=None,
 
     # Validate inputs
     valid_input_types = {'cmap', 'dmap', 'ddmap'}
-    valid_input_formats = {'text', 'cooler', 'hic'}
+    valid_input_formats = {'text', 'npy', 'cooler', 'hic'}
     if input_matrix is None and input_path is None:
         raise ValueError("Either input_matrix or input_path must be provided")
     if input_type not in valid_input_types:
@@ -236,12 +236,15 @@ def run_optimization(input_path=None,
             elif input_format == 'text':
                 ddmap_target = np.loadtxt(input_path)
                 ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
+            elif input_format == 'npy':
+                ddmap_target = np.load(input_path)
+                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format in {'cooler', 'hic'}:
-                raise ValueError("input_type='dmap' only supports input_format='text' (or provide input_matrix)")
+                raise ValueError("input_type='dmap' only supports input_format='text' or 'npy' (or provide input_matrix)")
             else:
                 raise ValueError(
                     f"Invalid input_format '{input_format}' for input_type='dmap'. "
-                    "Supported: 'text' (or provide input_matrix)."
+                    "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
         elif input_type == 'ddmap':
             if verbose and console:
@@ -253,12 +256,14 @@ def run_optimization(input_path=None,
                     raise ValueError("Squared distance map must be a square 2D array")
             elif input_format == 'text':
                 ddmap_target = np.loadtxt(input_path)
+            elif input_format == 'npy':
+                ddmap_target = np.load(input_path)
             elif input_format in {'cooler', 'hic'}:
-                raise ValueError("input_type='ddmap' only supports input_format='text' (or provide input_matrix)")
+                raise ValueError("input_type='ddmap' only supports input_format='text' or 'npy' (or provide input_matrix)")
             else:
                 raise ValueError(
                     f"Invalid input_format '{input_format}' for input_type='ddmap'. "
-                    "Supported: 'text' (or provide input_matrix)."
+                    "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
         elif input_type == 'cmap':
             if verbose and console:
@@ -270,6 +275,8 @@ def run_optimization(input_path=None,
                     raise ValueError("Contact map must be a square 2D array")
             elif input_format == 'text':
                 cmap = np.loadtxt(input_path)
+            elif input_format == 'npy':
+                cmap = np.load(input_path)
             elif input_format == 'cooler':
                 if cooler is None:
                     raise ImportError(
@@ -342,7 +349,7 @@ def run_optimization(input_path=None,
             else:
                 raise ValueError(
                     f"Invalid input_format '{input_format}' for input_type='cmap'. "
-                    "Supported: 'text', 'cooler', 'hic' (or provide input_matrix)."
+                    "Supported: 'text', 'npy', 'cooler', 'hic' (or provide input_matrix)."
                 )
             
             # Apply neighbor balancing if requested
@@ -386,7 +393,13 @@ def run_optimization(input_path=None,
             else "Squared Distance Map" if input_type == 'ddmap'
             else "Unknown"
         )
-        input_format_str = "Text" if input_format == 'text' else "Cooler File" if input_format == 'cooler' else ".hic file" if input_format == 'hic' else "Unknown"
+        input_format_str = (
+            "Text" if input_format == 'text'
+            else "NumPy (.npy)" if input_format == 'npy'
+            else "Cooler File" if input_format == 'cooler'
+            else ".hic file" if input_format == 'hic'
+            else "Unknown"
+        )
         
         input_table.add_row("Input Source", input_source)
         input_table.add_row("Input Type", input_type_str)

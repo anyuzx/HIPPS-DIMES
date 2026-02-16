@@ -88,12 +88,14 @@ HippsDimes --help
 
 ### Input files
 
-This script accepts input files in two formats. If the input file is a Hi-C
-contact map, it can be in either `.cool` format (see https://github.com/open2c/cooler for details of the `cooler` library), '.hic' format (via hicstraw) or pure text format. If the
-input file is a mean spatial distance map, the script only accepts a pure text
-formatted file. The text format for a matrix is the following: each row of the
-file corresponds to the row of the matrix. Values are space-separated. The
-content of the file should look like this,
+This script accepts multiple input formats. If the input file is a Hi-C
+contact map, it can be in `.cool` format (see https://github.com/open2c/cooler
+for details of the `cooler` library), `.hic` format (via hicstraw), plain text
+matrix format, or NumPy `.npy` format. If the input file is a mean spatial
+distance map, the script accepts plain text matrix format or NumPy `.npy`
+format. The text format for a matrix is the following: each row of the file
+corresponds to the row of the matrix. Values are space-separated. The content
+of the file should look like this,
 
 ```text
 1  2  3
@@ -151,7 +153,7 @@ This script will generate several files:
 - `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`. When used as a library (without `output_prefix`), connectivity matrices at these steps are still returned in `results['connectivity_matrix_at_steps']`.
 - `--eigh-threads`: Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, the backend default is used. Set to 1 for single-threaded runs.
 - `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
-- `--input-format`: The format of the input file. Options: `text`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, or a pure text-based file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, then the script only supports the text-based file in which each line represents the row of the mean distance map. This option is required.
+- `--input-format`: The format of the input file. Options: `text`, `npy`, `cooler`, or `hic`. If the type of input file is Hi-C contact map, then the script supports `cooler` format Hi-C contact map file, `.hic` format, pure text-based file, or NumPy `.npy` file. In the text-based file, each line corresponds to the row of the contact map. If the type of input file is mean distance map, the script supports text-based matrix files and `.npy` files. This option is required.
 - `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
 - `--norm`: Normalization for .hic format. Options: KR, VC, NONE. Default: KR.
 - `--unit`: Unit for .hic format. Options: BP, FRAG. Default: BP.

@@ -1332,12 +1332,8 @@ class Dynamics:
         distances : (N, N) ndarray
             Matrix of pairwise distances. distances[i,j] is the distance between loci i and j.
         """
-        # Use pdist+squareform for better performance on larger systems
-        # pdist computes condensed distance matrix, squareform converts to full symmetric matrix
-        distances = scipy.spatial.distance.squareform(
-            scipy.spatial.distance.pdist(self.xyz, metric='euclidean')
-        )
-        return distances
+        # Compute full pairwise Euclidean distance matrix directly.
+        return scipy.spatial.distance.cdist(self.xyz, self.xyz, metric='euclidean')
 
     def restore_original_connectivity(self):
         """

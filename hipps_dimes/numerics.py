@@ -1050,10 +1050,6 @@ def a2dmap_theory_with_force_applied(A, force):
     X_eq = force_projection * temp_force[:, np.newaxis]  # Shape: (n_modes, 3)
     R_eq = eigvector @ X_eq  # Shape: (N, 3)
     
-    # Equilibrium displacement contribution: (R_eq,i - R_eq,j)
-    # This is the shift in mean position due to force
-    delta_R_eq = R_eq[:, np.newaxis, :] - R_eq[np.newaxis, :, :]  # Shape: (N, N, 3)
-    
     # For the distance calculation, we need to consider that:
     # - Thermal fluctuations contribute equally in all 3 dimensions: 3*σ²_thermal
     # - Equilibrium shift is a fixed vector displacement
@@ -1063,8 +1059,10 @@ def a2dmap_theory_with_force_applied(A, force):
     # For simplicity, we compute the squared distance from equilibrium positions
     # and add thermal fluctuation variance
     
-    # Compute squared equilibrium separation
-    delta_R_eq_sq = np.sum(delta_R_eq**2, axis=2)  # Shape: (N, N)
+    # Compute squared equilibrium separations for all pairs.
+    delta_R_eq_sq = scipy.spatial.distance.cdist(
+        R_eq, R_eq, metric='sqeuclidean'
+    )  # Shape: (N, N)
     
     # Combined variance: thermal variance (3*σ²) + equilibrium shift²
     # σ²_total (in each dimension) remains sigma_thermal²

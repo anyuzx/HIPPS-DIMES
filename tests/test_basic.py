@@ -65,5 +65,38 @@ def test_compute_modulus():
     assert np.allclose(loss_mod[:, 0], freq)
 
 
+def test_dynamics_pairwise_distances():
+    """Dynamics should compute pairwise Euclidean distances correctly."""
+    dyn = HippsDimes.Dynamics(3, k=1.0, model="rouse")
+    dyn.xyz = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ]
+    )
+    distances = dyn._calculate_pairwise_distances()
+
+    expected = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, np.sqrt(5.0)],
+            [2.0, np.sqrt(5.0), 0.0],
+        ]
+    )
+    assert np.allclose(distances, expected)
+
+
+def test_a2dmap_theory_with_force_applied_smoke():
+    """Force-applied dmap computation should return a valid symmetric map."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    force = {"loci": [0, 4], "amplitude": 1.0, "direction": [1.0, 0.0, 0.0]}
+    dmap = HippsDimes.a2dmap_theory_with_force_applied(A, force)
+
+    assert dmap.shape == (5, 5)
+    assert np.allclose(dmap, dmap.T)
+    assert np.allclose(np.diag(dmap), 0.0)
+
+
 if __name__ == "__main__":
     pytest.main([__file__]) 

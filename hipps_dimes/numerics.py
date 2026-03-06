@@ -494,6 +494,132 @@ def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     
     return tau_mat
 
+def compute_all_tau_1e_memory_efficient(K, num_t=200, factor=10.0, tol=1e-8, block_size=128):
+    """
+    Memory-efficient computation of 1/e relaxation times tau_{ij} for all loci pairs.
+
+    This function avoids allocating any (n, n, n) tensor by processing the matrix in
+    symmetric blocks and streaming over time points.
+
+    Parameters
+    ----------
+    K : (n×n) ndarray
+        Connectivity matrix (symmetric).
+    num_t : int, optional
+        Number of time points in the log-spaced grid. Default is 200.
+    factor : float, optional
+        Multiplier for the upper time bound relative to the slowest-mode time.
+        Default is 10.0.
+    tol : float, optional
+        Small epsilon for numerical stability. Default is 1e-8.
+    block_size : int, optional
+        Block size for pairwise computation. Smaller values use less memory but can
+        be slower. Default is 128.
+
+    Returns
+    -------
+    tau_mat : (n×n) ndarray
+        Approximate 1/e times tau_{ij} for each pair (i,j).
+    """
+    K = np.asarray(K)
+    if K.ndim != 2 or K.shape[0] != K.shape[1]:
+        raise ValueError("K must be a square matrix")
+    if num_t < 1:
+        raise ValueError("num_t must be >= 1")
+    if block_size < 1:
+        raise ValueError("block_size must be >= 1")
+
+    n = K.shape[0]
+    if n == 0:
+        return np.empty((0, 0), dtype=float)
+    if n == 1:
+        return np.zeros((1, 1), dtype=float)
+
+    eigvals, eigvecs = np.linalg.eigh(-K)
+    lam = eigvals[1:]      # drop zero mode
+    vec = eigvecs[:, 1:]   # shape (n, n-1)
+
+    if lam.size == 0:
+        return np.zeros((n, n), dtype=float)
+
+    # Build time grid.
+    tau_slow = 1.0 / np.min(lam)
+    t_vals = np.logspace(np.log10(1e-12), np.log10(factor * tau_slow), num_t)
+    if num_t == 1:
+        tau_single = np.full((n, n), t_vals[0], dtype=float)
+        np.fill_diagonal(tau_single, 0.0)
+        return tau_single
+
+    inv_lam = 1.0 / lam
+    target = 1.0 / np.e
+    # Precompute mode weights for each sampled time: w_p(t) = exp(-lam_p t) / lam_p.
+    weights_t = np.exp(-np.outer(t_vals, lam)) * inv_lam[None, :]
+
+    tau_mat = np.full((n, n), t_vals[-1], dtype=float)
+
+    for i0 in range(0, n, block_size):
+        i1 = min(i0 + block_size, n)
+        Vi = vec[i0:i1, :]                     # (bi, m)
+        Vi_sq = Vi * Vi
+        Vi_inv = Vi * inv_lam[None, :]
+        s0_i = np.sum(Vi_sq * inv_lam[None, :], axis=1)  # (bi,)
+
+        for j0 in range(i0, n, block_size):
+            j1 = min(j0 + block_size, n)
+            Vj = vec[j0:j1, :]                 # (bj, m)
+            Vj_sq = Vj * Vj
+            s0_j = np.sum(Vj_sq * inv_lam[None, :], axis=1)  # (bj,)
+
+            # Denominator G_ij(0): sum_p ((V_ip - V_jp)^2 / lam_p)
+            M0 = Vi_inv @ Vj.T
+            denom = s0_i[:, None] + s0_j[None, :] - 2.0 * M0
+            denom = np.maximum(denom, tol)
+
+            block_tau = np.full((i1 - i0, j1 - j0), t_vals[-1], dtype=float)
+            done = np.zeros_like(block_tau, dtype=bool)
+
+            # t = t_vals[0]
+            w_prev = weights_t[0]
+            si_prev = np.sum(Vi_sq * w_prev[None, :], axis=1)
+            sj_prev = np.sum(Vj_sq * w_prev[None, :], axis=1)
+            M_prev = (Vi * w_prev[None, :]) @ Vj.T
+            g_prev = (si_prev[:, None] + sj_prev[None, :] - 2.0 * M_prev) / denom
+
+            crossed = g_prev <= target
+            block_tau[crossed] = t_vals[0]
+            done[crossed] = True
+
+            for t_idx in range(1, num_t):
+                if done.all():
+                    break
+
+                w_curr = weights_t[t_idx]
+                si_curr = np.sum(Vi_sq * w_curr[None, :], axis=1)
+                sj_curr = np.sum(Vj_sq * w_curr[None, :], axis=1)
+                M_curr = (Vi * w_curr[None, :]) @ Vj.T
+                g_curr = (si_curr[:, None] + sj_curr[None, :] - 2.0 * M_curr) / denom
+
+                new_cross = (~done) & (g_curr <= target)
+                if np.any(new_cross):
+                    g0 = g_prev[new_cross]
+                    g1 = g_curr[new_cross]
+                    dg = g1 - g0
+                    safe_dg = np.where(np.abs(dg) < tol, -tol, dg)
+                    frac = np.clip((target - g0) / safe_dg, 0.0, 1.0)
+                    t0 = t_vals[t_idx - 1]
+                    dt = t_vals[t_idx] - t0
+                    block_tau[new_cross] = t0 + frac * dt
+                    done[new_cross] = True
+
+                g_prev = g_curr
+
+            tau_mat[i0:i1, j0:j1] = block_tau
+            if j0 != i0:
+                tau_mat[j0:j1, i0:i1] = block_tau.T
+
+    np.fill_diagonal(tau_mat, 0.0)
+    return tau_mat
+
 def compute_all_tau_integral(a):
     """
     Compute first‐moment (tau1) and second‐moment (tau2) relaxation times
@@ -543,6 +669,111 @@ def compute_all_tau_integral(a):
     np.fill_diagonal(tau1, 0.0)
     np.fill_diagonal(tau2, 0.0)
 
+    return tau1, tau2
+
+def compute_all_tau_integral_memory_efficient(a, block_size=256, tol=1e-14):
+    """
+    Memory-efficient computation of first/second-moment relaxation times
+    for all loci pairs (i, j), without materializing an (n, n, n) tensor.
+
+    Parameters
+    ----------
+    a : (n×n) ndarray
+        Connectivity matrix.
+    block_size : int, optional
+        Block size used for pairwise computations. Smaller values reduce peak
+        memory but can be slower. Default is 256.
+    tol : float, optional
+        Small threshold for safe division. Default is 1e-14.
+
+    Returns
+    -------
+    tau1 : (n×n) ndarray
+        First-moment relaxation time for each pair (i,j):
+          tau1[i,j] = (∑_p E_p(i,j)/λ_p^2) / (∑_p E_p(i,j)/λ_p)
+    tau2 : (n×n) ndarray
+        Second-moment relaxation time ratio for each pair (i,j):
+          tau2[i,j] = (∑_p E_p(i,j)/λ_p^3) / (∑_p E_p(i,j)/λ_p^2)
+    """
+    a = np.asarray(a)
+    if a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("a must be a square matrix")
+    if block_size < 1:
+        raise ValueError("block_size must be >= 1")
+
+    n = a.shape[0]
+    if n == 0:
+        empty = np.empty((0, 0), dtype=float)
+        return empty, empty
+    if n == 1:
+        zero = np.zeros((1, 1), dtype=float)
+        return zero, zero
+
+    # 1) Eigendecompose -a
+    eigvals, eigvecs = np.linalg.eigh(-a)
+
+    # 2) Discard the zero mode
+    lam = eigvals[1:]       # shape (n-1,)
+    vec = eigvecs[:, 1:]    # shape (n, n-1)
+    if lam.size == 0:
+        zero = np.zeros((n, n), dtype=float)
+        return zero, zero
+
+    # 3) Precompute inverse powers and per-row weighted norms.
+    inv_lam = 1.0 / lam
+    inv_lam2 = inv_lam * inv_lam
+    inv_lam3 = inv_lam2 * inv_lam
+
+    vec_sq = vec * vec
+    s0 = np.sum(vec_sq * inv_lam[None, :], axis=1)
+    s1 = np.sum(vec_sq * inv_lam2[None, :], axis=1)
+    s2 = np.sum(vec_sq * inv_lam3[None, :], axis=1)
+
+    # Weighted eigenvector matrices used in block GEMMs.
+    vec_w0 = vec * inv_lam[None, :]
+    vec_w1 = vec * inv_lam2[None, :]
+    vec_w2 = vec * inv_lam3[None, :]
+
+    tau1 = np.zeros((n, n), dtype=float)
+    tau2 = np.zeros((n, n), dtype=float)
+
+    for i0 in range(0, n, block_size):
+        i1 = min(i0 + block_size, n)
+        v0_i = vec_w0[i0:i1, :]
+        v1_i = vec_w1[i0:i1, :]
+        v2_i = vec_w2[i0:i1, :]
+        s0_i = s0[i0:i1]
+        s1_i = s1[i0:i1]
+        s2_i = s2[i0:i1]
+
+        for j0 in range(i0, n, block_size):
+            j1 = min(j0 + block_size, n)
+            v_j = vec[j0:j1, :]
+            s0_j = s0[j0:j1]
+            s1_j = s1[j0:j1]
+            s2_j = s2[j0:j1]
+
+            # sumk = sum_p (v_ip - v_jp)^2 / lam_p^(k+1), with k=0,1,2
+            m0 = v0_i @ v_j.T
+            m1 = v1_i @ v_j.T
+            m2 = v2_i @ v_j.T
+
+            sum0 = s0_i[:, None] + s0_j[None, :] - 2.0 * m0
+            sum1 = s1_i[:, None] + s1_j[None, :] - 2.0 * m1
+            sum2 = s2_i[:, None] + s2_j[None, :] - 2.0 * m2
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                t1_blk = np.divide(sum1, sum0, out=np.zeros_like(sum1), where=np.abs(sum0) > tol)
+                t2_blk = np.divide(sum2, sum1, out=np.zeros_like(sum2), where=np.abs(sum1) > tol)
+
+            tau1[i0:i1, j0:j1] = t1_blk
+            tau2[i0:i1, j0:j1] = t2_blk
+            if j0 != i0:
+                tau1[j0:j1, i0:i1] = t1_blk.T
+                tau2[j0:j1, i0:i1] = t2_blk.T
+
+    np.fill_diagonal(tau1, 0.0)
+    np.fill_diagonal(tau2, 0.0)
     return tau1, tau2
 
 def compute_tau_ij_integral(a, i, j):

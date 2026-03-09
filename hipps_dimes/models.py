@@ -1,7 +1,22 @@
 """Optimization and dynamics models for HIPPS-DIMES."""
 
+import time
+
 from .numerics import *  # noqa: F401,F403
 from .numerics import _a2dmap_theory_gpu
+
+_PBAR_FORMAT_NO_RATE = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]"
+
+
+def _iter_per_sec_str(iteration_count, start_time):
+    """Return a stable iterations-per-second string for tqdm postfix display."""
+    elapsed = time.perf_counter() - start_time
+    if elapsed <= 0:
+        return "0.000"
+    rate = iteration_count / elapsed
+    if rate is None or not np.isfinite(rate):
+        return "0.000"
+    return f"{rate:.3f}"
 
 class Optimize:
     """
@@ -247,7 +262,13 @@ class Optimize:
         # -------- Main loop --------
         loss_array = []
         entropy_array = []
-        with trange(epoch, desc="Performing masked optimization (sparse)", unit="iteration") as pbar:
+        start_time = time.perf_counter()
+        with trange(
+            epoch,
+            desc="Performing masked optimization (sparse)",
+            unit="iteration",
+            bar_format=_PBAR_FORMAT_NO_RATE,
+        ) as pbar:
             for t in pbar:
                 # Grounded Laplacian Lg = (-A) with pinned node removed
                 A_sym = 0.5 * (self.A + self.A.T)
@@ -317,7 +338,11 @@ class Optimize:
                 entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
                 self.entropy = entropy
                 
-                pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
+                pbar.set_postfix({
+                    "loss": self.loss,
+                    "entropy": self.entropy if self.entropy is not None else np.nan,
+                    "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                })
                 loss_array.append(self.loss)
                 entropy_array.append(self.entropy if self.entropy is not None else np.nan)
 
@@ -833,7 +858,13 @@ class Optimize:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
         if general_method == 'optimization':
-            with trange(epoch, desc="Performing optimization", unit="iteration") as pbar:
+            start_time = time.perf_counter()
+            with trange(
+                epoch,
+                desc="Performing optimization",
+                unit="iteration",
+                bar_format=_PBAR_FORMAT_NO_RATE,
+            ) as pbar:
                 for t in pbar:
                     self.__update_parameter(t, **kwargs)
                     if self.use_gpu:
@@ -845,10 +876,18 @@ class Optimize:
                         if (t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch):
                             self.loss = float(self._loss_gpu)
                             self.entropy = float(self._entropy_gpu)
-                            pbar.set_postfix(loss=self.loss, entropy=self.entropy)
+                            pbar.set_postfix({
+                                "loss": self.loss,
+                                "entropy": self.entropy,
+                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                            })
                     else:
                         # CPU path
-                        pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
+                        pbar.set_postfix({
+                            "loss": self.loss,
+                            "entropy": self.entropy if self.entropy is not None else np.nan,
+                            "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                        })
                         loss_array.append(self.loss)
                         entropy_array.append(self.entropy if self.entropy is not None else np.nan)
                     
@@ -945,7 +984,13 @@ class Optimize:
             if len(save_steps_set) > 0:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
-        with trange(epoch, desc="Performing noisy optimization", unit="iteration") as pbar:
+        start_time = time.perf_counter()
+        with trange(
+            epoch,
+            desc="Performing noisy optimization",
+            unit="iteration",
+            bar_format=_PBAR_FORMAT_NO_RATE,
+        ) as pbar:
             for t in pbar:
                 self.__update_parameter_noisy(t, gaussian_noise_variance=gaussian_noise_variance, **kwargs)
                 if self.use_gpu:
@@ -955,9 +1000,17 @@ class Optimize:
                     if (t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch):
                         self.loss = float(self._loss_gpu)
                         self.entropy = float(self._entropy_gpu)
-                        pbar.set_postfix(loss=self.loss, entropy=self.entropy)
+                        pbar.set_postfix({
+                            "loss": self.loss,
+                            "entropy": self.entropy,
+                            "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                        })
                 else:
-                    pbar.set_postfix(loss=self.loss, entropy=self.entropy if self.entropy is not None else np.nan)
+                    pbar.set_postfix({
+                        "loss": self.loss,
+                        "entropy": self.entropy if self.entropy is not None else np.nan,
+                        "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                    })
                     loss_array.append(self.loss)
                     entropy_array.append(self.entropy if self.entropy is not None else np.nan)
 

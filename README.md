@@ -109,6 +109,7 @@ This script will generate several files:
 
 - A text file for the final simulated mean distance map
 - A text file for the final simulated contact map (this is the best agreement contact map to the _normalized_ input contact map)
+- For `cooler` and `.hic` contact-map inputs, a text file for the internal target contact map used to construct the target distance constraints: `{output_prefix}_cmap_target.txt`
 - A text file for the connectivity matrix
 - A `.xyz` formatted file for the ensemble of genome structures generated (can
   be turned off)

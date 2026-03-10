@@ -167,3 +167,49 @@ def test_run_optimization_no_log_disables_both_log_files(tmp_path):
     assert not (tmp_path / "run_run_parameters.csv").exists()
     assert (tmp_path / "run_dmap_final.txt").exists()
     assert (tmp_path / "run_connectivity_matrix.txt").exists()
+
+
+def test_run_optimization_saves_target_cmap_for_cooler_or_hic_formats(tmp_path):
+    """The internal target cmap should be saved for cooler/hic cmap inputs."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+
+    for input_format in ("cooler", "hic"):
+        output_prefix = tmp_path / f"run_{input_format}"
+        HippsDimes.run_optimization(
+            input_matrix=cmap_target,
+            output_prefix=str(output_prefix),
+            input_type="cmap",
+            input_format=input_format,
+            method="IS",
+            iteration=3,
+            learning_rate=5.0,
+            no_xyzs=True,
+            verbose=False,
+        )
+
+        saved_target_cmap = np.loadtxt(tmp_path / f"run_{input_format}_cmap_target.txt")
+        assert np.allclose(saved_target_cmap, cmap_target)
+
+
+def test_run_optimization_does_not_save_target_cmap_for_text_input(tmp_path):
+    """Text cmap inputs should not write the internal target cmap output file."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    output_prefix = tmp_path / "run_text"
+
+    HippsDimes.run_optimization(
+        input_matrix=cmap_target,
+        output_prefix=str(output_prefix),
+        input_type="cmap",
+        input_format="text",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+    )
+
+    assert not (tmp_path / "run_text_cmap_target.txt").exists()

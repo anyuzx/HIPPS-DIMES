@@ -253,6 +253,7 @@ def run_optimization(input_path=None,
     connectivity_matrix_source = "default initialization"
     if connectivity_matrix is not None:
         connectivity_matrix_source = connectivity_matrix if isinstance(connectivity_matrix, str) else "provided matrix"
+    save_target_cmap = input_type == 'cmap' and input_format in {'cooler', 'hic'}
     
     # Initialize console for output
     if verbose:
@@ -613,6 +614,7 @@ def run_optimization(input_path=None,
         'not_normalize': not_normalize,
         'neighbor_balance': neighbor_balance,
         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
+        'save_target_cmap': save_target_cmap,
         'save_steps': save_steps or [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,
@@ -669,6 +671,12 @@ def run_optimization(input_path=None,
                 console.print(
                     "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
             
+            if save_target_cmap:
+                np.savetxt('{}_cmap_target.txt'.format(output_prefix), cmap)
+                if verbose and console:
+                    console.print(
+                        "Internal target contact map saved to file: [bold magenta]{}_cmap_target.txt[/bold magenta]".format(output_prefix))
+
             if input_type == 'cmap':
                 np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
                 if verbose and console:

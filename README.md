@@ -112,7 +112,8 @@ This script will generate several files:
 - A text file for the connectivity matrix
 - A `.xyz` formatted file for the ensemble of genome structures generated (can
   be turned off)
-- A csv formatted file for cost versus iteration data (can be turned off)
+- A CSV file for run parameters: `{output_prefix}_run_parameters.csv` (can be turned off)
+- A CSV file for iteration-series scalar data: `{output_prefix}_iteration_series.csv` (can be turned off)
 
 ### Explanation of the arguments and options
 
@@ -157,7 +158,7 @@ This script will generate several files:
 - `--binsize`: Bin size (resolution) for .hic format in bp. Default: 25000.
 - `--norm`: Normalization for .hic format. Options: KR, VC, NONE. Default: KR.
 - `--unit`: Unit for .hic format. Options: BP, FRAG. Default: BP.
-- `--log`: A log file will be written if this option is specified. The log file contains the data of cost versus iteration.
+- `--no-log`: By default, the program writes two log files when `output-prefix` is provided: `{output_prefix}_run_parameters.csv` and `{output_prefix}_iteration_series.csv`. Use `--no-log` to disable writing both files.
 - `--no-xyzs`: Turn off writing x,y,z coordinates of genome structures to files.
 - `--ignore-missing-data`: Turn on this argument will let the program ignore the missing elements or infinite numbers in the contact map or distance map.
 - `--balance`: Turn on the matrix balance for contact map. Only effective when `input_type == cmap` and `input_format == cooler`.
@@ -266,12 +267,12 @@ HippsDimes mydata.hic test \
 
 The number of iterations needed for convergence varies depending on your data. We recommend the following approach to determine the optimal number of iterations:
 
-1. **Run a trial optimization** with a moderate number of iterations (e.g., 10,000–50,000) and enable the log file with `--log`:
+1. **Run a trial optimization** with a moderate number of iterations (e.g., 10,000–50,000). The iteration-series log is written by default:
    ```bash
-   HippsDimes input.cool test --input-type cmap --input-format cooler -i 50000 --log
+   HippsDimes input.cool test --input-type cmap --input-format cooler -i 50000
    ```
 
-2. **Plot the entropy vs. iterations** from the generated log file (`test_loss.csv`). The log file contains columns for `iteration`, `loss`, and `entropy`.
+2. **Plot the entropy vs. iterations** from the generated iteration-series file (`test_iteration_series.csv`). This file contains columns for `iteration`, `loss`, and `entropy`.
 
 3. **Analyze the entropy curve**. In practice, two common patterns are observed:
 
@@ -286,8 +287,8 @@ Example Python code to visualize convergence:
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Load the log file
-df = pd.read_csv('test_loss.csv')
+# Load the iteration-series log file
+df = pd.read_csv('test_iteration_series.csv')
 
 # Plot entropy vs iterations
 plt.figure(figsize=(10, 4))
@@ -343,7 +344,8 @@ connectivity_matrix = results['connectivity_matrix']
 structures = results['xyzs']          # (ensemble, n_beads, 3)
 final_dmap = results['dmap_final']
 final_cmap = results['cmap_final']
-loss_history = results['loss']        # Includes iteration, loss, and entropy columns
+iteration_series = results['iteration_series']
+run_parameters = results['run_parameters']
 ```
 
 #### Return Values
@@ -353,8 +355,9 @@ The `run_optimization()` function returns a dictionary with:
 - `'dmap_final'`: Final distance map (numpy array)
 - `'cmap_final'`: Final contact map (numpy array, if input_type='cmap')
 - `'xyzs'`: Generated conformations (numpy array)
-- `'loss'`: Loss and entropy history (pandas DataFrame with columns: iteration, loss, entropy)
-- `'entropy'`: Same as 'loss' (for backward compatibility)
+- `'iteration_series'`: Iteration-series scalar outputs (pandas DataFrame; currently columns: iteration, loss, entropy)
+- `'run_parameters'`: Run parameters (pandas DataFrame with columns: parameter, value)
+- `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
 
 #### Additional Utility Functions

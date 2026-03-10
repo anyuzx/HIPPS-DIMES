@@ -1,6 +1,7 @@
 """Additional tests for entropy and library API behavior."""
 
 import numpy as np
+import pandas as pd
 
 import HippsDimes
 
@@ -106,3 +107,63 @@ def test_run_optimization_smoke_cmap_npy_input(tmp_path):
     assert "connectivity_matrix" in results
     assert "cmap_final" in results
     assert "rc_optimal" in results
+
+
+def test_run_optimization_writes_default_log_files(tmp_path):
+    """When output_prefix is provided, both log files should be written by default."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    output_prefix = tmp_path / "run"
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        output_prefix=str(output_prefix),
+        input_type="dmap",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+    )
+
+    iteration_series_path = tmp_path / "run_iteration_series.csv"
+    run_parameters_path = tmp_path / "run_run_parameters.csv"
+
+    assert "iteration_series" in results
+    assert "run_parameters" in results
+    assert iteration_series_path.exists()
+    assert run_parameters_path.exists()
+
+    iteration_series_df = pd.read_csv(iteration_series_path)
+    assert list(iteration_series_df.columns) == ["iteration", "loss", "entropy"]
+    assert len(iteration_series_df) == 3
+
+    run_parameters_df = pd.read_csv(run_parameters_path)
+    assert list(run_parameters_df.columns) == ["parameter", "value"]
+    assert "method" in set(run_parameters_df["parameter"])
+
+
+def test_run_optimization_no_log_disables_both_log_files(tmp_path):
+    """no_log should suppress both log-file writes while leaving main outputs intact."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    output_prefix = tmp_path / "run"
+
+    HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        output_prefix=str(output_prefix),
+        input_type="dmap",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        no_log=True,
+        no_xyzs=True,
+        verbose=False,
+    )
+
+    assert not (tmp_path / "run_iteration_series.csv").exists()
+    assert not (tmp_path / "run_run_parameters.csv").exists()
+    assert (tmp_path / "run_dmap_final.txt").exists()
+    assert (tmp_path / "run_connectivity_matrix.txt").exists()

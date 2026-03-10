@@ -45,7 +45,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
 @click.option('--norm', 'hic_norm', type=str, default='KR', show_default=True, help='Normalization for .hic: KR, VC, NONE')
 @click.option('--unit', 'hic_unit', type=click.Choice(['BP', 'FRAG'], case_sensitive=False), default='BP', show_default=True, help='Unit for .hic: BP or FRAG')
-@click.option('--log', is_flag=True, default=False, show_default=True, help='Write a log file')
+@click.option('--no-log', is_flag=True, default=False, show_default=True, help='Disable writing run-parameter and iteration-series log files')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='Turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
@@ -55,7 +55,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -87,7 +87,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         binsize=binsize,
         hic_norm=hic_norm,
         hic_unit=hic_unit,
-        log=log,
+        no_log=no_log,
         no_xyzs=no_xyzs,
         ignore_missing_data=ignore_missing_data,
         balance=balance,

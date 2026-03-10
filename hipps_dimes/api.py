@@ -1,5 +1,6 @@
 """High-level programmatic API for HIPPS-DIMES."""
 
+import json
 import time
 
 import numpy as np
@@ -9,6 +10,43 @@ from rich import print
 
 from .models import Optimize
 from .numerics import *  # noqa: F401,F403
+
+
+def _build_iteration_series_frame(loss, entropy, extra_series=None):
+    """Build a DataFrame for per-iteration scalar outputs."""
+    series_data = {
+        'iteration': np.arange(1, len(loss) + 1),
+        'loss': loss,
+        'entropy': entropy,
+    }
+    if extra_series:
+        expected_length = len(loss)
+        for column_name, values in extra_series.items():
+            if len(values) != expected_length:
+                raise ValueError(
+                    f"Iteration series '{column_name}' must have length {expected_length}, "
+                    f"got {len(values)}"
+                )
+            series_data[column_name] = values
+    return pd.DataFrame(series_data)
+
+
+def _serialize_run_parameter(value):
+    """Serialize parameter values for storage in a simple key/value CSV."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value)
+    return value
+
+
+def _build_run_parameters_frame(parameters):
+    """Build a DataFrame for run parameter logging."""
+    return pd.DataFrame({
+        'parameter': list(parameters.keys()),
+        'value': [_serialize_run_parameter(v) for v in parameters.values()],
+    })
+
 
 def run_optimization(input_path=None,
                      output_prefix=None,
@@ -32,7 +70,7 @@ def run_optimization(input_path=None,
                      binsize=25000,
                      hic_norm='KR',
                      hic_unit='BP',
-                     log=False,
+                     no_log=False,
                      no_xyzs=False,
                      ignore_missing_data=False,
                      balance=False,
@@ -41,7 +79,8 @@ def run_optimization(input_path=None,
                      enforce_nonnegative_connectivity_matrix=False,
                      save_steps=None,
                      eigh_threads=None,
-                     verbose=True):
+                     verbose=True,
+                     log=None):
     """
     Core function to run HIPPS/DIMES optimization that can be called programmatically or from CLI.
     
@@ -98,8 +137,8 @@ def run_optimization(input_path=None,
         Normalization for .hic: 'KR', 'VC', 'NONE'
     hic_unit : str, default='BP'
         Unit for .hic: 'BP' or 'FRAG'
-    log : bool, default=False
-        Whether to write log file
+    no_log : bool, default=False
+        If True, skip writing both log files when output_prefix is provided
     no_xyzs : bool, default=False
         If True, skip writing conformations to file
     ignore_missing_data : bool, default=False
@@ -128,7 +167,9 @@ def run_optimization(input_path=None,
     -------
     results : dict
         Dictionary containing:
-        - 'log': Optimization log as a DataFrame with columns ['iteration', 'loss', 'entropy']
+        - 'iteration_series': Optimization iteration-series data as a DataFrame
+        - 'log': Alias for 'iteration_series' (backward compatibility)
+        - 'run_parameters': Run parameters as a DataFrame with columns ['parameter', 'value']
         - 'dmap_final': Final distance map (numpy array)
         - 'connectivity_matrix': Final connectivity matrix (numpy array)
         - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)
@@ -205,6 +246,13 @@ def run_optimization(input_path=None,
         raise ValueError("gaussian_noise_variance is only supported for optimization methods (IS/GD), not DI")
     if gaussian_noise_variance > 0.0 and lamd > 0.0:
         raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
+    if log is not None:
+        no_log = not log
+
+    input_source = input_path if input_path else "NumPy array"
+    connectivity_matrix_source = "default initialization"
+    if connectivity_matrix is not None:
+        connectivity_matrix_source = connectivity_matrix if isinstance(connectivity_matrix, str) else "provided matrix"
     
     # Initialize console for output
     if verbose:
@@ -386,7 +434,6 @@ def run_optimization(input_path=None,
         input_table.add_column("Parameter", style="dim", width=20)
         input_table.add_column("Value", style="green")
         
-        input_source = input_path if input_path else "NumPy array"
         input_type_str = (
             "Contact Map" if input_type == 'cmap'
             else "Distance Map" if input_type == 'dmap'
@@ -471,7 +518,7 @@ def run_optimization(input_path=None,
         output_table.add_row("Ensemble Size", f"{ensemble:,} structures")
         output_table.add_row("Output Prefix", output_prefix if output_prefix else "[dim]None (results returned only)[/dim]")
         output_table.add_row("Write XYZ File", "No" if no_xyzs else "Yes")
-        output_table.add_row("Write Log File", "Yes" if log else "No")
+        output_table.add_row("Write Log Files", "No" if no_log else "Yes")
         if save_steps:
             output_table.add_row("Save Steps", ", ".join(str(s) for s in save_steps))
         
@@ -518,13 +565,8 @@ def run_optimization(input_path=None,
             iteration, general_method=general_method, save_steps=save_steps,
             output_prefix=output_prefix, **keyword_arguments)
     
-    # Format loss/entropy data
-    try:
-        log_df = pd.DataFrame(
-            np.dstack((np.arange(1, len(loss)+1), loss, entropy))[0],
-            columns=['iteration', 'loss', 'entropy'])
-    except IndexError:
-        log_df = None
+    # Format per-iteration scalar outputs.
+    iteration_series_df = _build_iteration_series_frame(loss, entropy)
 
     # Print regularization norms if requested
     if verbose:
@@ -535,20 +577,51 @@ def run_optimization(input_path=None,
             print('L1 norm of the connectivity matrix:', np.abs(
                 final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]).sum())
 
-        if log_df is not None and console:
-            console.print("Final loss: {}".format(log_df['loss'].values[-1]))
-            console.print("Final entropy: {}".format(log_df['entropy'].values[-1]))
+        if len(iteration_series_df) > 0 and console:
+            console.print("Final loss: {}".format(iteration_series_df['loss'].values[-1]))
+            console.print("Final entropy: {}".format(iteration_series_df['entropy'].values[-1]))
 
-    # Finalize results
-    if log_df is None:
-        log_df = pd.DataFrame({
-            'iteration': np.arange(1, len(loss) + 1),
-            'loss': loss,
-            'entropy': entropy
-        })
+    run_parameters_df = _build_run_parameters_frame({
+        'input_source': input_source,
+        'output_prefix': output_prefix,
+        'input_type': input_type,
+        'input_format': input_format,
+        'matrix_rows': ddmap_target.shape[0],
+        'matrix_cols': ddmap_target.shape[1],
+        'connectivity_matrix_source': connectivity_matrix_source,
+        'ensemble': ensemble,
+        'alpha': alpha,
+        'selection': selection,
+        'method': method,
+        'lamd': lamd,
+        'reg': reg,
+        'gaussian_noise_variance': gaussian_noise_variance,
+        'iteration': iteration,
+        'learning_rate': learning_rate,
+        'momentum': momentum,
+        'nesterov': nesterov,
+        'use_gpu_requested': use_gpu,
+        'use_gpu_enabled': model.use_gpu,
+        'gpu_float32': gpu_float32,
+        'binsize': binsize,
+        'hic_norm': hic_norm,
+        'hic_unit': hic_unit,
+        'no_log': no_log,
+        'no_xyzs': no_xyzs,
+        'ignore_missing_data': ignore_missing_data,
+        'balance': balance,
+        'not_normalize': not_normalize,
+        'neighbor_balance': neighbor_balance,
+        'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
+        'save_steps': save_steps or [],
+        'eigh_threads': eigh_threads,
+        'verbose': verbose,
+    })
 
     results = {
-        'log': log_df,
+        'iteration_series': iteration_series_df,
+        'log': iteration_series_df,
+        'run_parameters': run_parameters_df,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }
@@ -581,11 +654,15 @@ def run_optimization(input_path=None,
             status.start()
         
         try:
-            if log and log_df is not None:
-                log_df.to_csv('{}_loss_function_iteration.csv'.format(output_prefix))
+            if not no_log:
+                run_parameters_df.to_csv('{}_run_parameters.csv'.format(output_prefix), index=False)
                 if verbose and console:
                     console.print(
-                        "Loss function saved to file: [bold magenta]{}_loss_function_iteration.csv[/bold magenta]".format(output_prefix))
+                        "Run parameters saved to file: [bold magenta]{}_run_parameters.csv[/bold magenta]".format(output_prefix))
+                iteration_series_df.to_csv('{}_iteration_series.csv'.format(output_prefix), index=False)
+                if verbose and console:
+                    console.print(
+                        "Iteration-series data saved to file: [bold magenta]{}_iteration_series.csv[/bold magenta]".format(output_prefix))
 
             np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
             if verbose and console:

@@ -1,12 +1,15 @@
 """Additional tests for entropy and library API behavior."""
 
 import os
+import pickle
 
 import numpy as np
 import pandas as pd
 import pytest
+from click.testing import CliRunner
 
 import HippsDimes
+from hipps_dimes.cli import main as cli_main
 
 
 def test_compute_entropy_from_random_connectivity_matrix():
@@ -206,6 +209,69 @@ def test_run_optimization_no_log_disables_both_log_files(tmp_path):
     assert (tmp_path / "run_connectivity_matrix.txt").exists()
 
 
+def test_run_optimization_save_pickle_writes_only_pickle_file(tmp_path):
+    """save_pickle should suppress default artifact files and write only the pickle."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    output_prefix = tmp_path / "run"
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        output_prefix=str(output_prefix),
+        input_type="dmap",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        ensemble=2,
+        save_steps=[2],
+        save_pickle=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    pickle_path = tmp_path / "run_HIPPS_DIMES_results.pkl"
+    assert pickle_path.exists()
+    assert not (tmp_path / "run_iteration_series.csv").exists()
+    assert not (tmp_path / "run_run_parameters.csv").exists()
+    assert not (tmp_path / "run_dmap_final.txt").exists()
+    assert not (tmp_path / "run_connectivity_matrix.txt").exists()
+    assert not (tmp_path / "run_connectivity_matrix_iter2.txt").exists()
+    assert not (tmp_path / "run.xyz").exists()
+
+    with pickle_path.open("rb") as fin:
+        saved_results = pickle.load(fin)
+
+    assert saved_results.keys() == results.keys()
+    assert "xyzs" in saved_results
+    assert saved_results["xyzs"].shape[0] == 2
+    assert sorted(saved_results["connectivity_matrix_at_steps"]) == [2]
+    pd.testing.assert_frame_equal(saved_results["iteration_series"], results["iteration_series"])
+    pd.testing.assert_frame_equal(saved_results["run_parameters"], results["run_parameters"])
+    assert np.allclose(saved_results["dmap_final"], results["dmap_final"])
+    assert np.allclose(saved_results["connectivity_matrix"], results["connectivity_matrix"])
+
+
+def test_run_optimization_save_pickle_requires_output_prefix():
+    """save_pickle needs an output prefix to derive the pickle filename."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+
+    with pytest.raises(ValueError, match="output_prefix must be provided when save_pickle=True"):
+        HippsDimes.run_optimization(
+            input_matrix=dmap_target,
+            input_type="dmap",
+            method="IS",
+            iteration=1,
+            learning_rate=5.0,
+            save_pickle=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
 def test_run_optimization_saves_target_cmap_for_cooler_or_hic_formats(tmp_path):
     """The internal target cmap should be saved for cooler/hic cmap inputs."""
     n = 6
@@ -337,6 +403,42 @@ def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):
     assert {name: os.environ.get(name) for name in thread_env_vars} == {
         name: "1" for name in thread_env_vars
     }
+
+
+def test_cli_save_pickle_writes_pickle_only(tmp_path):
+    """CLI --save-pickle should route through to pickle-only output behavior."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    dmap_path = tmp_path / "dmap.npy"
+    output_prefix = tmp_path / "cli_run"
+    np.save(dmap_path, dmap_target)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            str(dmap_path),
+            str(output_prefix),
+            "--input-type",
+            "dmap",
+            "--input-format",
+            "npy",
+            "--iteration",
+            "2",
+            "--learning-rate",
+            "5.0",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cli_run_HIPPS_DIMES_results.pkl").exists()
+    assert not (tmp_path / "cli_run_dmap_final.txt").exists()
+    assert not (tmp_path / "cli_run_connectivity_matrix.txt").exists()
+    assert not (tmp_path / "cli_run_iteration_series.csv").exists()
 
 
 

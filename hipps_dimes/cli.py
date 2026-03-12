@@ -53,9 +53,10 @@ def _parse_save_steps(save_steps_str):
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
 @click.option('--enforce-nonnegative-connectivity-matrix', is_flag=True, default=False, show_default=True, help='Enforcing that the "spring constants" in the connectivity matrix can only be nonnegative')
 @click.option('--save-steps', type=str, default=None, help='Comma-separated list of iteration steps at which to save the connectivity matrix. Example: --save-steps 1000,5000,10000,50000')
+@click.option('--save-pickle', is_flag=True, default=False, show_default=True, help='Save the returned results dictionary to {output_prefix}_HIPPS_DIMES_results.pkl and suppress the default text/CSV/XYZ file outputs')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -95,6 +96,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         neighbor_balance=neighbor_balance,
         enforce_nonnegative_connectivity_matrix=enforce_nonnegative_connectivity_matrix,
         save_steps=_parse_save_steps(save_steps) if save_steps else None,
+        save_pickle=save_pickle,
         eigh_threads=eigh_threads,
         verbose=not quiet,
     )

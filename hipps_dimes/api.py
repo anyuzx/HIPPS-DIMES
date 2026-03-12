@@ -1,6 +1,7 @@
 """High-level programmatic API for HIPPS-DIMES."""
 
 import json
+import pickle
 import time
 
 import numpy as np
@@ -88,6 +89,7 @@ def run_optimization(input_path=None,
                      neighbor_balance=False,
                      enforce_nonnegative_connectivity_matrix=False,
                      save_steps=None,
+                     save_pickle=False,
                      eigh_threads=None,
                      verbose=True,
                      log=None,
@@ -168,6 +170,10 @@ def run_optimization(input_path=None,
         When set, results include ``connectivity_matrix_at_steps`` (dict: step -> matrix)
         for library use. If ``output_prefix`` is also set, files are saved as
         ``{output_prefix}_connectivity_matrix_iter{step}.txt``.
+    save_pickle : bool, default=False
+        If True, save the returned results dictionary to
+        ``{output_prefix}_HIPPS_DIMES_results.pkl`` and suppress the default
+        text/CSV/XYZ file outputs. Requires ``output_prefix``.
     eigh_threads : int, optional
         Number of threads for eigenvalue (eigh) and BLAS/LAPACK.
         If None, backend default is used. Set to 1 for single-threaded.
@@ -267,6 +273,8 @@ def run_optimization(input_path=None,
         raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
     if log is not None:
         no_log = not log
+    if save_pickle and output_prefix is None:
+        raise ValueError("output_prefix must be provided when save_pickle=True")
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
 
@@ -549,8 +557,14 @@ def run_optimization(input_path=None,
         
         output_table.add_row("Ensemble Size", f"{ensemble:,} structures")
         output_table.add_row("Output Prefix", output_prefix if output_prefix else "[dim]None (results returned only)[/dim]")
-        output_table.add_row("Write XYZ File", "No" if no_xyzs else "Yes")
-        output_table.add_row("Write Log Files", "No" if no_log else "Yes")
+        output_table.add_row("Save Results Pickle", "Yes" if save_pickle else "No")
+        if save_pickle:
+            output_table.add_row("Default Output Files", "Disabled")
+            output_table.add_row("Write XYZ File", "Stored in pickle only" if not no_xyzs else "No")
+            output_table.add_row("Write Log Files", "Stored in pickle only")
+        else:
+            output_table.add_row("Write XYZ File", "No" if no_xyzs else "Yes")
+            output_table.add_row("Write Log Files", "No" if no_log else "Yes")
         if save_steps:
             output_table.add_row("Save Steps", ", ".join(str(s) for s in save_steps))
         
@@ -570,6 +584,8 @@ def run_optimization(input_path=None,
     if use_gpu and model.use_gpu and verbose:
         dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
         console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
+
+    solver_output_prefix = None if save_pickle else output_prefix
     
     keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
                          'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
@@ -590,12 +606,12 @@ def run_optimization(input_path=None,
         }
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run_noisy(
             iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
-            output_prefix=output_prefix, progress_callback=progress_callback, show_progress=show_progress,
+            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
             **keyword_arguments_noisy)
     else:
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
             iteration, general_method=general_method, save_steps=save_steps,
-            output_prefix=output_prefix, progress_callback=progress_callback, show_progress=show_progress,
+            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
             **keyword_arguments)
     
     # Format per-iteration scalar outputs.
@@ -648,6 +664,7 @@ def run_optimization(input_path=None,
         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
         'save_target_cmap': save_target_cmap,
         'save_steps': save_steps or [],
+        'save_pickle': save_pickle,
         'eigh_threads': eigh_threads,
         'verbose': verbose,
         'show_progress': show_progress,
@@ -689,43 +706,52 @@ def run_optimization(input_path=None,
             status.start()
         
         try:
-            if not no_log:
-                run_parameters_df.to_csv('{}_run_parameters.csv'.format(output_prefix), index=False)
+            if save_pickle:
+                pickle_path = f"{output_prefix}_HIPPS_DIMES_results.pkl"
+                with open(pickle_path, 'wb') as fout:
+                    pickle.dump(results, fout, protocol=pickle.HIGHEST_PROTOCOL)
                 if verbose and console:
                     console.print(
-                        "Run parameters saved to file: [bold magenta]{}_run_parameters.csv[/bold magenta]".format(output_prefix))
-                iteration_series_df.to_csv('{}_iteration_series.csv'.format(output_prefix), index=False)
-                if verbose and console:
-                    console.print(
-                        "Iteration-series data saved to file: [bold magenta]{}_iteration_series.csv[/bold magenta]".format(output_prefix))
+                        f"Results pickle saved to file: [bold magenta]{pickle_path}[/bold magenta]"
+                    )
+            else:
+                if not no_log:
+                    run_parameters_df.to_csv('{}_run_parameters.csv'.format(output_prefix), index=False)
+                    if verbose and console:
+                        console.print(
+                            "Run parameters saved to file: [bold magenta]{}_run_parameters.csv[/bold magenta]".format(output_prefix))
+                    iteration_series_df.to_csv('{}_iteration_series.csv'.format(output_prefix), index=False)
+                    if verbose and console:
+                        console.print(
+                            "Iteration-series data saved to file: [bold magenta]{}_iteration_series.csv[/bold magenta]".format(output_prefix))
 
-            np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
-            if verbose and console:
-                console.print(
-                    "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
-            
-            if save_target_cmap:
-                np.savetxt('{}_cmap_target.txt'.format(output_prefix), cmap)
+                np.savetxt('{}_dmap_final.txt'.format(output_prefix), dmap_maxent)
                 if verbose and console:
                     console.print(
-                        "Internal target contact map saved to file: [bold magenta]{}_cmap_target.txt[/bold magenta]".format(output_prefix))
+                        "Final distance map saved to file: [bold magenta]{}_dmap_final.txt[/bold magenta]".format(output_prefix))
+                
+                if save_target_cmap:
+                    np.savetxt('{}_cmap_target.txt'.format(output_prefix), cmap)
+                    if verbose and console:
+                        console.print(
+                            "Internal target contact map saved to file: [bold magenta]{}_cmap_target.txt[/bold magenta]".format(output_prefix))
 
-            if input_type == 'cmap':
-                np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+                if input_type == 'cmap':
+                    np.savetxt('{}_cmap_final.txt'.format(output_prefix), cmap_maxent)
+                    if verbose and console:
+                        console.print(
+                            "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
+                
+                np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), final_connectivity_matrix)
                 if verbose and console:
                     console.print(
-                        "Final contact map saved to file: [bold magenta]{}_cmap_final.txt[/bold magenta]".format(output_prefix))
-            
-            np.savetxt('{}_connectivity_matrix.txt'.format(output_prefix), final_connectivity_matrix)
-            if verbose and console:
-                console.print(
-                    'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
+                        'Connectivity matrix saved to file: [bold magenta]{}_connectivity_matrix.txt[/bold magenta]'.format(output_prefix))
 
-            if not no_xyzs and xyzs is not None:
-                write2xyz('{}.xyz'.format(output_prefix), xyzs, alignment=True, allow_reflection=True)
-                if verbose and console:
-                    console.print(
-                        "Ensemble of (aligned) structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
+                if not no_xyzs and xyzs is not None:
+                    write2xyz('{}.xyz'.format(output_prefix), xyzs, alignment=True, allow_reflection=True)
+                    if verbose and console:
+                        console.print(
+                            "Ensemble of (aligned) structures saved to file: [bold magenta]{}.xyz[/bold magenta]".format(output_prefix))
             
             if verbose and console:
                 status.stop()

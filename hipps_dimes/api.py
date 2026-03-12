@@ -48,6 +48,16 @@ def _build_run_parameters_frame(parameters):
     })
 
 
+def _ensure_square_matrix(matrix, matrix_name):
+    """Return a NumPy array and validate that it is a square 2D matrix."""
+    array = np.asarray(matrix)
+    if array.ndim != 2 or array.shape[0] != array.shape[1]:
+        raise ValueError(
+            f"{matrix_name} must be a square 2D array, got shape {array.shape}"
+        )
+    return array
+
+
 def run_optimization(input_path=None,
                      output_prefix=None,
                      input_matrix=None,
@@ -257,6 +267,8 @@ def run_optimization(input_path=None,
         raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
     if log is not None:
         no_log = not log
+    if eigh_threads is not None:
+        set_eigh_num_threads(eigh_threads)
 
     input_source = input_path if input_path else "NumPy array"
     connectivity_matrix_source = "default initialization"
@@ -287,15 +299,17 @@ def run_optimization(input_path=None,
                 console.print("Reading mean distance matrix")
             if input_matrix is not None:
                 # Use provided matrix
-                ddmap_target = input_matrix
-                if ddmap_target.ndim != 2 or ddmap_target.shape[0] != ddmap_target.shape[1]:
-                    raise ValueError("Distance map must be a square 2D array")
+                ddmap_target = _ensure_square_matrix(input_matrix, "Distance map")
                 ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format == 'text':
-                ddmap_target = np.loadtxt(input_path)
+                ddmap_target = _ensure_square_matrix(
+                    np.loadtxt(input_path), "Distance map"
+                )
                 ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format == 'npy':
-                ddmap_target = np.load(input_path)
+                ddmap_target = _ensure_square_matrix(
+                    np.load(input_path), "Distance map"
+                )
                 ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format in {'cooler', 'hic'}:
                 raise ValueError("input_type='dmap' only supports input_format='text' or 'npy' (or provide input_matrix)")
@@ -309,13 +323,17 @@ def run_optimization(input_path=None,
                 console.print("Reading mean squared distance matrix")
             if input_matrix is not None:
                 # Use provided matrix directly as ddmap constraints
-                ddmap_target = input_matrix
-                if ddmap_target.ndim != 2 or ddmap_target.shape[0] != ddmap_target.shape[1]:
-                    raise ValueError("Squared distance map must be a square 2D array")
+                ddmap_target = _ensure_square_matrix(
+                    input_matrix, "Squared distance map"
+                )
             elif input_format == 'text':
-                ddmap_target = np.loadtxt(input_path)
+                ddmap_target = _ensure_square_matrix(
+                    np.loadtxt(input_path), "Squared distance map"
+                )
             elif input_format == 'npy':
-                ddmap_target = np.load(input_path)
+                ddmap_target = _ensure_square_matrix(
+                    np.load(input_path), "Squared distance map"
+                )
             elif input_format in {'cooler', 'hic'}:
                 raise ValueError("input_type='ddmap' only supports input_format='text' or 'npy' (or provide input_matrix)")
             else:
@@ -328,13 +346,11 @@ def run_optimization(input_path=None,
                 console.print("Reading contact map")
             if input_matrix is not None:
                 # Use provided matrix
-                cmap = input_matrix
-                if cmap.ndim != 2 or cmap.shape[0] != cmap.shape[1]:
-                    raise ValueError("Contact map must be a square 2D array")
+                cmap = _ensure_square_matrix(input_matrix, "Contact map")
             elif input_format == 'text':
-                cmap = np.loadtxt(input_path)
+                cmap = _ensure_square_matrix(np.loadtxt(input_path), "Contact map")
             elif input_format == 'npy':
-                cmap = np.load(input_path)
+                cmap = _ensure_square_matrix(np.load(input_path), "Contact map")
             elif input_format == 'cooler':
                 if cooler is None:
                     raise ImportError(
@@ -346,6 +362,7 @@ def run_optimization(input_path=None,
                 if verbose and console:
                     console.print("Cooler file read completed")
                 cmap = cmap_data.matrix(balance=balance).fetch(selection)
+                cmap = _ensure_square_matrix(cmap, "Contact map")
                 if verbose and console:
                     console.print("Cooler file selection completed")
                 if len(cmap) >= 5000:
@@ -374,6 +391,9 @@ def run_optimization(input_path=None,
                 chrom2 = raw_chrom2[3:] if raw_chrom2.lower().startswith('chr') else raw_chrom2
                 start1, end1 = map(int, r1.split('-'))
                 start2, end2 = map(int, r2.split('-'))
+                same_region = (
+                    chrom1 == chrom2 and start1 == start2 and end1 == end2
+                )
                 
                 # try efficient random-access API
                 matrix_obj = hic.getMatrixZoomData(chrom1, chrom2, 'observed', hic_norm, hic_unit, binsize)
@@ -400,8 +420,10 @@ def run_optimization(input_path=None,
                         i = int((pt.binX - start1) / binsize)
                         j = int((pt.binY - start2) / binsize)
                         cmap[i, j] = pt.counts
-                    cmap = cmap + cmap.T
+                    if same_region:
+                        cmap = cmap + cmap.T
 
+                cmap = _ensure_square_matrix(cmap, "Contact map")
                 if verbose and console:
                     console.print(".hic contact map extracted")
             else:
@@ -566,11 +588,10 @@ def run_optimization(input_path=None,
             'momentum': momentum,
             'nesterov': nesterov
         }
-        loss, entropy, dmap_maxent, final_connectivity_matrix = model.run_noisy(
+        loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run_noisy(
             iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
             output_prefix=output_prefix, progress_callback=progress_callback, show_progress=show_progress,
             **keyword_arguments_noisy)
-        connectivity_at_steps = {}  # run_noisy doesn't return connectivity_at_steps
     else:
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
             iteration, general_method=general_method, save_steps=save_steps,

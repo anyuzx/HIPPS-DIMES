@@ -1021,7 +1021,7 @@ class Optimize:
         save_steps : list of int, optional
             Iteration steps at which to save the connectivity matrix.
         output_prefix : str, optional
-            Prefix for output files (required if save_steps is provided)
+            Prefix for output files when saving connectivity matrix at save_steps
         progress_callback : callable, optional
             Callback receiving structured per-iteration progress dictionaries.
         show_progress : bool, default=True
@@ -1053,6 +1053,7 @@ class Optimize:
             entropy_array = []
 
         save_steps_set = None
+        connectivity_at_steps = {}  # step -> matrix (for library use and/or file save)
         if save_steps is not None:
             save_steps_list = list(save_steps)
             valid_steps = [s for s in save_steps_list if 1 <= s <= epoch]
@@ -1060,8 +1061,6 @@ class Optimize:
                 invalid = [s for s in save_steps_list if s < 1 or s > epoch]
                 console.print(f"[yellow]Warning: Some save_steps are out of range and will be ignored: {invalid}[/yellow]")
             save_steps_set = set(valid_steps)
-            if output_prefix is None:
-                raise ValueError("output_prefix must be provided when save_steps is specified")
             if len(save_steps_set) > 0:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
@@ -1130,9 +1129,12 @@ class Optimize:
                 if save_steps_set is not None and (t + 1) in save_steps_set:
                     if self.use_gpu:
                         self.A = cp.asnumpy(self._A_gpu)
-                    filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, t + 1)
-                    np.savetxt(filename, self.A)
-                    console.print(f"[green]Saved connectivity matrix at iteration {t + 1} to {filename}[/green]")
+                    step = t + 1
+                    connectivity_at_steps[step] = np.copy(self.A)
+                    if output_prefix is not None:
+                        filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, step)
+                        np.savetxt(filename, self.A)
+                        console.print(f"[green]Saved connectivity matrix at iteration {step} to {filename}[/green]")
 
         if self.use_gpu:
             loss_array = cp.asnumpy(loss_hist_gpu).tolist()
@@ -1144,7 +1146,7 @@ class Optimize:
             self.A = cp.asnumpy(self._A_gpu)
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
-        return loss_array, entropy_array, dmap_maxent, self.A
+        return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
 
 class Dynamics:
     def __init__(self, input, M=None, k=None, model=None):

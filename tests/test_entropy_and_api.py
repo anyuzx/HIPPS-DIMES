@@ -1,7 +1,10 @@
 """Additional tests for entropy and library API behavior."""
 
+import os
+
 import numpy as np
 import pandas as pd
+import pytest
 
 import HippsDimes
 
@@ -107,6 +110,40 @@ def test_run_optimization_smoke_cmap_npy_input(tmp_path):
     assert "connectivity_matrix" in results
     assert "cmap_final" in results
     assert "rc_optimal" in results
+
+
+@pytest.mark.parametrize(
+    ("input_type", "input_format", "expected_message"),
+    [
+        ("dmap", "text", "Distance map must be a square 2D array"),
+        ("ddmap", "npy", "Squared distance map must be a square 2D array"),
+        ("cmap", "text", "Contact map must be a square 2D array"),
+    ],
+)
+def test_run_optimization_rejects_nonsquare_file_inputs(
+    tmp_path, input_type, input_format, expected_message
+):
+    """File-backed inputs should fail fast with a clear square-matrix error."""
+    matrix = np.arange(6.0).reshape(2, 3)
+    path = tmp_path / ("matrix.npy" if input_format == "npy" else "matrix.txt")
+
+    if input_format == "npy":
+        np.save(path, matrix)
+    else:
+        np.savetxt(path, matrix)
+
+    with pytest.raises(ValueError, match=expected_message):
+        HippsDimes.run_optimization(
+            input_path=str(path),
+            input_type=input_type,
+            input_format=input_format,
+            method="IS",
+            iteration=1,
+            learning_rate=5.0,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
 
 
 def test_run_optimization_writes_default_log_files(tmp_path):
@@ -243,6 +280,65 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
 
 
+def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefix():
+    """Noisy optimization should return save-step snapshots even in library mode."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        gaussian_noise_variance=0.1,
+        save_steps=[1, 3],
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    assert "connectivity_matrix_at_steps" in results
+    assert sorted(results["connectivity_matrix_at_steps"]) == [1, 3]
+    assert results["connectivity_matrix_at_steps"][1].shape == (n, n)
+    assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
+
+
+def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):
+    """Library callers should get the same thread-setting behavior as the CLI."""
+    n = 4
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    thread_env_vars = [
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+    ]
+
+    for name in thread_env_vars:
+        monkeypatch.delenv(name, raising=False)
+
+    HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="IS",
+        iteration=1,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        eigh_threads=1,
+    )
+
+    assert {name: os.environ.get(name) for name in thread_env_vars} == {
+        name: "1" for name in thread_env_vars
+    }
+
+
 
 def test_run_optimization_show_progress_false_suppresses_progress_bar_output(capsys):
     """show_progress=False should prevent tqdm progress output."""
@@ -266,4 +362,3 @@ def test_run_optimization_show_progress_false_suppresses_progress_bar_output(cap
     combined_output = captured.out + captured.err
     assert "Performing optimization" not in combined_output
     assert "iteration/s" not in combined_output
-

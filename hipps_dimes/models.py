@@ -18,6 +18,37 @@ def _iter_per_sec_str(iteration_count, start_time):
         return "0.000"
     return f"{rate:.3f}"
 
+
+def _progress_scalar(value):
+    """Convert solver scalars to callback-safe Python floats."""
+    if value is None:
+        return np.nan
+    return float(value)
+
+
+def _emit_progress(progress_callback, *, iteration, total, loss, entropy, start_time, method, general_method, use_gpu, noisy=False):
+    """Emit a structured progress update to a caller-supplied callback."""
+    if progress_callback is None:
+        return
+
+    elapsed = time.perf_counter() - start_time
+    iterations_per_sec = np.nan if elapsed <= 0 else iteration / elapsed
+    if not np.isfinite(iterations_per_sec):
+        iterations_per_sec = np.nan
+
+    progress_callback({
+        'stage': 'optimization' if general_method == 'optimization' else 'direct',
+        'iteration': int(iteration),
+        'total': int(total),
+        'loss': _progress_scalar(loss),
+        'entropy': _progress_scalar(entropy),
+        'iterations_per_sec': float(iterations_per_sec) if np.isfinite(iterations_per_sec) else np.nan,
+        'method': method,
+        'general_method': general_method,
+        'use_gpu': bool(use_gpu),
+        'noisy': bool(noisy),
+    })
+
 class Optimize:
     """
     Optimizer for finding connectivity matrix A that matches target distance constraints.
@@ -783,7 +814,7 @@ class Optimize:
         log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
         self._entropy_gpu = cp.sum(log_terms)
 
-    def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
+    def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, progress_callback=None, show_progress=True, **kwargs):
         """
         Main function to run the optimization
         
@@ -800,6 +831,10 @@ class Optimize:
             '{output_prefix}_connectivity_matrix_iter{step}.txt'
         output_prefix : str, optional
             Prefix for output files when saving connectivity matrix at save_steps
+        progress_callback : callable, optional
+            Callback receiving structured per-iteration progress dictionaries.
+        show_progress : bool, default=True
+            Whether to render tqdm progress bars for iterative solvers.
         **kwargs
             Additional arguments passed to __update_parameter:
             - learning_rate : float
@@ -833,6 +868,7 @@ class Optimize:
         """
 
         console = Console()
+        method_name = kwargs.get('method')
 
         # For GPU optimization runs we keep loss/entropy histories on device and copy once at the end,
         # avoiding per-iteration device->host synchronization.
@@ -857,13 +893,14 @@ class Optimize:
             if len(save_steps_set) > 0:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
+        start_time = time.perf_counter()
         if general_method == 'optimization':
-            start_time = time.perf_counter()
             with trange(
                 epoch,
                 desc="Performing optimization",
                 unit="iteration",
                 bar_format=_PBAR_FORMAT_NO_RATE,
+                disable=not show_progress,
             ) as pbar:
                 for t in pbar:
                     self.__update_parameter(t, **kwargs)
@@ -872,24 +909,52 @@ class Optimize:
                         loss_hist_gpu[t] = self._loss_gpu
                         entropy_hist_gpu[t] = self._entropy_gpu
 
-                        # Only sync occasionally for display (tqdm set_postfix wants Python scalars)
-                        if (t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch):
+                        should_sync_progress = (
+                            show_progress or progress_callback is not None
+                        ) and ((t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch))
+                        if should_sync_progress:
                             self.loss = float(self._loss_gpu)
                             self.entropy = float(self._entropy_gpu)
-                            pbar.set_postfix({
-                                "loss": self.loss,
-                                "entropy": self.entropy,
-                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                            })
+                            if show_progress:
+                                pbar.set_postfix({
+                                    "loss": self.loss,
+                                    "entropy": self.entropy,
+                                    "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                                })
+                            _emit_progress(
+                                progress_callback,
+                                iteration=t + 1,
+                                total=epoch,
+                                loss=self.loss,
+                                entropy=self.entropy,
+                                start_time=start_time,
+                                method=method_name,
+                                general_method=general_method,
+                                use_gpu=self.use_gpu,
+                            )
                     else:
                         # CPU path
-                        pbar.set_postfix({
-                            "loss": self.loss,
-                            "entropy": self.entropy if self.entropy is not None else np.nan,
-                            "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                        })
-                        loss_array.append(self.loss)
-                        entropy_array.append(self.entropy if self.entropy is not None else np.nan)
+                        loss_value = self.loss
+                        entropy_value = self.entropy if self.entropy is not None else np.nan
+                        if show_progress:
+                            pbar.set_postfix({
+                                "loss": loss_value,
+                                "entropy": entropy_value,
+                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                            })
+                        loss_array.append(loss_value)
+                        entropy_array.append(entropy_value)
+                        _emit_progress(
+                            progress_callback,
+                            iteration=t + 1,
+                            total=epoch,
+                            loss=loss_value,
+                            entropy=entropy_value,
+                            start_time=start_time,
+                            method=method_name,
+                            general_method=general_method,
+                            use_gpu=self.use_gpu,
+                        )
                     
                     # Save connectivity matrix at specified iteration steps
                     # Note: t is 0-indexed, so we check for t+1 to match iteration number
@@ -914,6 +979,17 @@ class Optimize:
             # Compute entropy for direct inversion
             eigvals_K = np.linalg.eigvalsh(-self.A)
             entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
+            _emit_progress(
+                progress_callback,
+                iteration=1,
+                total=1,
+                loss=loss_array[-1],
+                entropy=entropy_array[-1],
+                start_time=start_time,
+                method=method_name,
+                general_method=general_method,
+                use_gpu=self.use_gpu,
+            )
 
         # Finalize loss/entropy arrays for GPU runs
         if use_gpu_hist:
@@ -930,7 +1006,7 @@ class Optimize:
 
         return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
 
-    def run_noisy(self, epoch, gaussian_noise_variance, general_method='optimization', save_steps=None, output_prefix=None, **kwargs):
+    def run_noisy(self, epoch, gaussian_noise_variance, general_method='optimization', save_steps=None, output_prefix=None, progress_callback=None, show_progress=True, **kwargs):
         """
         Run optimization with independent Gaussian noise on constraints.
 
@@ -946,6 +1022,10 @@ class Optimize:
             Iteration steps at which to save the connectivity matrix.
         output_prefix : str, optional
             Prefix for output files (required if save_steps is provided)
+        progress_callback : callable, optional
+            Callback receiving structured per-iteration progress dictionaries.
+        show_progress : bool, default=True
+            Whether to render tqdm progress bars for iterative solvers.
         **kwargs
             Additional arguments passed to __update_parameter_noisy:
             - learning_rate : float
@@ -963,6 +1043,7 @@ class Optimize:
             raise ValueError("run_noisy supports only general_method='optimization'")
 
         console = Console()
+        method_name = kwargs.get('method')
 
         if self.use_gpu:
             loss_hist_gpu = cp.empty(epoch, dtype=self._gpu_dtype)
@@ -990,6 +1071,7 @@ class Optimize:
             desc="Performing noisy optimization",
             unit="iteration",
             bar_format=_PBAR_FORMAT_NO_RATE,
+            disable=not show_progress,
         ) as pbar:
             for t in pbar:
                 self.__update_parameter_noisy(t, gaussian_noise_variance=gaussian_noise_variance, **kwargs)
@@ -997,22 +1079,53 @@ class Optimize:
                     loss_hist_gpu[t] = self._loss_gpu
                     entropy_hist_gpu[t] = self._entropy_gpu
 
-                    if (t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch):
+                    should_sync_progress = (
+                        show_progress or progress_callback is not None
+                    ) and ((t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch))
+                    if should_sync_progress:
                         self.loss = float(self._loss_gpu)
                         self.entropy = float(self._entropy_gpu)
+                        if show_progress:
+                            pbar.set_postfix({
+                                "loss": self.loss,
+                                "entropy": self.entropy,
+                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                            })
+                        _emit_progress(
+                            progress_callback,
+                            iteration=t + 1,
+                            total=epoch,
+                            loss=self.loss,
+                            entropy=self.entropy,
+                            start_time=start_time,
+                            method=method_name,
+                            general_method=general_method,
+                            use_gpu=self.use_gpu,
+                            noisy=True,
+                        )
+                else:
+                    loss_value = self.loss
+                    entropy_value = self.entropy if self.entropy is not None else np.nan
+                    if show_progress:
                         pbar.set_postfix({
-                            "loss": self.loss,
-                            "entropy": self.entropy,
+                            "loss": loss_value,
+                            "entropy": entropy_value,
                             "iteration/s": _iter_per_sec_str(t + 1, start_time),
                         })
-                else:
-                    pbar.set_postfix({
-                        "loss": self.loss,
-                        "entropy": self.entropy if self.entropy is not None else np.nan,
-                        "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                    })
-                    loss_array.append(self.loss)
-                    entropy_array.append(self.entropy if self.entropy is not None else np.nan)
+                    loss_array.append(loss_value)
+                    entropy_array.append(entropy_value)
+                    _emit_progress(
+                        progress_callback,
+                        iteration=t + 1,
+                        total=epoch,
+                        loss=loss_value,
+                        entropy=entropy_value,
+                        start_time=start_time,
+                        method=method_name,
+                        general_method=general_method,
+                        use_gpu=self.use_gpu,
+                        noisy=True,
+                    )
 
                 if save_steps_set is not None and (t + 1) in save_steps_set:
                     if self.use_gpu:

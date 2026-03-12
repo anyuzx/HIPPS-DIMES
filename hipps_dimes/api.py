@@ -80,7 +80,9 @@ def run_optimization(input_path=None,
                      save_steps=None,
                      eigh_threads=None,
                      verbose=True,
-                     log=None):
+                     log=None,
+                     progress_callback=None,
+                     show_progress=True):
     """
     Core function to run HIPPS/DIMES optimization that can be called programmatically or from CLI.
     
@@ -162,6 +164,13 @@ def run_optimization(input_path=None,
         Must be set before any eigh call (e.g. via set_eigh_num_threads) for effect.
     verbose : bool, default=True
         Whether to print status messages
+    progress_callback : callable, optional
+        Callback receiving structured per-iteration progress dictionaries.
+        Payload keys include iteration, total, loss, entropy,
+        iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
+    show_progress : bool, default=True
+        Whether to render solver progress bars. Set to False when consuming
+        progress_callback programmatically.
         
     Returns
     -------
@@ -559,12 +568,14 @@ def run_optimization(input_path=None,
         }
         loss, entropy, dmap_maxent, final_connectivity_matrix = model.run_noisy(
             iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
-            output_prefix=output_prefix, **keyword_arguments_noisy)
+            output_prefix=output_prefix, progress_callback=progress_callback, show_progress=show_progress,
+            **keyword_arguments_noisy)
         connectivity_at_steps = {}  # run_noisy doesn't return connectivity_at_steps
     else:
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
             iteration, general_method=general_method, save_steps=save_steps,
-            output_prefix=output_prefix, **keyword_arguments)
+            output_prefix=output_prefix, progress_callback=progress_callback, show_progress=show_progress,
+            **keyword_arguments)
     
     # Format per-iteration scalar outputs.
     iteration_series_df = _build_iteration_series_frame(loss, entropy)
@@ -618,6 +629,7 @@ def run_optimization(input_path=None,
         'save_steps': save_steps or [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,
+        'show_progress': show_progress,
     })
 
     results = {

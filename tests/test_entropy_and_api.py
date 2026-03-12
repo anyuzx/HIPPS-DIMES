@@ -213,3 +213,57 @@ def test_run_optimization_does_not_save_target_cmap_for_text_input(tmp_path):
     )
 
     assert not (tmp_path / "run_text_cmap_target.txt").exists()
+
+
+def test_run_optimization_progress_callback_receives_structured_updates():
+    """Progress callbacks should receive monotonic structured updates."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+    updates = []
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="IS",
+        iteration=5,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        progress_callback=updates.append,
+    )
+
+    assert [update["iteration"] for update in updates] == [1, 2, 3, 4, 5]
+    assert all(update["total"] == 5 for update in updates)
+    assert all(update["stage"] == "optimization" for update in updates)
+    assert all(update["method"] == "IS" for update in updates)
+    assert all(update["general_method"] == "optimization" for update in updates)
+    assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
+
+
+
+def test_run_optimization_show_progress_false_suppresses_progress_bar_output(capsys):
+    """show_progress=False should prevent tqdm progress output."""
+    n = 6
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+
+    HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="IS",
+        iteration=3,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    captured = capsys.readouterr()
+    combined_output = captured.out + captured.err
+    assert "Performing optimization" not in combined_output
+    assert "iteration/s" not in combined_output
+

@@ -405,6 +405,45 @@ def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):
     }
 
 
+def test_ignore_missing_data_l2_stays_bounded_over_long_iterations():
+    """L2 with missing-data constraints should not drift into late-iteration blow-up."""
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(10, 1.0)
+    cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+
+    missing_mask = np.ones_like(cmap, dtype=bool)
+    for i in range(cmap.shape[0]):
+        for j in range(cmap.shape[1]):
+            if abs(i - j) >= 2 and (i + 2 * j) % 3 != 0:
+                missing_mask[i, j] = False
+    missing_mask = np.logical_or(missing_mask, missing_mask.T)
+    np.fill_diagonal(missing_mask, True)
+
+    cmap_missing = cmap.copy()
+    cmap_missing[~missing_mask] = 0.0
+    cmap_missing = 0.5 * (cmap_missing + cmap_missing.T)
+    np.fill_diagonal(cmap_missing, 1.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=cmap_missing,
+        input_type="cmap",
+        input_format="text",
+        ignore_missing_data=True,
+        method="IS",
+        iteration=1000,
+        learning_rate=10.0,
+        lamd=0.01,
+        reg="L2",
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    loss = results["iteration_series"]["loss"].to_numpy()
+    assert np.isfinite(loss).all()
+    assert loss[-1] < 0.7
+    assert loss[-1] <= loss[0] * 1.2
+
+
 def test_cli_save_pickle_writes_pickle_only(tmp_path):
     """CLI --save-pickle should route through to pickle-only output behavior."""
     n = 6

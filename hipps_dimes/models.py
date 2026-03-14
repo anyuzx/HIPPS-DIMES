@@ -93,6 +93,10 @@ class Optimize:
         # ddmap_target is the targeted matrix we would like to match
         # note that ddmap_taret is the mean SQUARED distance matrix, not mean distance matrix
         self.ddmap_target = ddmap_target
+        self.constraint_mask = np.isfinite(self.ddmap_target) & (self.ddmap_target > 0.0)
+        self.constraint_mask = np.logical_and(self.constraint_mask, self.constraint_mask.T)
+        np.fill_diagonal(self.constraint_mask, False)
+        self.has_constraint_mask = bool(np.any(self.constraint_mask))
 
         # get the size of system
         self.n = ddmap_target.shape[0]
@@ -130,6 +134,7 @@ class Optimize:
             # Move data to GPU
             self._A_gpu = cp.asarray(self.A, dtype=self._gpu_dtype)
             self._ddmap_target_gpu = cp.asarray(self.ddmap_target, dtype=self._gpu_dtype)
+            self._constraint_mask_gpu = cp.asarray(self.constraint_mask)
             self._velocity_gpu = None
             # Cached GPU masks (to avoid per-iteration cp.asarray allocations)
             self._edge_mask_gpu = None
@@ -148,6 +153,7 @@ class Optimize:
             self._edge_mask_gpu = None
             self._freeze_mask_gpu = None
             self._theta_gpu = None
+            self._constraint_mask_gpu = None
             self._loss_gpu = None
             self._entropy_gpu = None
             self.gpu_display_every = None
@@ -381,6 +387,13 @@ class Optimize:
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
         return loss_array, entropy_array, dmap_maxent, self.A
     def __compute_loss(self, ddmap_t):
+        if self.has_constraint_mask:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                relative_error = (
+                    (ddmap_t[self.constraint_mask] - self.ddmap_target[self.constraint_mask])
+                    / self.ddmap_target[self.constraint_mask]
+                )
+            return np.nanmean(np.power(relative_error, 2.)) ** .5
         with np.errstate(divide='ignore', invalid='ignore'):
             loss = np.nanmean(
                 np.power((ddmap_t - self.ddmap_target)/self.ddmap_target, 2.)) ** .5
@@ -405,12 +418,24 @@ class Optimize:
         with np.errstate(divide='ignore', invalid='ignore'):
             compare_ratio = ddmap_t / self.ddmap_target
         # compute the prefactor for iterative scaling
-        fhash = np.nansum(ddmap_t) / 2.
+        if self.has_constraint_mask:
+            fhash = np.nansum(ddmap_t[self.constraint_mask]) / 2.
+        else:
+            fhash = np.nansum(ddmap_t) / 2.
+        if not np.isfinite(fhash) or fhash <= 0.0:
+            fhash = 1.0
 
         if method == 'IS':
             # compute the gradient
-            gradient_t = np.nan_to_num(
-                np.log(compare_ratio), posinf=0., neginf=0.) / fhash
+            if self.has_constraint_mask:
+                gradient_t = np.zeros_like(ddmap_t)
+                log_ratio = np.nan_to_num(
+                    np.log(compare_ratio[self.constraint_mask]), posinf=0., neginf=0.
+                )
+                gradient_t[self.constraint_mask] = log_ratio / fhash
+            else:
+                gradient_t = np.nan_to_num(
+                    np.log(compare_ratio), posinf=0., neginf=0.) / fhash
 
             # enforce symmetry and apply optional off-diagonal mask
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
@@ -448,7 +473,13 @@ class Optimize:
                 self.theta = np.copy(self.A)
 
             # compute the gradient
-            gradient_t = (ddmap_t - self.ddmap_target)
+            if self.has_constraint_mask:
+                gradient_t = np.zeros_like(ddmap_t)
+                gradient_t[self.constraint_mask] = (
+                    ddmap_t[self.constraint_mask] - self.ddmap_target[self.constraint_mask]
+                )
+            else:
+                gradient_t = (ddmap_t - self.ddmap_target)
 
             # enforce symmetry and apply optional off-diagonal mask
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
@@ -513,10 +544,22 @@ class Optimize:
         ddmap_t = ((3. * np.pi) / 8.) * np.power(dmap_t, 2.)
         with np.errstate(divide='ignore', invalid='ignore'):
             compare_ratio = ddmap_t / self.ddmap_target
-        fhash = np.nansum(ddmap_t) / 2.
+        if self.has_constraint_mask:
+            fhash = np.nansum(ddmap_t[self.constraint_mask]) / 2.
+        else:
+            fhash = np.nansum(ddmap_t) / 2.
+        if not np.isfinite(fhash) or fhash <= 0.0:
+            fhash = 1.0
 
         if method == 'IS':
-            gradient_t = np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
+            if self.has_constraint_mask:
+                gradient_t = np.zeros_like(ddmap_t)
+                log_ratio = np.nan_to_num(
+                    np.log(compare_ratio[self.constraint_mask]), posinf=0., neginf=0.
+                )
+                gradient_t[self.constraint_mask] = log_ratio / fhash
+            else:
+                gradient_t = np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
             if self.edge_mask is not None:
                 gradient_t *= self.edge_mask
@@ -535,7 +578,13 @@ class Optimize:
             if t == 0:
                 self.theta = np.copy(self.A)
 
-            gradient_t = (ddmap_t - self.ddmap_target)
+            if self.has_constraint_mask:
+                gradient_t = np.zeros_like(ddmap_t)
+                gradient_t[self.constraint_mask] = (
+                    ddmap_t[self.constraint_mask] - self.ddmap_target[self.constraint_mask]
+                )
+            else:
+                gradient_t = (ddmap_t - self.ddmap_target)
             gradient_t = 0.5 * (gradient_t + gradient_t.T)
             if self.edge_mask is not None:
                 gradient_t *= self.edge_mask
@@ -570,10 +619,21 @@ class Optimize:
         # Compute ratio and gradient on GPU
         compare_ratio_gpu = ddmap_t_gpu / self._ddmap_target_gpu
         # Keep fhash on GPU to avoid an extra device->host sync each iteration
-        fhash = cp.nansum(ddmap_t_gpu) / 2.
+        if self.has_constraint_mask:
+            fhash = cp.nansum(ddmap_t_gpu[self._constraint_mask_gpu]) / 2.
+        else:
+            fhash = cp.nansum(ddmap_t_gpu) / 2.
+        fhash = cp.where(cp.isfinite(fhash) & (fhash > 0.0), fhash, cp.asarray(1.0, dtype=self._A_gpu.dtype))
         
         # Compute gradient
-        gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
+        if self.has_constraint_mask:
+            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
+            log_ratio_gpu = cp.nan_to_num(
+                cp.log(compare_ratio_gpu[self._constraint_mask_gpu]), posinf=0., neginf=0.
+            )
+            gradient_t_gpu[self._constraint_mask_gpu] = log_ratio_gpu / fhash
+        else:
+            gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
         
         # Enforce symmetry
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
@@ -629,7 +689,14 @@ class Optimize:
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
-        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        if self.has_constraint_mask:
+            relative_error_gpu = (
+                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
+                / self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
+        else:
+            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
         self._loss_gpu = loss_gpu
         
         # Compute entropy on GPU using eigenvalues already on GPU
@@ -651,9 +718,20 @@ class Optimize:
         ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
 
         compare_ratio_gpu = ddmap_t_gpu / self._ddmap_target_gpu
-        fhash = cp.nansum(ddmap_t_gpu) / 2.
+        if self.has_constraint_mask:
+            fhash = cp.nansum(ddmap_t_gpu[self._constraint_mask_gpu]) / 2.
+        else:
+            fhash = cp.nansum(ddmap_t_gpu) / 2.
+        fhash = cp.where(cp.isfinite(fhash) & (fhash > 0.0), fhash, cp.asarray(1.0, dtype=self._A_gpu.dtype))
 
-        gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
+        if self.has_constraint_mask:
+            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
+            log_ratio_gpu = cp.nan_to_num(
+                cp.log(compare_ratio_gpu[self._constraint_mask_gpu]), posinf=0., neginf=0.
+            )
+            gradient_t_gpu[self._constraint_mask_gpu] = log_ratio_gpu / fhash
+        else:
+            gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
         if self.edge_mask is not None:
             gradient_t_gpu *= self._edge_mask_gpu
@@ -686,7 +764,14 @@ class Optimize:
         off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
 
-        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        if self.has_constraint_mask:
+            relative_error_gpu = (
+                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
+                / self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
+        else:
+            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
         self._loss_gpu = loss_gpu
 
         eigvals_K_gpu = -eigvals_A_gpu
@@ -707,7 +792,13 @@ class Optimize:
         ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
         
         # Compute gradient for GD
-        gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
+        if self.has_constraint_mask:
+            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
+            gradient_t_gpu[self._constraint_mask_gpu] = (
+                ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+        else:
+            gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
         
         # Enforce symmetry
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
@@ -755,7 +846,14 @@ class Optimize:
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
-        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        if self.has_constraint_mask:
+            relative_error_gpu = (
+                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
+                / self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
+        else:
+            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
         self._loss_gpu = loss_gpu
         
         # Compute entropy on GPU using eigenvalues already on GPU
@@ -778,7 +876,13 @@ class Optimize:
         dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
         ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
 
-        gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
+        if self.has_constraint_mask:
+            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
+            gradient_t_gpu[self._constraint_mask_gpu] = (
+                ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+        else:
+            gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
         gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
         if self.edge_mask is not None:
             gradient_t_gpu *= self._edge_mask_gpu
@@ -806,7 +910,14 @@ class Optimize:
         off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
         cp.fill_diagonal(self._A_gpu, -off_diag_sum)
 
-        loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
+        if self.has_constraint_mask:
+            relative_error_gpu = (
+                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
+                / self._ddmap_target_gpu[self._constraint_mask_gpu]
+            )
+            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
+        else:
+            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
         self._loss_gpu = loss_gpu
 
         eigvals_K_gpu = -eigvals_A_gpu

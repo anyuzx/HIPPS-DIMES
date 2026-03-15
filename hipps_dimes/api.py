@@ -59,6 +59,116 @@ def _ensure_square_matrix(matrix, matrix_name):
     return array
 
 
+def _compute_missing_mask(matrix, matrix_kind):
+    """Compute an off-diagonal missing-data mask for the given matrix kind."""
+    matrix = np.asarray(matrix)
+    if matrix_kind == 'cmap':
+        missing_mask = ~np.isfinite(matrix) | (matrix <= 0.0)
+    elif matrix_kind in {'dmap', 'ddmap'}:
+        missing_mask = ~np.isfinite(matrix)
+    else:
+        raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+    np.fill_diagonal(missing_mask, False)
+    return missing_mask
+
+
+def _summarize_missing_data(matrix, matrix_kind):
+    """Summarize missing-data statistics for a square target matrix."""
+    matrix = np.asarray(matrix)
+    missing_mask = _compute_missing_mask(matrix, matrix_kind)
+    n = matrix.shape[0]
+    total_pairs = n * (n - 1) // 2
+    missing_pairs = int(np.count_nonzero(np.triu(missing_mask, k=1)))
+    missing_fraction = 0.0 if total_pairs == 0 else missing_pairs / total_pairs
+    fully_missing_loci = np.where(np.count_nonzero(missing_mask, axis=1) == max(n - 1, 0))[0].tolist()
+    return {
+        'missing_mask': missing_mask,
+        'missing_pairs': missing_pairs,
+        'total_pairs': total_pairs,
+        'missing_fraction': missing_fraction,
+        'fully_missing_loci': fully_missing_loci,
+    }
+
+
+def _format_index_list(indices, limit=12):
+    """Format a list of locus indices for console display."""
+    if not indices:
+        return "None"
+    if len(indices) <= limit:
+        return ", ".join(str(i) for i in indices)
+    preview = ", ".join(str(i) for i in indices[:limit])
+    return f"{preview}, ... ({len(indices)} total)"
+
+
+def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_mask, fully_missing_loci):
+    """Fill nearest-neighbor entries for fully missing loci using nearest interpolation."""
+    repaired = np.array(matrix, dtype=float, copy=True)
+    n = repaired.shape[0]
+
+    if matrix_kind == 'cmap':
+        with np.errstate(divide='ignore', invalid='ignore'):
+            transformed = np.log10(repaired)
+        transformed[missing_mask] = np.nan
+        interpolated = interpolate_missing(transformed)
+    elif matrix_kind in {'dmap', 'ddmap'}:
+        transformed = np.array(repaired, dtype=float, copy=True)
+        transformed[missing_mask] = np.nan
+        interpolated = interpolate_missing(transformed)
+    else:
+        raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+
+    repaired_pairs = set()
+    for i in fully_missing_loci:
+        for j in (i - 1, i + 1):
+            if not (0 <= j < n):
+                continue
+            if not missing_mask[i, j]:
+                continue
+
+            candidates = [interpolated[i, j], interpolated[j, i]]
+            finite_candidates = []
+            for value in candidates:
+                if not np.isfinite(value):
+                    continue
+                if matrix_kind == 'cmap':
+                    finite_candidates.append(10.0 ** value)
+                else:
+                    finite_candidates.append(float(value))
+
+            if not finite_candidates:
+                raise ValueError(
+                    f"Nearest-neighbor interpolation failed for fully missing locus {i} at pair ({i}, {j})"
+                )
+
+            fill_value = float(np.mean(finite_candidates))
+            if matrix_kind == 'cmap' and fill_value <= 0.0:
+                raise ValueError(
+                    f"Nearest-neighbor interpolation produced a nonpositive contact value for pair ({i}, {j})"
+                )
+
+            repaired[i, j] = fill_value
+            repaired[j, i] = fill_value
+            repaired_pairs.add((min(i, j), max(i, j)))
+
+    repaired_summary = _summarize_missing_data(repaired, matrix_kind)
+    failed_pairs = [
+        pair for pair in sorted(repaired_pairs)
+        if repaired_summary['missing_mask'][pair[0], pair[1]]
+    ]
+    if failed_pairs:
+        raise ValueError(
+            f"Nearest-neighbor repair verification failed for pairs: {failed_pairs}"
+        )
+
+    return repaired, {
+        'nearest_neighbor_repaired_pairs': sorted(repaired_pairs),
+        'nearest_neighbor_repair_count': len(repaired_pairs),
+        'remaining_fully_missing_loci': repaired_summary['fully_missing_loci'],
+        'missing_pairs_after_repair': repaired_summary['missing_pairs'],
+        'missing_fraction_after_repair': repaired_summary['missing_fraction'],
+    }
+
+
 def run_optimization(input_path=None,
                      output_prefix=None,
                      input_matrix=None,
@@ -283,6 +393,7 @@ def run_optimization(input_path=None,
     if connectivity_matrix is not None:
         connectivity_matrix_source = connectivity_matrix if isinstance(connectivity_matrix, str) else "provided matrix"
     save_target_cmap = input_type == 'cmap' and input_format in {'cooler', 'hic'}
+    missing_analysis = None
     
     # Initialize console for output
     if verbose:
@@ -307,18 +418,15 @@ def run_optimization(input_path=None,
                 console.print("Reading mean distance matrix")
             if input_matrix is not None:
                 # Use provided matrix
-                ddmap_target = _ensure_square_matrix(input_matrix, "Distance map")
-                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
+                dmap_target = _ensure_square_matrix(input_matrix, "Distance map")
             elif input_format == 'text':
-                ddmap_target = _ensure_square_matrix(
+                dmap_target = _ensure_square_matrix(
                     np.loadtxt(input_path), "Distance map"
                 )
-                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format == 'npy':
-                ddmap_target = _ensure_square_matrix(
+                dmap_target = _ensure_square_matrix(
                     np.load(input_path), "Distance map"
                 )
-                ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
             elif input_format in {'cooler', 'hic'}:
                 raise ValueError("input_type='dmap' only supports input_format='text' or 'npy' (or provide input_matrix)")
             else:
@@ -326,6 +434,23 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='dmap'. "
                     "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
+            missing_analysis = _summarize_missing_data(dmap_target, 'dmap')
+            repair_info = {
+                'nearest_neighbor_repaired_pairs': [],
+                'nearest_neighbor_repair_count': 0,
+                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
+                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
+                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+            }
+            if ignore_missing_data and missing_analysis['fully_missing_loci']:
+                dmap_target, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+                    dmap_target,
+                    'dmap',
+                    missing_analysis['missing_mask'],
+                    missing_analysis['fully_missing_loci'],
+                )
+            missing_analysis.update(repair_info)
+            ddmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_type == 'ddmap':
             if verbose and console:
                 console.print("Reading mean squared distance matrix")
@@ -349,6 +474,22 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='ddmap'. "
                     "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
+            missing_analysis = _summarize_missing_data(ddmap_target, 'ddmap')
+            repair_info = {
+                'nearest_neighbor_repaired_pairs': [],
+                'nearest_neighbor_repair_count': 0,
+                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
+                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
+                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+            }
+            if ignore_missing_data and missing_analysis['fully_missing_loci']:
+                ddmap_target, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+                    ddmap_target,
+                    'ddmap',
+                    missing_analysis['missing_mask'],
+                    missing_analysis['fully_missing_loci'],
+                )
+            missing_analysis.update(repair_info)
         elif input_type == 'cmap':
             if verbose and console:
                 console.print("Reading contact map")
@@ -439,6 +580,22 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='cmap'. "
                     "Supported: 'text', 'npy', 'cooler', 'hic' (or provide input_matrix)."
                 )
+            missing_analysis = _summarize_missing_data(cmap, 'cmap')
+            repair_info = {
+                'nearest_neighbor_repaired_pairs': [],
+                'nearest_neighbor_repair_count': 0,
+                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
+                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
+                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+            }
+            if ignore_missing_data and missing_analysis['fully_missing_loci']:
+                cmap, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+                    cmap,
+                    'cmap',
+                    missing_analysis['missing_mask'],
+                    missing_analysis['fully_missing_loci'],
+                )
+            missing_analysis.update(repair_info)
             
             # Apply neighbor balancing if requested
             if neighbor_balance:
@@ -501,6 +658,41 @@ def run_optimization(input_path=None,
         
         console.print(input_table)
         console.print()  # spacing
+
+        if missing_analysis is not None:
+            missing_table = Table(title="Missing Data Analysis", show_header=True, header_style="bold cyan")
+            missing_table.add_column("Parameter", style="dim", width=24)
+            missing_table.add_column("Value", style="green")
+            missing_table.add_row(
+                "Missing Pairs",
+                f"{missing_analysis['missing_pairs']:,} / {missing_analysis['total_pairs']:,} ({100.0 * missing_analysis['missing_fraction']:.2f}%)",
+            )
+            missing_table.add_row(
+                "Fully Missing Loci",
+                _format_index_list(missing_analysis['fully_missing_loci']),
+            )
+            if ignore_missing_data and missing_analysis['fully_missing_loci']:
+                missing_table.add_row(
+                    "NN Repaired Pairs",
+                    _format_index_list(
+                        [f"{i}-{j}" for i, j in missing_analysis['nearest_neighbor_repaired_pairs']]
+                    ),
+                )
+                missing_table.add_row(
+                    "NN Repair Count",
+                    str(missing_analysis['nearest_neighbor_repair_count']),
+                )
+                missing_table.add_row(
+                    "Remaining Fully Missing",
+                    _format_index_list(missing_analysis['remaining_fully_missing_loci']),
+                )
+                missing_table.add_row(
+                    "Missing Pairs After Repair",
+                    f"{missing_analysis['missing_pairs_after_repair']:,} / {missing_analysis['total_pairs']:,} ({100.0 * missing_analysis['missing_fraction_after_repair']:.2f}%)",
+                )
+
+            console.print(missing_table)
+            console.print()  # spacing
         
         # Table 2: Optimization Settings
         opt_table = Table(title="Optimization Settings", show_header=True, header_style="bold cyan")
@@ -665,6 +857,12 @@ def run_optimization(input_path=None,
         'save_target_cmap': save_target_cmap,
         'save_steps': save_steps or [],
         'save_pickle': save_pickle,
+        'missing_pairs': missing_analysis['missing_pairs'] if missing_analysis is not None else 0,
+        'missing_pair_fraction': missing_analysis['missing_fraction'] if missing_analysis is not None else 0.0,
+        'fully_missing_loci': missing_analysis['fully_missing_loci'] if missing_analysis is not None else [],
+        'nearest_neighbor_repair_count': missing_analysis['nearest_neighbor_repair_count'] if missing_analysis is not None else 0,
+        'nearest_neighbor_repaired_pairs': missing_analysis['nearest_neighbor_repaired_pairs'] if missing_analysis is not None else [],
+        'remaining_fully_missing_loci': missing_analysis['remaining_fully_missing_loci'] if missing_analysis is not None else [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,
         'show_progress': show_progress,

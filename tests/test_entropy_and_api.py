@@ -1,5 +1,6 @@
 """Additional tests for entropy and library API behavior."""
 
+import json
 import os
 import pickle
 
@@ -9,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 import HippsDimes
+from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
 from hipps_dimes.cli import main as cli_main
 
 
@@ -442,6 +444,71 @@ def test_ignore_missing_data_l2_stays_bounded_over_long_iterations():
     assert np.isfinite(loss).all()
     assert loss[-1] < 0.7
     assert loss[-1] <= loss[0] * 1.2
+
+
+def test_repair_fully_missing_contact_locus_repairs_only_nearest_neighbors():
+    """Nearest-neighbor repair should only fill i-1/i+1 pairs for fully missing loci."""
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    cmap_missing = cmap.copy()
+    cmap_missing[2, :] = 0.0
+    cmap_missing[:, 2] = 0.0
+    np.fill_diagonal(cmap_missing, 1.0)
+
+    summary = _summarize_missing_data(cmap_missing, "cmap")
+    assert summary["fully_missing_loci"] == [2]
+
+    repaired, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+        cmap_missing,
+        "cmap",
+        summary["missing_mask"],
+        summary["fully_missing_loci"],
+    )
+
+    repaired_summary = _summarize_missing_data(repaired, "cmap")
+    assert repair_info["nearest_neighbor_repaired_pairs"] == [(1, 2), (2, 3)]
+    assert repaired[2, 1] > 0.0
+    assert repaired[2, 3] > 0.0
+    assert repaired[2, 0] == 0.0
+    assert repaired[2, 4] == 0.0
+    assert repaired_summary["fully_missing_loci"] == []
+
+
+def test_run_optimization_records_missing_data_analysis_and_repair():
+    """run_optimization should record missing-data analysis and nearest-neighbor repairs."""
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    cmap_missing = cmap.copy()
+    cmap_missing[2, :] = 0.0
+    cmap_missing[:, 2] = 0.0
+    np.fill_diagonal(cmap_missing, 1.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=cmap_missing,
+        input_type="cmap",
+        input_format="text",
+        ignore_missing_data=True,
+        method="IS",
+        iteration=5,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    run_parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert run_parameters["missing_pairs"] == 4
+    assert np.isclose(float(run_parameters["missing_pair_fraction"]), 0.4)
+    assert json.loads(run_parameters["fully_missing_loci"]) == [2]
+    assert run_parameters["nearest_neighbor_repair_count"] == 2
+    assert json.loads(run_parameters["nearest_neighbor_repaired_pairs"]) == [[1, 2], [2, 3]]
+    assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
 
 
 def test_cli_save_pickle_writes_pickle_only(tmp_path):

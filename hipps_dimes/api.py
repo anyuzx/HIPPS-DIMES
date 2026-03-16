@@ -169,6 +169,57 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
     }
 
 
+def _remove_fully_missing_loci(matrix, matrix_kind):
+    """Remove fully missing loci before optimization and report original-index mapping."""
+    reduced = np.array(matrix, dtype=float, copy=True)
+    original_size = reduced.shape[0]
+    kept_loci = np.arange(original_size, dtype=int)
+    removed_loci = []
+
+    while True:
+        summary = _summarize_missing_data(reduced, matrix_kind)
+        current_fully_missing = summary['fully_missing_loci']
+        if not current_fully_missing:
+            break
+        if reduced.shape[0] - len(current_fully_missing) < 2:
+            raise ValueError(
+                "Removing fully missing loci leaves fewer than 2 loci; optimization cannot continue"
+            )
+
+        keep_mask = np.ones(reduced.shape[0], dtype=bool)
+        keep_mask[current_fully_missing] = False
+        removed_loci.extend(kept_loci[~keep_mask].tolist())
+        kept_loci = kept_loci[keep_mask]
+        reduced = reduced[np.ix_(keep_mask, keep_mask)]
+
+    reduced_summary = _summarize_missing_data(reduced, matrix_kind)
+    return reduced, {
+        'removed_fully_missing_loci': removed_loci,
+        'removed_fully_missing_loci_count': len(removed_loci),
+        'kept_loci': kept_loci.tolist(),
+        'remaining_fully_missing_loci': reduced_summary['fully_missing_loci'],
+        'missing_pairs_after_removal': reduced_summary['missing_pairs'],
+        'missing_fraction_after_removal': reduced_summary['missing_fraction'],
+    }
+
+
+def _subset_connectivity_matrix(connectivity_matrix, kept_loci, original_size):
+    """Subset a provided connectivity matrix to the kept loci when needed."""
+    connectivity_matrix = _ensure_square_matrix(connectivity_matrix, "Connectivity matrix")
+    optimized_size = len(kept_loci)
+    if connectivity_matrix.shape[0] == original_size:
+        kept_loci = np.asarray(kept_loci, dtype=int)
+        subset = connectivity_matrix[np.ix_(kept_loci, kept_loci)]
+        return a2a(subset), True
+    if connectivity_matrix.shape[0] == optimized_size:
+        return connectivity_matrix, False
+    raise ValueError(
+        "Connectivity matrix must match either the original input size "
+        f"({original_size}x{original_size}) or the reduced optimization size "
+        f"({optimized_size}x{optimized_size}); got {connectivity_matrix.shape}"
+    )
+
+
 def run_optimization(input_path=None,
                      output_prefix=None,
                      input_matrix=None,
@@ -194,6 +245,7 @@ def run_optimization(input_path=None,
                      no_log=False,
                      no_xyzs=False,
                      ignore_missing_data=False,
+                     remove_fully_missing_loci=False,
                      balance=False,
                      not_normalize=False,
                      neighbor_balance=False,
@@ -267,6 +319,9 @@ def run_optimization(input_path=None,
         If True, skip writing conformations to file
     ignore_missing_data : bool, default=False
         Whether to ignore missing elements in contact/distance map
+    remove_fully_missing_loci : bool, default=False
+        If True, and ``ignore_missing_data`` is also True, remove loci whose
+        entire off-diagonal row/column is missing before optimization.
     balance : bool, default=False
         Apply matrix balancing for contact map (cooler format)
     not_normalize : bool, default=False
@@ -311,6 +366,8 @@ def run_optimization(input_path=None,
         - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
         - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
         - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
+        - 'kept_loci': Original locus indices retained for optimization (only if loci were removed)
+        - 'removed_fully_missing_loci': Original fully missing loci removed before optimization
     
     Notes
     -----
@@ -385,6 +442,8 @@ def run_optimization(input_path=None,
         no_log = not log
     if save_pickle and output_prefix is None:
         raise ValueError("output_prefix must be provided when save_pickle=True")
+    if remove_fully_missing_loci and not ignore_missing_data:
+        raise ValueError("remove_fully_missing_loci=True requires ignore_missing_data=True")
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
 
@@ -394,6 +453,8 @@ def run_optimization(input_path=None,
         connectivity_matrix_source = connectivity_matrix if isinstance(connectivity_matrix, str) else "provided matrix"
     save_target_cmap = input_type == 'cmap' and input_format in {'cooler', 'hic'}
     missing_analysis = None
+    original_matrix_rows = None
+    original_matrix_cols = None
     
     # Initialize console for output
     if verbose:
@@ -434,22 +495,31 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='dmap'. "
                     "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
+            original_matrix_rows, original_matrix_cols = dmap_target.shape
             missing_analysis = _summarize_missing_data(dmap_target, 'dmap')
-            repair_info = {
+            handling_info = {
                 'nearest_neighbor_repaired_pairs': [],
                 'nearest_neighbor_repair_count': 0,
+                'removed_fully_missing_loci': [],
+                'removed_fully_missing_loci_count': 0,
                 'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
                 'missing_pairs_after_repair': missing_analysis['missing_pairs'],
                 'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
+                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
             }
-            if ignore_missing_data and missing_analysis['fully_missing_loci']:
-                dmap_target, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
+                dmap_target, removal_info = _remove_fully_missing_loci(dmap_target, 'dmap')
+                handling_info.update(removal_info)
+            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
+                dmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
                     dmap_target,
                     'dmap',
                     missing_analysis['missing_mask'],
                     missing_analysis['fully_missing_loci'],
                 )
-            missing_analysis.update(repair_info)
+                handling_info.update(repair_update)
+            missing_analysis.update(handling_info)
             ddmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_type == 'ddmap':
             if verbose and console:
@@ -474,22 +544,31 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='ddmap'. "
                     "Supported: 'text' or 'npy' (or provide input_matrix)."
                 )
+            original_matrix_rows, original_matrix_cols = ddmap_target.shape
             missing_analysis = _summarize_missing_data(ddmap_target, 'ddmap')
-            repair_info = {
+            handling_info = {
                 'nearest_neighbor_repaired_pairs': [],
                 'nearest_neighbor_repair_count': 0,
+                'removed_fully_missing_loci': [],
+                'removed_fully_missing_loci_count': 0,
                 'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
                 'missing_pairs_after_repair': missing_analysis['missing_pairs'],
                 'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
+                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
             }
-            if ignore_missing_data and missing_analysis['fully_missing_loci']:
-                ddmap_target, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
+                ddmap_target, removal_info = _remove_fully_missing_loci(ddmap_target, 'ddmap')
+                handling_info.update(removal_info)
+            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
+                ddmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
                     ddmap_target,
                     'ddmap',
                     missing_analysis['missing_mask'],
                     missing_analysis['fully_missing_loci'],
                 )
-            missing_analysis.update(repair_info)
+                handling_info.update(repair_update)
+            missing_analysis.update(handling_info)
         elif input_type == 'cmap':
             if verbose and console:
                 console.print("Reading contact map")
@@ -580,22 +659,31 @@ def run_optimization(input_path=None,
                     f"Invalid input_format '{input_format}' for input_type='cmap'. "
                     "Supported: 'text', 'npy', 'cooler', 'hic' (or provide input_matrix)."
                 )
+            original_matrix_rows, original_matrix_cols = cmap.shape
             missing_analysis = _summarize_missing_data(cmap, 'cmap')
-            repair_info = {
+            handling_info = {
                 'nearest_neighbor_repaired_pairs': [],
                 'nearest_neighbor_repair_count': 0,
+                'removed_fully_missing_loci': [],
+                'removed_fully_missing_loci_count': 0,
                 'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
                 'missing_pairs_after_repair': missing_analysis['missing_pairs'],
                 'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
+                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
             }
-            if ignore_missing_data and missing_analysis['fully_missing_loci']:
-                cmap, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
+                cmap, removal_info = _remove_fully_missing_loci(cmap, 'cmap')
+                handling_info.update(removal_info)
+            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
+                cmap, repair_update = _repair_fully_missing_loci_nearest_neighbors(
                     cmap,
                     'cmap',
                     missing_analysis['missing_mask'],
                     missing_analysis['fully_missing_loci'],
                 )
-            missing_analysis.update(repair_info)
+                handling_info.update(repair_update)
+            missing_analysis.update(handling_info)
             
             # Apply neighbor balancing if requested
             if neighbor_balance:
@@ -612,6 +700,16 @@ def run_optimization(input_path=None,
         if connectivity_matrix is not None:
             if isinstance(connectivity_matrix, str):
                 connectivity_matrix = np.loadtxt(connectivity_matrix)
+            if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:
+                connectivity_matrix, subset_applied = _subset_connectivity_matrix(
+                    connectivity_matrix,
+                    missing_analysis['kept_loci'],
+                    original_matrix_rows,
+                )
+                if subset_applied:
+                    connectivity_matrix_source = (
+                        f"{connectivity_matrix_source} (subset to kept loci)"
+                    )
             if verbose and console:
                 console.print("Loaded the provided connectivity matrix and will use it as initialization.")
         
@@ -648,13 +746,18 @@ def run_optimization(input_path=None,
         input_table.add_row("Input Source", input_source)
         input_table.add_row("Input Type", input_type_str)
         input_table.add_row("Input Format", input_format_str)
-        input_table.add_row("Matrix Size", f"{ddmap_target.shape[0]} × {ddmap_target.shape[1]}")
+        if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:
+            input_table.add_row("Original Matrix Size", f"{original_matrix_rows} × {original_matrix_cols}")
+            input_table.add_row("Optimized Matrix Size", f"{ddmap_target.shape[0]} × {ddmap_target.shape[1]}")
+        else:
+            input_table.add_row("Matrix Size", f"{ddmap_target.shape[0]} × {ddmap_target.shape[1]}")
         if input_type == 'cmap':
             input_table.add_row("Alpha (cmap→dmap)", f"{alpha}")
             input_table.add_row("Matrix Balancing", "Yes" if balance else "No" if input_format == 'cooler' else "N/A")
             input_table.add_row("Neighbor Balancing", "Yes" if neighbor_balance else "No")
             input_table.add_row("Auto Normalization", "No" if not_normalize else "Yes")
         input_table.add_row("Ignore Missing Data", "Yes" if ignore_missing_data else "No")
+        input_table.add_row("Remove Fully Missing Loci", "Yes" if remove_fully_missing_loci else "No")
         
         console.print(input_table)
         console.print()  # spacing
@@ -671,7 +774,24 @@ def run_optimization(input_path=None,
                 "Fully Missing Loci",
                 _format_index_list(missing_analysis['fully_missing_loci']),
             )
-            if ignore_missing_data and missing_analysis['fully_missing_loci']:
+            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['removed_fully_missing_loci_count'] > 0:
+                missing_table.add_row(
+                    "Removed Fully Missing",
+                    _format_index_list(missing_analysis['removed_fully_missing_loci']),
+                )
+                missing_table.add_row(
+                    "Removed Loci Count",
+                    str(missing_analysis['removed_fully_missing_loci_count']),
+                )
+                missing_table.add_row(
+                    "Remaining Fully Missing",
+                    _format_index_list(missing_analysis['remaining_fully_missing_loci']),
+                )
+                missing_table.add_row(
+                    "Missing Pairs After Removal",
+                    f"{missing_analysis['missing_pairs_after_removal']:,} / {ddmap_target.shape[0] * (ddmap_target.shape[0] - 1) // 2:,} ({100.0 * missing_analysis['missing_fraction_after_removal']:.2f}%)",
+                )
+            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
                 missing_table.add_row(
                     "NN Repaired Pairs",
                     _format_index_list(
@@ -827,6 +947,8 @@ def run_optimization(input_path=None,
         'output_prefix': output_prefix,
         'input_type': input_type,
         'input_format': input_format,
+        'matrix_rows_original': original_matrix_rows if original_matrix_rows is not None else ddmap_target.shape[0],
+        'matrix_cols_original': original_matrix_cols if original_matrix_cols is not None else ddmap_target.shape[1],
         'matrix_rows': ddmap_target.shape[0],
         'matrix_cols': ddmap_target.shape[1],
         'connectivity_matrix_source': connectivity_matrix_source,
@@ -850,6 +972,7 @@ def run_optimization(input_path=None,
         'no_log': no_log,
         'no_xyzs': no_xyzs,
         'ignore_missing_data': ignore_missing_data,
+        'remove_fully_missing_loci': remove_fully_missing_loci,
         'balance': balance,
         'not_normalize': not_normalize,
         'neighbor_balance': neighbor_balance,
@@ -860,8 +983,14 @@ def run_optimization(input_path=None,
         'missing_pairs': missing_analysis['missing_pairs'] if missing_analysis is not None else 0,
         'missing_pair_fraction': missing_analysis['missing_fraction'] if missing_analysis is not None else 0.0,
         'fully_missing_loci': missing_analysis['fully_missing_loci'] if missing_analysis is not None else [],
+        'removed_fully_missing_loci': missing_analysis['removed_fully_missing_loci'] if missing_analysis is not None else [],
+        'removed_fully_missing_loci_count': missing_analysis['removed_fully_missing_loci_count'] if missing_analysis is not None else 0,
         'nearest_neighbor_repair_count': missing_analysis['nearest_neighbor_repair_count'] if missing_analysis is not None else 0,
         'nearest_neighbor_repaired_pairs': missing_analysis['nearest_neighbor_repaired_pairs'] if missing_analysis is not None else [],
+        'missing_pairs_after_repair': missing_analysis['missing_pairs_after_repair'] if missing_analysis is not None else 0,
+        'missing_pair_fraction_after_repair': missing_analysis['missing_fraction_after_repair'] if missing_analysis is not None else 0.0,
+        'missing_pairs_after_removal': missing_analysis['missing_pairs_after_removal'] if missing_analysis is not None else 0,
+        'missing_pair_fraction_after_removal': missing_analysis['missing_fraction_after_removal'] if missing_analysis is not None else 0.0,
         'remaining_fully_missing_loci': missing_analysis['remaining_fully_missing_loci'] if missing_analysis is not None else [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,
@@ -877,6 +1006,9 @@ def run_optimization(input_path=None,
     }
     if connectivity_at_steps:
         results['connectivity_matrix_at_steps'] = connectivity_at_steps
+    if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:
+        results['kept_loci'] = missing_analysis['kept_loci']
+        results['removed_fully_missing_loci'] = missing_analysis['removed_fully_missing_loci']
     
     # Compute contact map if input was contact map
     cmap_maxent = None

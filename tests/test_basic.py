@@ -98,5 +98,40 @@ def test_a2dmap_theory_with_force_applied_smoke():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
+def test_restore_matrix_with_nans_reinserts_removed_loci():
+    """Reduced matrices should be restored with NaN-filled rows/cols at removed loci."""
+    small = np.array(
+        [
+            [0.0, 1.0, 2.0],
+            [1.0, 0.0, 3.0],
+            [2.0, 3.0, 0.0],
+        ]
+    )
+
+    restored = HippsDimes.restore_matrix_with_nans(small, removed_idx=[1, 3], original_size=5)
+
+    expected = np.array(
+        [
+            [0.0, np.nan, 1.0, np.nan, 2.0],
+            [np.nan, np.nan, np.nan, np.nan, np.nan],
+            [1.0, np.nan, 0.0, np.nan, 3.0],
+            [np.nan, np.nan, np.nan, np.nan, np.nan],
+            [2.0, np.nan, 3.0, np.nan, 0.0],
+        ]
+    )
+
+    assert restored.shape == (5, 5)
+    assert np.array_equal(np.isnan(restored), np.isnan(expected))
+    assert np.allclose(np.nan_to_num(restored), np.nan_to_num(expected))
+
+
+def test_restore_matrix_with_nans_validates_shape():
+    """Restoration should reject reduced matrices whose shape is inconsistent with removed_idx."""
+    small = np.eye(3)
+
+    with pytest.raises(ValueError, match="incompatible shape"):
+        HippsDimes.restore_matrix_with_nans(small, removed_idx=[1], original_size=5)
+
+
 if __name__ == "__main__":
     pytest.main([__file__]) 

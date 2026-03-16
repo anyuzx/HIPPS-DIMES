@@ -48,6 +48,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--no-log', is_flag=True, default=False, show_default=True, help='Disable writing run-parameter and iteration-series log files')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
 @click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
+@click.option('--remove-fully-missing-loci', is_flag=True, default=False, show_default=True, help='When used with --ignore-missing-data, remove loci whose entire off-diagonal row/column is missing before optimization')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='Turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
 @click.option('--neighbor-balance', is_flag=True, default=False, show_default=True, help='Turn on neighbor balancing for contact map. Only effective when input_type == cmap. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. see Paggi, Zhang 2025 for method details')
 @click.option('--not-normalize', is_flag=True, default=False, show_default=True, help='Turn off auto normalization of contact map. Only effective when the input is contact map')
@@ -56,7 +57,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-pickle', is_flag=True, default=False, show_default=True, help='Save the returned results dictionary to {output_prefix}_HIPPS_DIMES_results.pkl and suppress the default text/CSV/XYZ file outputs')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -91,6 +92,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         no_log=no_log,
         no_xyzs=no_xyzs,
         ignore_missing_data=ignore_missing_data,
+        remove_fully_missing_loci=remove_fully_missing_loci,
         balance=balance,
         not_normalize=not_normalize,
         neighbor_balance=neighbor_balance,

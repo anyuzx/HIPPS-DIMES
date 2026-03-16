@@ -511,6 +511,123 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
     assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
 
 
+def test_remove_fully_missing_loci_requires_ignore_missing_data():
+    """Removing fully missing loci is only valid when ignore_missing_data is enabled."""
+    n = 5
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(A_true)
+
+    with pytest.raises(ValueError, match="remove_fully_missing_loci=True requires ignore_missing_data=True"):
+        HippsDimes.run_optimization(
+            input_matrix=dmap_target,
+            input_type="dmap",
+            input_format="text",
+            remove_fully_missing_loci=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_mapping():
+    """Removing fully missing loci should reduce the optimization problem and keep index mapping."""
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    cmap_missing = cmap.copy()
+    cmap_missing[2, :] = 0.0
+    cmap_missing[:, 2] = 0.0
+    np.fill_diagonal(cmap_missing, 1.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=cmap_missing,
+        connectivity_matrix=A_true,
+        input_type="cmap",
+        input_format="text",
+        ignore_missing_data=True,
+        remove_fully_missing_loci=True,
+        method="IS",
+        iteration=5,
+        learning_rate=5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    run_parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert results["connectivity_matrix"].shape == (4, 4)
+    assert results["dmap_final"].shape == (4, 4)
+    assert results["cmap_final"].shape == (4, 4)
+    assert results["kept_loci"] == [0, 1, 3, 4]
+    assert results["removed_fully_missing_loci"] == [2]
+    assert run_parameters["matrix_rows_original"] == 5
+    assert run_parameters["matrix_rows"] == 4
+    assert bool(run_parameters["remove_fully_missing_loci"]) is True
+    assert json.loads(run_parameters["removed_fully_missing_loci"]) == [2]
+    assert run_parameters["removed_fully_missing_loci_count"] == 1
+    assert run_parameters["nearest_neighbor_repair_count"] == 0
+    assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
+
+
+def test_cli_remove_fully_missing_loci_writes_reduced_results_pickle(tmp_path):
+    """CLI should expose fully missing locus removal through the same API path."""
+    A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
+    cmap_missing = cmap.copy()
+    cmap_missing[2, :] = 0.0
+    cmap_missing[:, 2] = 0.0
+    np.fill_diagonal(cmap_missing, 1.0)
+
+    cmap_path = tmp_path / "cmap_missing.npy"
+    output_prefix = tmp_path / "remove_missing_cli"
+    np.save(cmap_path, cmap_missing)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            str(cmap_path),
+            str(output_prefix),
+            "--input-type",
+            "cmap",
+            "--input-format",
+            "npy",
+            "--iteration",
+            "5",
+            "--learning-rate",
+            "5.0",
+            "--no-xyzs",
+            "--ignore-missing-data",
+            "--remove-fully-missing-loci",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    with open(tmp_path / "remove_missing_cli_HIPPS_DIMES_results.pkl", "rb") as fin:
+        payload = pickle.load(fin)
+
+    run_parameters = dict(
+        zip(
+            payload["run_parameters"]["parameter"],
+            payload["run_parameters"]["value"],
+        )
+    )
+
+    assert payload["connectivity_matrix"].shape == (4, 4)
+    assert payload["kept_loci"] == [0, 1, 3, 4]
+    assert payload["removed_fully_missing_loci"] == [2]
+    assert json.loads(run_parameters["removed_fully_missing_loci"]) == [2]
+    assert run_parameters["removed_fully_missing_loci_count"] == 1
+
+
 def test_cli_save_pickle_writes_pickle_only(tmp_path):
     """CLI --save-pickle should route through to pickle-only output behavior."""
     n = 6

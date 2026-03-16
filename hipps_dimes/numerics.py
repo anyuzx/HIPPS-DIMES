@@ -150,6 +150,59 @@ def set_eigh_num_threads(n):
 
 #------------------------------------------------------------------#
 # Helper functions
+def restore_matrix_with_nans(small, removed_idx, original_size):
+    """Restore a reduced square matrix to its original size, filling removed loci with NaN.
+
+    Parameters
+    ----------
+    small : array_like
+        Square matrix after removing fully missing loci.
+    removed_idx : array_like
+        Zero-based indices removed from the original matrix.
+    original_size : int
+        Size of the original square matrix.
+
+    Returns
+    -------
+    np.ndarray
+        ``(original_size, original_size)`` float array with the reduced matrix
+        inserted at the kept loci positions and NaN-filled rows/columns for the
+        removed loci.
+    """
+    small = np.asarray(small)
+    if small.ndim != 2 or small.shape[0] != small.shape[1]:
+        raise ValueError(f"small must be a square 2D array, got shape {small.shape}")
+
+    original_size = int(original_size)
+    if original_size < 0:
+        raise ValueError("original_size must be non-negative")
+
+    removed_idx = np.asarray(removed_idx, dtype=int)
+    if removed_idx.ndim != 1:
+        raise ValueError("removed_idx must be a 1D array-like of indices")
+    if removed_idx.size and np.unique(removed_idx).size != removed_idx.size:
+        raise ValueError("removed_idx must not contain duplicate indices")
+    if np.any(removed_idx < 0) or np.any(removed_idx >= original_size):
+        raise ValueError(
+            f"removed_idx entries must be in [0, {max(original_size - 1, 0)}]"
+        )
+
+    expected_size = original_size - removed_idx.size
+    if small.shape != (expected_size, expected_size):
+        raise ValueError(
+            "small has incompatible shape for the provided removed_idx/original_size: "
+            f"expected {(expected_size, expected_size)}, got {small.shape}"
+        )
+
+    keep_mask = np.ones(original_size, dtype=bool)
+    keep_mask[removed_idx] = False
+
+    out_dtype = np.result_type(small.dtype, float)
+    restored = np.full((original_size, original_size), np.nan, dtype=out_dtype)
+    restored[np.ix_(keep_mask, keep_mask)] = small
+    return restored
+
+
 def compute_acf_general_theory(i, j, t, a, zeta=1.0):
     """
     Numerically compute the autocorrelation function (ACF) for monomers i, j 

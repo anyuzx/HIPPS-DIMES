@@ -407,7 +407,7 @@ model.resume(int(5e4), every = 10)
 
 Trajectory coordinates can be accessed through `model.traj`. It is a `TxNx3` numpy array. `T` is the number of snapshots. `N` is the number of loci and 3 corresponds to coordinates at x, y, z dimensions. The corresponding reduced simulation time for each saved snapshot is stored in `model.traj_time`, a length-`T` numpy array.
 
-`Dynamics.run(...)` starts a fresh trajectory and can be called only once per simulation state. To continue an existing simulation, use `Dynamics.resume(...)`. To discard the previous trajectory and start over on the same object, call `Dynamics.reset()` before `run(...)`. By default, `run(...)` does not append the post-integration final state to `model.traj`; set `include_final_state=True` if you want that last state included.
+`Dynamics.run(...)` starts a fresh trajectory and can be called only once per simulation state. To continue an existing simulation, use `Dynamics.resume(...)`. When omitted, `resume(...)` reuses the previous passive simulation settings for `update`, `every`, `method`, and `update_zero_modes`; you can still override any of them explicitly. To discard the previous trajectory and start over on the same object, call `Dynamics.reset()` before `run(...)`. By default, `run(...)` does not append the post-integration final state to `model.traj`; set `include_final_state=True` if you want that last state included.
 
 ### Dynamics under external force: `Dynamics.run_with_force(...)`
 

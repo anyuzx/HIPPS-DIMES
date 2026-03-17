@@ -1304,6 +1304,7 @@ class Dynamics:
 
     def _clear_run_state(self):
         self._has_run = False
+        self._passive_run_config = None
         self._step = 0
         self.time = 0.0
         self.traj = np.empty((0, self.N, 3))
@@ -1339,6 +1340,29 @@ class Dynamics:
         else:
             self.traj = np.concatenate((self.traj, snapshots), axis=0)
             self.traj_time = np.concatenate((self.traj_time, snapshot_times), axis=0)
+
+    def _set_passive_run_config(self, update, every, method, update_zero_modes):
+        self._passive_run_config = {
+            'update': update,
+            'every': every,
+            'method': method,
+            'update_zero_modes': update_zero_modes,
+        }
+
+    def _resolve_passive_run_config(self, update, every, method, update_zero_modes):
+        if self._passive_run_config is None:
+            raise RuntimeError('No previous passive simulation settings found; call run() first.')
+
+        return {
+            'update': self._passive_run_config['update'] if update is None else update,
+            'every': self._passive_run_config['every'] if every is None else every,
+            'method': self._passive_run_config['method'] if method is None else method,
+            'update_zero_modes': (
+                self._passive_run_config['update_zero_modes']
+                if update_zero_modes is None
+                else update_zero_modes
+            ),
+        }
 
     def _run_passive_dynamics(self, T, update, every, method, update_zero_modes):
         snapshots = []
@@ -1425,6 +1449,7 @@ class Dynamics:
         self._set_initial_state(initial_conformation=initial_conformation)
         self.traj = np.empty((0, self.N, 3))
         self.traj_time = np.empty((0,), dtype=float)
+        self._set_passive_run_config(update, every, method, update_zero_modes)
         snapshots, snapshot_times = self._run_passive_dynamics(
             T,
             update=update,
@@ -1439,9 +1464,10 @@ class Dynamics:
             self._append_trajectory_data(final_snapshot, final_time)
         self._has_run = True
 
-    def resume(self, T, update=1, every=1, method='euler-maruyama', update_zero_modes=True):
+    def resume(self, T, update=None, every=None, method=None, update_zero_modes=None):
         """
-        Continue a previously started passive dynamics simulation from the current state.
+        Continue a previously started passive dynamics simulation from the current
+        state. Omitted parameters inherit the last passive run/resume settings.
         """
         if not isinstance(T, int):
             sys.stdout.write('Number of steps should be an integer')
@@ -1450,12 +1476,20 @@ class Dynamics:
         if not self._has_run:
             raise RuntimeError('No previous simulation state found; call run() first.')
 
+        config = self._resolve_passive_run_config(update, every, method, update_zero_modes)
+        self._set_passive_run_config(
+            config['update'],
+            config['every'],
+            config['method'],
+            config['update_zero_modes'],
+        )
+
         new_snapshots, new_snapshot_times = self._run_passive_dynamics(
             T,
-            update=update,
-            every=every,
-            method=method,
-            update_zero_modes=update_zero_modes,
+            update=config['update'],
+            every=config['every'],
+            method=config['method'],
+            update_zero_modes=config['update_zero_modes'],
         )
 
         self._append_trajectory_data(new_snapshots, new_snapshot_times)

@@ -54,6 +54,24 @@ def test_dynamics_resume_appends_from_current_state():
     assert np.allclose(model.traj_time, [0.0, 0.01, 0.02, 0.03, 0.04])
 
 
+def test_dynamics_resume_inherits_previous_parameters_by_default():
+    """resume should reuse the previous passive-run settings when omitted."""
+    np.random.seed(12345)
+    inherited = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    inherited.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    inherited.run(5, update=2, every=2, method="exact", update_zero_modes=False)
+    inherited.resume(5)
+
+    np.random.seed(12345)
+    explicit = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    explicit.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    explicit.run(5, update=2, every=2, method="exact", update_zero_modes=False)
+    explicit.resume(5, update=2, every=2, method="exact", update_zero_modes=False)
+
+    assert np.allclose(inherited.traj, explicit.traj)
+    assert np.allclose(inherited.traj_time, explicit.traj_time)
+
+
 def test_dynamics_reset_allows_new_fresh_run():
     """reset should clear run history so run() can be called again."""
     model = HippsDimes.Dynamics(4, k=1.0, model="rouse")

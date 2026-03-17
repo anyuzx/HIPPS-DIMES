@@ -116,3 +116,17 @@ def test_dynamics_reset_clears_traj_time():
 
     assert model.traj_time.shape == (0,)
     assert model.time == pytest.approx(0.0)
+
+
+def test_dynamics_save_traj_writes_npz(tmp_path):
+    """save_traj should persist traj and traj_time together in a .npz file."""
+    model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    model.run(3, every=1, method="exact", update_zero_modes=False)
+
+    output_path = tmp_path / "traj.npz"
+    model.save_traj(output_path)
+
+    saved = np.load(output_path)
+    assert np.allclose(saved["traj"], model.traj)
+    assert np.allclose(saved["traj_time"], model.traj_time)

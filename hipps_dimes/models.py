@@ -1494,6 +1494,22 @@ class Dynamics:
 
         self._append_trajectory_data(new_snapshots, new_snapshot_times)
 
+    def save_traj(self, fout):
+        """
+        Save the current trajectory and aligned reduced times to a .npz file.
+        """
+        path = str(fout)
+        if not path.endswith('.npz'):
+            raise ValueError("save_traj() currently supports only '.npz' output files.")
+
+        if self.traj.shape[0] != self.traj_time.shape[0]:
+            raise RuntimeError('Trajectory coordinates and times are inconsistent.')
+
+        if self.traj.size == 0 and self.traj_time.size == 0:
+            raise RuntimeError('No trajectory data found; run the simulation first.')
+
+        np.savez(path, traj=self.traj, traj_time=self.traj_time)
+
     def run_with_force(self, T, force_loci, force_amplitude, force_direction, force_duration=None, 
                       update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
         """

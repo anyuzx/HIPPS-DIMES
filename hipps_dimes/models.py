@@ -1293,7 +1293,9 @@ class Dynamics:
                 sys.stdout.write('The connectivity matrix should be a symmetrix real matrix')
                 sys.exit(0)
 
-            self.A = input
+            # Keep an internal copy so later external mutations of the caller's
+            # array do not silently change the model state.
+            self.A = input.copy()
             self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input.shape[0]
 

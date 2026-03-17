@@ -1272,6 +1272,7 @@ class Dynamics:
             self.A = construct_connectivity_matrix_rouse(input, k)
             self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input
+            self._clear_run_state()
         elif isinstance(input, int) and M is not None and k is not None:
             if not isinstance(k, int) and not isinstance(k, float):
                 sys.stdout.write('Spring constant should be a number')
@@ -1285,6 +1286,7 @@ class Dynamics:
             self.A = construct_connectivity_matrix_random(input, M, k)
             self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input
+            self._clear_run_state()
         elif isinstance(input, np.ndarray) and M is None and k is None:
             if len(input.shape) !=2 or input.shape[0] != input.shape[1]:
                 sys.stdout.write('The connectivity matrix should be a square matrix')
@@ -1298,6 +1300,65 @@ class Dynamics:
             self.A = input.copy()
             self.eigvalue, self.eigvector = np.linalg.eigh(self.A)
             self.N = input.shape[0]
+            self._clear_run_state()
+
+    def _clear_run_state(self):
+        self._has_run = False
+        self._step = 0
+        self.time = 0.0
+        self.traj = np.empty((0, self.N, 3))
+        self.traj_time = np.empty((0,), dtype=float)
+
+    def _set_initial_state(self, initial_conformation=None):
+        if initial_conformation is None:
+            try:
+                self.xyz
+                self.modes
+            except AttributeError:
+                self.generateXYZ()
+        else:
+            if initial_conformation.shape[0] != self.N:
+                sys.stdout.write('Number of particles is not correct')
+                sys.exit(0)
+            if initial_conformation.shape[1] != 3:
+                sys.stdout.write('The dimension should be three')
+                sys.exit(0)
+            self.xyz = np.array(initial_conformation, copy=True)
+            self.modes = self.eigvector.T @ self.xyz
+
+        self._step = 0
+        self.time = 0.0
+
+    def _append_trajectory_data(self, snapshots, snapshot_times):
+        if snapshots.size == 0:
+            return
+
+        if self.traj.size == 0:
+            self.traj = snapshots
+            self.traj_time = snapshot_times
+        else:
+            self.traj = np.concatenate((self.traj, snapshots), axis=0)
+            self.traj_time = np.concatenate((self.traj_time, snapshot_times), axis=0)
+
+    def _run_passive_dynamics(self, T, update, every, method, update_zero_modes):
+        snapshots = []
+        snapshot_times = []
+        for t in tqdm(range(T)):
+            if t % update == 0:
+                self.updateXYZ()
+            if t % every == 0:
+                self.updateXYZ()
+                snapshots.append(self.xyz.copy())
+                snapshot_times.append(self.time)
+            self.updateModes(method=method, update_zero_modes=update_zero_modes)
+            self._step += 1
+            self.time += self.dt
+
+        self.updateXYZ()
+
+        if snapshots:
+            return np.array(snapshots), np.array(snapshot_times, dtype=float)
+        return np.empty((0, self.N, 3)), np.empty((0,), dtype=float)
 
     def generateXYZ(self, force_positive_definite = False):
         self.xyz = a2xyz_sample(self.A, force_positive_definite = force_positive_definite)[0]
@@ -1342,44 +1403,62 @@ class Dynamics:
     def updateXYZ(self):
         self.xyz = self.eigvector @ self.modes
 
-    def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
+    def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama',
+            update_zero_modes=True, include_final_state=False):
         """
         T: number of timesteps
         update: update x,y,z positions every this many timesteps
         every: save x,y,z positions to the trajectory every this many timesteps
         initial_conformation: initial conformation of the simulation
         update_zero_modes: if True, COM will diffuse; if False, COM is fixed at initial position
+        include_final_state: if True, append the post-integration final state to traj
         """
         if not isinstance(T, int):
             sys.stdout.write('Number of steps should be an integer')
             sys.exit(0)
 
-        if initial_conformation is None:
-            try:
-                self.xyz
-                self.modes
-            except AttributeError:
-                self.generateXYZ()
-        else:
-            if initial_conformation.shape[0] != self.N:
-                sys.stdout.write('Number of particles is not correct')
-                sys.exit(0)
-            if initial_conformation.shape[1] != 3:
-                sys.stdout.write('The dimension should be three')
-                sys.exit(0)
-            self.xyz = initial_conformation
-            self.modes = self.eigvector.T @ self.xyz
+        if self._has_run:
+            raise RuntimeError(
+                'Simulation state already exists; call resume() to continue or reset() to start over.'
+            )
 
-        self.traj = []
-        for t in tqdm(range(T)):
-            if t % update == 0:
-                self.updateXYZ()
-            if t % every == 0:
-                self.updateXYZ()
-                self.traj.append(self.xyz.copy())
-            self.updateModes(method=method, update_zero_modes=update_zero_modes)
+        self._set_initial_state(initial_conformation=initial_conformation)
+        self.traj = np.empty((0, self.N, 3))
+        self.traj_time = np.empty((0,), dtype=float)
+        snapshots, snapshot_times = self._run_passive_dynamics(
+            T,
+            update=update,
+            every=every,
+            method=method,
+            update_zero_modes=update_zero_modes,
+        )
+        self._append_trajectory_data(snapshots, snapshot_times)
+        if include_final_state:
+            final_snapshot = self.xyz.copy()[np.newaxis, :, :]
+            final_time = np.array([self.time], dtype=float)
+            self._append_trajectory_data(final_snapshot, final_time)
+        self._has_run = True
 
-        self.traj = np.array(self.traj)
+    def resume(self, T, update=1, every=1, method='euler-maruyama', update_zero_modes=True):
+        """
+        Continue a previously started passive dynamics simulation from the current state.
+        """
+        if not isinstance(T, int):
+            sys.stdout.write('Number of steps should be an integer')
+            sys.exit(0)
+
+        if not self._has_run:
+            raise RuntimeError('No previous simulation state found; call run() first.')
+
+        new_snapshots, new_snapshot_times = self._run_passive_dynamics(
+            T,
+            update=update,
+            every=every,
+            method=method,
+            update_zero_modes=update_zero_modes,
+        )
+
+        self._append_trajectory_data(new_snapshots, new_snapshot_times)
 
     def run_with_force(self, T, force_loci, force_amplitude, force_direction, force_duration=None, 
                       update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
@@ -1448,25 +1527,34 @@ class Dynamics:
 
         # Allow COM to move naturally due to force
         # No COM constraint applied
-        
+
+        self._step = 0
+        self.time = 0.0
         self.traj = []
+        self.traj_time = []
         for t in tqdm(range(T)):
             if t % update == 0:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
                 self.traj.append(self.xyz.copy())
+                self.traj_time.append(self.time)
             
             # Apply force only during specified duration
             if force_duration is None or t < force_duration:
                 self.updateModes(method=method, force_projection=force_projection, update_zero_modes=update_zero_modes)
             else:
                 self.updateModes(method=method, update_zero_modes=update_zero_modes)
+            self._step += 1
+            self.time += self.dt
 
+        self.updateXYZ()
         self.traj = np.array(self.traj)
+        self.traj_time = np.array(self.traj_time, dtype=float)
 
     def reset(self):
         self.generateXYZ()
+        self._clear_run_state()
 
     def run_breakable_bond(self, T, cutoff_distance, update=1, every=1, initial_conformation=None, 
                           method='euler-maruyama', update_zero_modes=True):
@@ -1550,21 +1638,29 @@ class Dynamics:
             self.xyz = initial_conformation
             self.modes = self.eigvector.T @ self.xyz
 
+        self._step = 0
+        self.time = 0.0
         self.traj = []
+        self.traj_time = []
         for t in tqdm(range(T)):
             if t % update == 0:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
                 self.traj.append(self.xyz.copy())
+                self.traj_time.append(self.time)
             
             # Update internal connectivity matrix based on current distances
             self._update_connectivity_from_distances(cutoff_distance)
             
             # Update normal modes (eigvalue and eigvector already updated in _update_connectivity_from_distances)
             self.updateModes(method=method, update_zero_modes=update_zero_modes)
+            self._step += 1
+            self.time += self.dt
 
+        self.updateXYZ()
         self.traj = np.array(self.traj)
+        self.traj_time = np.array(self.traj_time, dtype=float)
 
     def _update_connectivity_from_distances(self, cutoff_distance):
         """

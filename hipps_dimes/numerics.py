@@ -1941,3 +1941,71 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
     if not np.isfinite(entropy):
         return np.nan
     return entropy
+
+
+# --------
+# Sample HIPPS-DIMES structures conditioned on single pairwise distance
+def sample_conditioned_pair_vector(r_eq, K, pair, b):
+    """
+    Exact conditional equilibrium sample for Gaussian HIPPS-DIMES,
+    conditioned on r_ij = b, where
+
+        r_ij = r_i - r_j = (delta^T r)^T.
+
+    Parameters
+    ----------
+    r_eq : ndarray, shape (N, 3)
+        Unconstrained equilibrium sample, i.e. r_eq.
+    K : ndarray, shape (N, N)
+        Connectivity matrix.
+    pair : tuple of int
+        (i, j)
+    b : ndarray, shape (3,)
+        Desired pair vector.
+
+    Returns
+    -------
+    r_cond : ndarray, shape (N, 3)
+        Exact conditional sample satisfying
+            r_cond[i] - r_cond[j] = b.
+    """
+    i, j = pair
+    N = r_eq.shape[0]
+
+    # Sigma = (-K)^+
+    Sigma = scipy.linalg.pinvh(-K)
+
+    # delta = e_i - e_j
+    delta = np.zeros(N)
+    delta[i] = 1.0
+    delta[j] = -1.0
+
+    # denominator = delta^T Sigma delta
+    denom = delta @ Sigma @ delta
+    if denom <= 0:
+        raise ValueError("Invalid pair variance denominator.")
+
+    # g = Sigma delta / (delta^T Sigma delta)
+    g = (Sigma @ delta) / denom   # shape (N,)
+
+    # current pair vector: r_ij = (delta^T r_eq)^T = r_eq[i] - r_eq[j]
+    r_ij_eq = r_eq[i] - r_eq[j]   # shape (3,)
+
+    # r_cond = r_eq + g (b - r_ij_eq)^T
+    r_cond = r_eq + g[:, None] * (b - r_ij_eq)[None, :]
+
+    return r_cond
+
+def random_unit_vector():
+    v = np.random.normal(size=3)
+    return v / np.linalg.norm(v)
+
+
+def sample_conditioned_pair_distance(X_eq, K, pair, b_scalar):
+    """
+    Exact conditional equilibrium sample for standard isotropic HIPPS-DIMES,
+    conditioned on |r_i - r_j| = R0.
+    """
+    n = random_unit_vector()
+    b = b_scalar * n
+    return sample_conditioned_pair_vector(X_eq, K, pair, b)

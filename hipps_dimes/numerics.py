@@ -1945,6 +1945,24 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
 
 # --------
 # Sample HIPPS-DIMES structures conditioned on single pairwise distance
+def _conditioned_pair_gain(K, pair):
+    """Return the linear conditioning gain g for a selected locus pair."""
+    i, j = pair
+    N = K.shape[0]
+
+    Sigma = scipy.linalg.pinvh(-K)
+
+    delta = np.zeros(N)
+    delta[i] = 1.0
+    delta[j] = -1.0
+
+    denom = delta @ Sigma @ delta
+    if denom <= 0:
+        raise ValueError("Invalid pair variance denominator.")
+
+    return (Sigma @ delta) / denom
+
+
 def sample_conditioned_pair_vector(r_eq, K, pair, b):
     """
     Exact conditional equilibrium sample for Gaussian HIPPS-DIMES,
@@ -1970,23 +1988,7 @@ def sample_conditioned_pair_vector(r_eq, K, pair, b):
             r_cond[i] - r_cond[j] = b.
     """
     i, j = pair
-    N = r_eq.shape[0]
-
-    # Sigma = (-K)^+
-    Sigma = scipy.linalg.pinvh(-K)
-
-    # delta = e_i - e_j
-    delta = np.zeros(N)
-    delta[i] = 1.0
-    delta[j] = -1.0
-
-    # denominator = delta^T Sigma delta
-    denom = delta @ Sigma @ delta
-    if denom <= 0:
-        raise ValueError("Invalid pair variance denominator.")
-
-    # g = Sigma delta / (delta^T Sigma delta)
-    g = (Sigma @ delta) / denom   # shape (N,)
+    g = _conditioned_pair_gain(K, pair)
 
     # current pair vector: r_ij = (delta^T r_eq)^T = r_eq[i] - r_eq[j]
     r_ij_eq = r_eq[i] - r_eq[j]   # shape (3,)
@@ -2001,6 +2003,14 @@ def random_unit_vector():
     return v / np.linalg.norm(v)
 
 
+def random_unit_vectors(count):
+    """Return ``count`` random unit vectors in R^3."""
+    v = np.random.normal(size=(count, 3))
+    norm = np.linalg.norm(v, axis=1, keepdims=True)
+    norm = np.maximum(norm, np.finfo(float).tiny)
+    return v / norm
+
+
 def sample_conditioned_pair_distance(X_eq, K, pair, b_scalar):
     """
     Exact conditional equilibrium sample for standard isotropic HIPPS-DIMES,
@@ -2009,3 +2019,41 @@ def sample_conditioned_pair_distance(X_eq, K, pair, b_scalar):
     n = random_unit_vector()
     b = b_scalar * n
     return sample_conditioned_pair_vector(X_eq, K, pair, b)
+
+
+def sample_conditioned_pair_distance_batch(X_eq, K, pair, b_scalar):
+    """
+    Vectorized conditional sampling for an ensemble constrained on one pair distance.
+
+    Parameters
+    ----------
+    X_eq : ndarray, shape (ensemble, N, 3)
+        Unconstrained equilibrium samples.
+    K : ndarray, shape (N, N)
+        Connectivity matrix.
+    pair : tuple of int
+        Selected locus pair ``(i, j)``.
+    b_scalar : float
+        Desired pair distance.
+
+    Returns
+    -------
+    ndarray, shape (ensemble, N, 3)
+        Conditional samples with ``|r_i - r_j| = b_scalar`` for each sample.
+    """
+    X_eq = np.asarray(X_eq)
+    if X_eq.ndim != 3 or X_eq.shape[2] != 3:
+        raise ValueError(
+            f"X_eq must have shape (ensemble, N, 3), got {X_eq.shape}"
+        )
+
+    i, j = pair
+    g = _conditioned_pair_gain(K, pair)
+    b = b_scalar * random_unit_vectors(X_eq.shape[0])
+    pair_vectors = X_eq[:, i, :] - X_eq[:, j, :]
+    return X_eq + g[np.newaxis, :, np.newaxis] * (b - pair_vectors)[:, np.newaxis, :]
+
+
+def a2xyz_sample_conditioned_pair_distance(K, pair, b_scalar, ensemble=1):
+    xyzs_uncond = a2xyz_sample(K, ensemble=ensemble)
+    return sample_conditioned_pair_distance_batch(xyzs_uncond, K, pair, b_scalar)

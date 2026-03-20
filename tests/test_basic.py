@@ -133,5 +133,26 @@ def test_restore_matrix_with_nans_validates_shape():
         HippsDimes.restore_matrix_with_nans(small, removed_idx=[1], original_size=5)
 
 
+def test_a2xyz_sample_conditioned_pair_distance_enforces_pair_norm():
+    """Conditioned ensemble sampling should enforce the requested pair distance for each sample."""
+    np.random.seed(12345)
+    A = HippsDimes.construct_connectivity_matrix_rouse(6, 1.0)
+    pair = (1, 4)
+    target_distance = 2.5
+
+    xyzs = HippsDimes.a2xyz_sample_conditioned_pair_distance(
+        A,
+        pair=pair,
+        b_scalar=target_distance,
+        ensemble=24,
+    )
+
+    pair_vectors = xyzs[:, pair[0], :] - xyzs[:, pair[1], :]
+    pair_distances = np.linalg.norm(pair_vectors, axis=1)
+
+    assert xyzs.shape == (24, 6, 3)
+    assert np.allclose(pair_distances, target_distance, rtol=1e-10, atol=1e-10)
+
+
 if __name__ == "__main__":
     pytest.main([__file__]) 

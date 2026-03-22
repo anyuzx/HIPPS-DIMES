@@ -49,6 +49,40 @@ def _emit_progress(progress_callback, *, iteration, total, loss, entropy, start_
         'noisy': bool(noisy),
     })
 
+
+def _iter_with_optional_progress(total, *, show_progress, desc):
+    """Return a plain range or a tqdm-wrapped range depending on caller settings."""
+    if show_progress:
+        return tqdm(range(total), desc=desc)
+    return range(total)
+
+
+def _emit_dynamics_progress(progress_callback, *, stage, iteration, total, start_time, time_value, dt,
+                            method, update_zero_modes, saved_snapshot, force_active=None):
+    """Emit a structured progress update for dynamics simulations."""
+    if progress_callback is None:
+        return
+
+    elapsed = time.perf_counter() - start_time
+    iterations_per_sec = np.nan if elapsed <= 0 else iteration / elapsed
+    if not np.isfinite(iterations_per_sec):
+        iterations_per_sec = np.nan
+
+    payload = {
+        'stage': stage,
+        'iteration': int(iteration),
+        'total': int(total),
+        'time': float(time_value),
+        'dt': float(dt),
+        'iterations_per_sec': float(iterations_per_sec) if np.isfinite(iterations_per_sec) else np.nan,
+        'method': method,
+        'update_zero_modes': bool(update_zero_modes),
+        'saved_snapshot': bool(saved_snapshot),
+    }
+    if force_active is not None:
+        payload['force_active'] = bool(force_active)
+    progress_callback(payload)
+
 class Optimize:
     """
     Optimizer for finding connectivity matrix A that matches target distance constraints.
@@ -1364,19 +1398,35 @@ class Dynamics:
             ),
         }
 
-    def _run_passive_dynamics(self, T, update, every, method, update_zero_modes):
+    def _run_passive_dynamics(self, T, update, every, method, update_zero_modes,
+                              show_progress=True, progress_callback=None):
         snapshots = []
         snapshot_times = []
-        for t in tqdm(range(T)):
+        start_time = time.perf_counter()
+        for t in _iter_with_optional_progress(T, show_progress=show_progress, desc="Dynamics"):
+            saved_snapshot = False
             if t % update == 0:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
                 snapshots.append(self.xyz.copy())
                 snapshot_times.append(self.time)
+                saved_snapshot = True
             self.updateModes(method=method, update_zero_modes=update_zero_modes)
             self._step += 1
             self.time += self.dt
+            _emit_dynamics_progress(
+                progress_callback,
+                stage='passive_dynamics',
+                iteration=t + 1,
+                total=T,
+                start_time=start_time,
+                time_value=self.time,
+                dt=self.dt,
+                method=method,
+                update_zero_modes=update_zero_modes,
+                saved_snapshot=saved_snapshot,
+            )
 
         self.updateXYZ()
 
@@ -1428,7 +1478,8 @@ class Dynamics:
         self.xyz = self.eigvector @ self.modes
 
     def run(self, T, update=1, every=1, initial_conformation=None, method='euler-maruyama',
-            update_zero_modes=True, include_final_state=False):
+            update_zero_modes=True, include_final_state=False, show_progress=True,
+            progress_callback=None):
         """
         T: number of timesteps
         update: update x,y,z positions every this many timesteps
@@ -1436,6 +1487,8 @@ class Dynamics:
         initial_conformation: initial conformation of the simulation
         update_zero_modes: if True, COM will diffuse; if False, COM is fixed at initial position
         include_final_state: if True, append the post-integration final state to traj
+        show_progress: if True, render a tqdm progress bar
+        progress_callback: optional callable receiving structured per-step updates
         """
         if not isinstance(T, int):
             sys.stdout.write('Number of steps should be an integer')
@@ -1456,6 +1509,8 @@ class Dynamics:
             every=every,
             method=method,
             update_zero_modes=update_zero_modes,
+            show_progress=show_progress,
+            progress_callback=progress_callback,
         )
         self._append_trajectory_data(snapshots, snapshot_times)
         if include_final_state:
@@ -1464,7 +1519,8 @@ class Dynamics:
             self._append_trajectory_data(final_snapshot, final_time)
         self._has_run = True
 
-    def resume(self, T, update=None, every=None, method=None, update_zero_modes=None):
+    def resume(self, T, update=None, every=None, method=None, update_zero_modes=None,
+               show_progress=True, progress_callback=None):
         """
         Continue a previously started passive dynamics simulation from the current
         state. Omitted parameters inherit the last passive run/resume settings.
@@ -1490,6 +1546,8 @@ class Dynamics:
             every=config['every'],
             method=config['method'],
             update_zero_modes=config['update_zero_modes'],
+            show_progress=show_progress,
+            progress_callback=progress_callback,
         )
 
         self._append_trajectory_data(new_snapshots, new_snapshot_times)
@@ -1511,7 +1569,8 @@ class Dynamics:
         np.savez(path, traj=self.traj, traj_time=self.traj_time)
 
     def run_with_force(self, T, force_loci, force_amplitude, force_direction, force_duration=None, 
-                      update=1, every=1, initial_conformation=None, method='euler-maruyama', update_zero_modes=True):
+                      update=1, every=1, initial_conformation=None, method='euler-maruyama',
+                      update_zero_modes=True, show_progress=True, progress_callback=None):
         """
         Run dynamics simulation with applied forces following the correct derivation.
         
@@ -1540,6 +1599,10 @@ class Dynamics:
             Integration method ('euler-maruyama' or 'exact')
         update_zero_modes : bool, optional
             If True, COM will diffuse; if False, COM is fixed at initial position
+        show_progress : bool, optional
+            If True, render a tqdm progress bar.
+        progress_callback : callable, optional
+            Optional callback receiving structured per-step updates.
         """
         if not isinstance(T, int):
             sys.stdout.write('Number of steps should be an integer')
@@ -1582,21 +1645,38 @@ class Dynamics:
         self.time = 0.0
         self.traj = []
         self.traj_time = []
-        for t in tqdm(range(T)):
+        start_time = time.perf_counter()
+        for t in _iter_with_optional_progress(T, show_progress=show_progress, desc="Dynamics (force)"):
+            saved_snapshot = False
             if t % update == 0:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
                 self.traj.append(self.xyz.copy())
                 self.traj_time.append(self.time)
+                saved_snapshot = True
             
             # Apply force only during specified duration
-            if force_duration is None or t < force_duration:
+            force_active = force_duration is None or t < force_duration
+            if force_active:
                 self.updateModes(method=method, force_projection=force_projection, update_zero_modes=update_zero_modes)
             else:
                 self.updateModes(method=method, update_zero_modes=update_zero_modes)
             self._step += 1
             self.time += self.dt
+            _emit_dynamics_progress(
+                progress_callback,
+                stage='forced_dynamics',
+                iteration=t + 1,
+                total=T,
+                start_time=start_time,
+                time_value=self.time,
+                dt=self.dt,
+                method=method,
+                update_zero_modes=update_zero_modes,
+                saved_snapshot=saved_snapshot,
+                force_active=force_active,
+            )
 
         self.updateXYZ()
         self.traj = np.array(self.traj)
@@ -1607,7 +1687,8 @@ class Dynamics:
         self._clear_run_state()
 
     def run_breakable_bond(self, T, cutoff_distance, update=1, every=1, initial_conformation=None, 
-                          method='euler-maruyama', update_zero_modes=True):
+                          method='euler-maruyama', update_zero_modes=True, show_progress=True,
+                          progress_callback=None):
         """
         Run dynamics simulation with breakable bonds based on distance cutoff.
         
@@ -1645,6 +1726,10 @@ class Dynamics:
             the 'exact' method may produce numerical issues.
         update_zero_modes : bool, optional
             If True, COM will diffuse; if False, COM is fixed at initial position
+        show_progress : bool, optional
+            If True, render a tqdm progress bar.
+        progress_callback : callable, optional
+            Optional callback receiving structured per-step updates.
         
         Notes
         -----
@@ -1692,13 +1777,16 @@ class Dynamics:
         self.time = 0.0
         self.traj = []
         self.traj_time = []
-        for t in tqdm(range(T)):
+        start_time = time.perf_counter()
+        for t in _iter_with_optional_progress(T, show_progress=show_progress, desc="Dynamics (breakable bond)"):
+            saved_snapshot = False
             if t % update == 0:
                 self.updateXYZ()
             if t % every == 0:
                 self.updateXYZ()
                 self.traj.append(self.xyz.copy())
                 self.traj_time.append(self.time)
+                saved_snapshot = True
             
             # Update internal connectivity matrix based on current distances
             self._update_connectivity_from_distances(cutoff_distance)
@@ -1707,6 +1795,18 @@ class Dynamics:
             self.updateModes(method=method, update_zero_modes=update_zero_modes)
             self._step += 1
             self.time += self.dt
+            _emit_dynamics_progress(
+                progress_callback,
+                stage='breakable_bond_dynamics',
+                iteration=t + 1,
+                total=T,
+                start_time=start_time,
+                time_value=self.time,
+                dt=self.dt,
+                method=method,
+                update_zero_modes=update_zero_modes,
+                saved_snapshot=saved_snapshot,
+            )
 
         self.updateXYZ()
         self.traj = np.array(self.traj)

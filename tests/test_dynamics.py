@@ -72,6 +72,99 @@ def test_dynamics_resume_inherits_previous_parameters_by_default():
     assert np.allclose(inherited.traj_time, explicit.traj_time)
 
 
+def test_dynamics_run_progress_callback_receives_structured_updates():
+    """run should optionally emit structured progress updates without rendering tqdm."""
+    model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    updates = []
+
+    model.run(
+        3,
+        every=2,
+        method="exact",
+        update_zero_modes=False,
+        show_progress=False,
+        progress_callback=updates.append,
+    )
+
+    assert len(updates) == 3
+    assert updates[0]["stage"] == "passive_dynamics"
+    assert updates[0]["iteration"] == 1
+    assert updates[0]["total"] == 3
+    assert updates[0]["saved_snapshot"] is True
+    assert updates[1]["saved_snapshot"] is False
+    assert updates[2]["saved_snapshot"] is True
+    assert updates[-1]["time"] == pytest.approx(0.03)
+    assert updates[-1]["dt"] == pytest.approx(0.01)
+    assert updates[-1]["method"] == "exact"
+    assert updates[-1]["update_zero_modes"] is False
+
+
+def test_dynamics_resume_progress_callback_receives_structured_updates():
+    """resume should accept the same progress controls as run()."""
+    model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    model.run(2, every=1, method="exact", update_zero_modes=False, show_progress=False)
+    updates = []
+
+    model.resume(2, every=1, method="exact", update_zero_modes=False, show_progress=False, progress_callback=updates.append)
+
+    assert len(updates) == 2
+    assert updates[0]["stage"] == "passive_dynamics"
+    assert updates[0]["iteration"] == 1
+    assert updates[-1]["time"] == pytest.approx(0.04)
+
+
+def test_dynamics_run_show_progress_false_suppresses_tqdm_output(capsys):
+    """show_progress=False should prevent dynamics tqdm output."""
+    model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+
+    model.run(3, every=1, method="exact", update_zero_modes=False, show_progress=False)
+
+    captured = capsys.readouterr()
+    assert "100%" not in captured.err
+    assert "it/s" not in captured.err
+
+
+def test_dynamics_specialized_runs_emit_progress_callbacks():
+    """Forced and breakable-bond dynamics should expose the same progress callback mechanism."""
+    force_model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    force_model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    force_updates = []
+    force_model.run_with_force(
+        2,
+        force_loci=[0],
+        force_amplitude=1.0,
+        force_direction=[1.0, 0.0, 0.0],
+        method="exact",
+        update_zero_modes=False,
+        show_progress=False,
+        progress_callback=force_updates.append,
+    )
+
+    bond_model = HippsDimes.Dynamics(4, k=1.0, model="rouse")
+    bond_model.initialize(dt=1e-2, zeta=1.0, beta=1.0)
+    bond_updates = []
+    bond_model.run_breakable_bond(
+        2,
+        cutoff_distance=10.0,
+        method="euler-maruyama",
+        update_zero_modes=False,
+        show_progress=False,
+        progress_callback=bond_updates.append,
+    )
+
+    assert len(force_updates) == 2
+    assert force_updates[0]["stage"] == "forced_dynamics"
+    assert force_updates[0]["force_active"] is True
+    assert force_updates[-1]["time"] == pytest.approx(0.02)
+
+    assert len(bond_updates) == 2
+    assert bond_updates[0]["stage"] == "breakable_bond_dynamics"
+    assert bond_updates[-1]["time"] == pytest.approx(0.02)
+
+
 def test_dynamics_reset_allows_new_fresh_run():
     """reset should clear run history so run() can be called again."""
     model = HippsDimes.Dynamics(4, k=1.0, model="rouse")

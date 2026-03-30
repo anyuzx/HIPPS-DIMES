@@ -65,6 +65,27 @@ def test_compute_modulus():
     assert np.allclose(loss_mod[:, 0], freq)
 
 
+def test_compute_stress_relaxation():
+    """Stress relaxation should normalize the non-zero mode sum by chain length."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    t = [0.0, 0.1, 1.0, 10.0]
+
+    relaxation = HippsDimes.compute_stress_relaxation(A, t, zeta=1.0)
+
+    eigvals = np.linalg.eigvalsh(A)
+    lam_nz = eigvals[np.abs(eigvals) > 1e-12]
+    expected = np.sum(
+        np.exp(-np.asarray(t)[:, None] / (-1.0 / lam_nz)[None, :]),
+        axis=1,
+    ) / len(A)
+
+    assert relaxation.shape == (len(t), 2)
+    assert np.allclose(relaxation[:, 0], t)
+    assert relaxation[0, 1] == pytest.approx(len(lam_nz) / len(A))
+    assert np.all(np.diff(relaxation[:, 1]) <= 1e-12)
+    assert np.allclose(relaxation[:, 1], expected)
+
+
 def test_dynamics_pairwise_distances():
     """Dynamics should compute pairwise Euclidean distances correctly."""
     dyn = HippsDimes.Dynamics(3, k=1.0, model="rouse")

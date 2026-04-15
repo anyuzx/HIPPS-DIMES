@@ -110,6 +110,18 @@ disallow_incomplete_defs = false
 check_untyped_defs = false
 disallow_untyped_decorators = false
 
+[[tool.mypy.overrides]]
+module = [
+    "cooler",
+    "cupy",
+    "hicstraw",
+    "pandas",
+    "scipy",
+    "scipy.*",
+    "tqdm",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]

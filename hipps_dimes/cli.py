@@ -3,7 +3,7 @@
 try:
     import rich_click as click
 except ImportError:
-    import click
+    import click  # type: ignore[no-redef]
 
 from .core import run_optimization, set_eigh_num_threads
 

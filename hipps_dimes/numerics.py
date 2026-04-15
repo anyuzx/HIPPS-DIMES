@@ -26,7 +26,7 @@ import pandas as pd
 try:
     import rich_click as click
 except ImportError:
-    import click
+    import click  # type: ignore[no-redef]
 try:
     import cooler  # for cooler format of HiC data
 except Exception:

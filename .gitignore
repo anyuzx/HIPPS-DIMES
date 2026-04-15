@@ -129,5 +129,4 @@ dmypy.json
 .pyre/
 .DS_Store
 .qodo
-MAINTAINER_MAP.md
 .codex

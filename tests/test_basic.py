@@ -86,6 +86,34 @@ def test_compute_stress_relaxation():
     assert np.allclose(relaxation[:, 1], expected)
 
 
+def test_compute_stress_relaxation_stretched_exponent():
+    """Stress relaxation should support stretched-exponential mode decay."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    t = np.array([0.0, 0.1, 1.0, 10.0])
+    stretched_exponent = 0.5
+
+    relaxation = HippsDimes.compute_stress_relaxation(
+        A,
+        t,
+        zeta=1.0,
+        stretched_exponent=stretched_exponent,
+    )
+
+    eigvals = np.linalg.eigvalsh(A)
+    lam_nz = eigvals[np.abs(eigvals) > 1e-12]
+    tau_p = -1.0 / lam_nz
+    expected = np.sum(
+        np.exp(-np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
+        axis=1,
+    ) / len(A)
+
+    assert relaxation.shape == (len(t), 2)
+    assert np.allclose(relaxation[:, 0], t)
+    assert relaxation[0, 1] == pytest.approx(len(lam_nz) / len(A))
+    assert np.all(np.diff(relaxation[:, 1]) <= 1e-12)
+    assert np.allclose(relaxation[:, 1], expected)
+
+
 def test_dynamics_pairwise_distances():
     """Dynamics should compute pairwise Euclidean distances correctly."""
     dyn = HippsDimes.Dynamics(3, k=1.0, model="rouse")

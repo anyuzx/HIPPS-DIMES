@@ -903,12 +903,17 @@ def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
 
 # ------------------------------
 # Stress relaxation G(t)
-def compute_stress_relaxation(a: np.ndarray, t: np.ndarray, zeta: float = 1.0):
+def compute_stress_relaxation(
+    a: np.ndarray,
+    t: np.ndarray,
+    zeta: float = 1.0,
+    stretched_exponent: float = 1.0,
+):
     """
     Compute dimensionless stress relaxation function G(t) in HIPPS-DIMES model.
     G(t) here is defined as the sum over internal modes normalized by chain length
 
-    G(t) = (1 / N) * sum_p exp(-t/tau_p)
+    G(t) = (1 / N) * sum_p exp(-(t/tau_p)^stretched_exponent)
 
     summation over modes p ignore the p=0 mode (center of mass mode)
     N is the chain length, i.e. len(a)
@@ -918,6 +923,8 @@ def compute_stress_relaxation(a: np.ndarray, t: np.ndarray, zeta: float = 1.0):
         raise ValueError("a must be a square matrix")
     if not isinstance(zeta, (int, float)) or zeta <= 0:
         raise ValueError("zeta must be a positive number")
+    if not isinstance(stretched_exponent, (int, float)) or stretched_exponent <= 0:
+        raise ValueError("stretched_exponent must be a positive number")
 
     t = np.asarray(t, dtype=float)
     if t.ndim != 1:
@@ -929,7 +936,10 @@ def compute_stress_relaxation(a: np.ndarray, t: np.ndarray, zeta: float = 1.0):
         raise ValueError("a must contain at least one non-zero internal mode")
 
     tau_p = -zeta / eigvalue[nonzero_modes]
-    G_t = np.sum(np.exp(-t[:, None] / tau_p[None, :]), axis=1) / len(a)
+    G_t = np.sum(
+        np.exp(-np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
+        axis=1,
+    ) / len(a)
     return np.column_stack((t, G_t))
 
 

@@ -23,6 +23,7 @@ import scipy.interpolate
 import scipy.optimize
 import scipy.spatial.distance
 import pandas as pd
+
 try:
     import rich_click as click
 except ImportError:
@@ -40,26 +41,32 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.console import Console
 from rich.table import Table
-#from tqdm.rich import trange, tqdm
+
+# from tqdm.rich import trange, tqdm
 from tqdm import trange, tqdm
 
 
 console = Console()
 
-#------------------------------------------------------------------#
+# ------------------------------------------------------------------#
 # GPU Support (CuPy)
-#------------------------------------------------------------------#
+# ------------------------------------------------------------------#
 # Check if CuPy is available for GPU acceleration
 _CUPY_AVAILABLE = False
 _CUPY_GPU_NAME = None
 try:
     import cupy as cp
+
     # Test if GPU is actually accessible
     cp.cuda.runtime.getDeviceCount()
     _CUPY_AVAILABLE = True
     try:
         gpu_props = cp.cuda.runtime.getDeviceProperties(0)
-        _CUPY_GPU_NAME = gpu_props["name"].decode() if isinstance(gpu_props["name"], bytes) else gpu_props["name"]
+        _CUPY_GPU_NAME = (
+            gpu_props["name"].decode()
+            if isinstance(gpu_props["name"], bytes)
+            else gpu_props["name"]
+        )
     except:
         _CUPY_GPU_NAME = "Unknown GPU"
 except ImportError:
@@ -70,7 +77,7 @@ except Exception:
 
 def is_gpu_available():
     """Check if GPU acceleration is available via CuPy.
-    
+
     Returns
     -------
     bool
@@ -81,7 +88,7 @@ def is_gpu_available():
 
 def get_gpu_name():
     """Get the name of the available GPU.
-    
+
     Returns
     -------
     str or None
@@ -93,7 +100,7 @@ def get_gpu_name():
 def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=False):
     """
     GPU version of a2dmap_theory using CuPy.
-    
+
     Parameters
     ----------
     A_gpu : cupy.ndarray
@@ -102,7 +109,7 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
         If True, replace negative temp values with zero
     return_eigenvalues : bool
         If True, also return the eigenvalues
-        
+
     Returns
     -------
     dmap : cupy.ndarray
@@ -112,28 +119,28 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
     """
     TOL = 10**8
     eigvalue, eigvector = cp.linalg.eigh(A_gpu)
-    
+
     temp = -1.0 / eigvalue
     temp = cp.where(cp.isinf(temp), 0.0, temp)
     temp = cp.where(temp >= TOL, 0.0, temp)
     temp = cp.where(temp <= -TOL, 0.0, temp)
-    
+
     if force_positive_definite:
         temp = cp.where(temp < 0.0, 0.0, temp)
-    
+
     # Avoid materializing a dense diagonal matrix:
     # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = cp.diag(Omega)
     sigma = cp.sqrt(Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega)
     dmap = 2.0 * cp.sqrt(2.0 / cp.pi) * sigma
-    
+
     if return_eigenvalues:
         return dmap, eigvalue
     return dmap
 
 
-#------------------------------------------------------------------#
+# ------------------------------------------------------------------#
 # Thread control for eigenvalue (eigh) and other BLAS/LAPACK operations
 def set_eigh_num_threads(n):
     """
@@ -142,13 +149,13 @@ def set_eigh_num_threads(n):
     Sets: OPENBLAS_NUM_THREADS, MKL_NUM_THREADS, OMP_NUM_THREADS, VECLIB_MAXIMUM_THREADS.
     """
     s = str(int(n))
-    os.environ['OPENBLAS_NUM_THREADS'] = s
-    os.environ['MKL_NUM_THREADS'] = s
-    os.environ['OMP_NUM_THREADS'] = s
-    os.environ['VECLIB_MAXIMUM_THREADS'] = s
+    os.environ["OPENBLAS_NUM_THREADS"] = s
+    os.environ["MKL_NUM_THREADS"] = s
+    os.environ["OMP_NUM_THREADS"] = s
+    os.environ["VECLIB_MAXIMUM_THREADS"] = s
 
 
-#------------------------------------------------------------------#
+# ------------------------------------------------------------------#
 # Helper functions
 def restore_matrix_with_nans(small, removed_idx, original_size):
     """Restore a reduced square matrix to its original size, filling removed loci with NaN.
@@ -205,8 +212,8 @@ def restore_matrix_with_nans(small, removed_idx, original_size):
 
 def compute_acf_general_theory(i, j, t, a, zeta=1.0):
     """
-    Numerically compute the autocorrelation function (ACF) for monomers i, j 
-    using the connectivity matrix `a`. Returns both the time-dependent 
+    Numerically compute the autocorrelation function (ACF) for monomers i, j
+    using the connectivity matrix `a`. Returns both the time-dependent
     ACF and the corresponding MSD for each time point.
 
     Parameters
@@ -232,14 +239,14 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
 
     # difference in eigenvector components for monomers i and j
     vpi_vpj = eigvector[i, :] - eigvector[j, :]
-    
+
     # normal_modes_square_mean = -(1 / eigenvalue) but filter out any inf
-    normal_modes_square_mean = - np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
-    
+    normal_modes_square_mean = -np.nan_to_num(eigvalue_inv, posinf=0.0, neginf=0.0)
+
     # Expand time dimension for broadcast
     t_reshaped = np.expand_dims(t, axis=-1)
     # Effective relaxation times
-    tau_p = - zeta / eigvalue
+    tau_p = -zeta / eigvalue
     decay_factor = np.exp(-t_reshaped / tau_p)
 
     # ACF(t)
@@ -256,9 +263,10 @@ def compute_acf_general_theory(i, j, t, a, zeta=1.0):
 
     return two_point_acf, two_point_msd
 
+
 def compute_m1_i(i, t, a, zeta=1.0):
     """
-    Compute the single-monomer mean-square displacement (MSD) for monomer i, 
+    Compute the single-monomer mean-square displacement (MSD) for monomer i,
     given the connectivity matrix `a`.
 
     Parameters
@@ -275,7 +283,7 @@ def compute_m1_i(i, t, a, zeta=1.0):
     Returns
     -------
     msd : np.ndarray
-        2D array. First column is time `t`, second column is the MSD for 
+        2D array. First column is time `t`, second column is the MSD for
         monomer i at those times.
     """
     t = np.asarray(t)
@@ -310,6 +318,7 @@ def compute_m1_i(i, t, a, zeta=1.0):
     # Combine time with MSD
     msd = np.column_stack((t, msd_data))
     return msd
+
 
 def compute_m1_all(a, t, zeta=1.0, tol=1e-12):
     """
@@ -346,60 +355,62 @@ def compute_m1_all(a, t, zeta=1.0, tol=1e-12):
         raise ValueError("zeta must be a positive number")
     if not isinstance(tol, (int, float)) or tol <= 0:
         raise ValueError("tol must be a positive number")
-    
+
     t = np.asarray(t)
     if t.ndim != 1:
         raise ValueError("t must be a 1D array")
-    
+
     n = a.shape[0]
-    
+
     # Eigendecomposition
     lam, V = np.linalg.eigh(a)  # lam: eigenvalues, V: eigenvectors
-    
+
     # Find zero (CM) mode
     p0 = np.argmin(np.abs(lam))
     if abs(lam[p0]) > tol:
-        raise ValueError("No near-zero eigenvalue found; CM mode missing or 'a' not Rouse-type")
-    
+        raise ValueError(
+            "No near-zero eigenvalue found; CM mode missing or 'a' not Rouse-type"
+        )
+
     # Get non-zero modes
     p_nz = np.arange(n) != p0  # boolean mask for non-zero modes
-    lam_nz = lam[p_nz]        # non-zero eigenvalues
-    V_nz = V[:, p_nz]         # non-zero eigenvectors
-    
+    lam_nz = lam[p_nz]  # non-zero eigenvalues
+    V_nz = V[:, p_nz]  # non-zero eigenvectors
+
     # Compute equilibrium variances for non-zero modes
     sigma2_nz = -1.0 / lam_nz  # shape (n-1,)
-    
+
     # Compute relaxation times
-    tau = np.full(n, np.inf)   # initialize all to infinity
-    tau[p_nz] = -zeta / lam_nz # set non-zero mode times
-    
+    tau = np.full(n, np.inf)  # initialize all to infinity
+    tau[p_nz] = -zeta / lam_nz  # set non-zero mode times
+
     # Compute decay factors for non-zero modes
-    t_col = t[:, None]         # shape (len(t), 1)
+    t_col = t[:, None]  # shape (len(t), 1)
     decay = np.exp(-t_col / tau[p_nz])  # shape (len(t), n-1)
-    
+
     # Compute squared eigenvector components
-    V2 = V_nz**2               # shape (n, n-1)
-    
+    V2 = V_nz**2  # shape (n, n-1)
+
     # Compute time-dependent part from non-zero modes
     res = 3.0 * np.sum(
-        V2[:, None, :] * decay[None, :, :] * sigma2_nz[None, None, :],
-        axis=2
+        V2[:, None, :] * decay[None, :, :] * sigma2_nz[None, None, :], axis=2
     )  # shape (n, len(t))
-    
+
     # Compute equilibrium variance for each monomer
     r2_eq = 3.0 * np.sum(V2 * sigma2_nz[None, :], axis=1)  # shape (n,)
-    
+
     # Compute center-of-mass diffusion
     D_cm = 1.0 / (zeta * n)
-    msd_cm = 6.0 * D_cm * t    # shape (len(t),)
-    
+    msd_cm = 6.0 * D_cm * t  # shape (len(t),)
+
     # Total MSD = CM diffusion + internal motion
     msd = msd_cm[None, :] + 2.0 * (r2_eq[:, None] - res)  # shape (n, len(t))
-    
+
     # Stack time with MSD
     msd_all = np.stack([np.tile(t, (n, 1)), msd], axis=-1)
-    
+
     return msd_all
+
 
 def compute_mcom_segment(i, j, t, a, zeta=1.0):
     """
@@ -422,7 +433,7 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
     Returns
     -------
     msd : np.ndarray
-        2D array. First column is time `t`, second column is the MSD for the 
+        2D array. First column is time `t`, second column is the MSD for the
         segment COM at those times.
     """
     # Input validation
@@ -439,14 +450,14 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
 
     # Eigen-decomposition of the connectivity matrix
     eigvalue, eigvector = np.linalg.eigh(a)
-    
+
     # Discard zero mode
     eigvalue = eigvalue[1:]
     eigvector = eigvector[:, 1:]
-    
+
     # Compute weights W_p = (1/(j-i+1)) * sum_{m=i}^j V_{p,m}
     segment_length = j - i + 1
-    W = np.sum(eigvector[i:j+1, :], axis=0) / segment_length
+    W = np.sum(eigvector[i : j + 1, :], axis=0) / segment_length
 
     # 1/eigvalue, filtering infinities (zero-mode)
     eigvalue_inv = 1.0 / eigvalue
@@ -457,7 +468,9 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
 
     # Relaxation times tau_p
     tau_p = -zeta / eigvalue
-    tau_p = np.nan_to_num(tau_p, posinf=0.0, neginf=0.0)  # Handle potential division by zero
+    tau_p = np.nan_to_num(
+        tau_p, posinf=0.0, neginf=0.0
+    )  # Handle potential division by zero
 
     # Decay factor for each mode at each time
     decay_factor = np.exp(-t_reshaped / tau_p)  # shape (len(t), n)
@@ -465,7 +478,9 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
     # Compute time-dependent part: 3 * sum(W^2 * decay_factor * normal_modes_square_mean, over modes)
     # Ensure proper broadcasting by reshaping W
     W_reshaped = W[None, :]  # shape (1, n)
-    res = 3.0 * np.sum((W_reshaped**2) * decay_factor * normal_modes_square_mean, axis=-1)
+    res = 3.0 * np.sum(
+        (W_reshaped**2) * decay_factor * normal_modes_square_mean, axis=-1
+    )
 
     # Equilibrium variance of COM: 3 * sum(W^2 * normal_modes_square_mean)
     r2_eq = 3.0 * np.sum((W**2) * normal_modes_square_mean)
@@ -476,6 +491,7 @@ def compute_mcom_segment(i, j, t, a, zeta=1.0):
     # Combine time with MSD into a 2D array
     msd = np.column_stack((t, msd_data))
     return msd
+
 
 def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     """
@@ -502,13 +518,13 @@ def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     n = K.shape[0]
     # 1. Diagonalize -K
     eigvals, eigvecs = np.linalg.eigh(-K)
-    lam = eigvals[1:]          # drop zero mode
-    vec = eigvecs[:, 1:]       # shape (n, m)
+    lam = eigvals[1:]  # drop zero mode
+    vec = eigvecs[:, 1:]  # shape (n, m)
 
     # 2. Precompute E_p(i,j) and W0 = E_p/λ_p
     diff = vec[:, None, :] - vec[None, :, :]  # shape (n,n,m)
-    E = diff * diff                           # (n,n,m)
-    W0 = E / lam[None, None, :]               # (n,n,m)
+    E = diff * diff  # (n,n,m)
+    W0 = E / lam[None, None, :]  # (n,n,m)
 
     # 3. Time grid
     t_min = 0.0
@@ -517,7 +533,7 @@ def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
     t_vals = np.logspace(np.log10(t_min + 1e-12), np.log10(t_max), num_t)
 
     # 4. Compute normalized G for each t
-    denom = np.sum(W0, axis=2)               # (n,n)
+    denom = np.sum(W0, axis=2)  # (n,n)
     G_norm = np.empty((n, n, num_t))
     for idx, t in enumerate(tqdm(t_vals)):
         num = np.sum(W0 * np.exp(-lam[None, None, :] * t), axis=2)
@@ -538,16 +554,19 @@ def compute_all_tau_1e(K, num_t=200, factor=10.0, tol=1e-8):
             if k == 0:
                 tau_mat[i, j] = t_vals[0]
             else:
-                t0, t1 = t_vals[k-1], t_vals[k]
-                G0, G1 = G_norm[i, j, k-1], G_norm[i, j, k]
+                t0, t1 = t_vals[k - 1], t_vals[k]
+                G0, G1 = G_norm[i, j, k - 1], G_norm[i, j, k]
                 # linear interpolation
-                tau_mat[i, j] = t0 + (1/np.e - G0) * (t1 - t0) / (G1 - G0 + tol)
-                
+                tau_mat[i, j] = t0 + (1 / np.e - G0) * (t1 - t0) / (G1 - G0 + tol)
+
     np.fill_diagonal(tau_mat, 0.0)
-    
+
     return tau_mat
 
-def compute_all_tau_1e_memory_efficient(K, num_t=200, factor=10.0, tol=1e-8, block_size=128):
+
+def compute_all_tau_1e_memory_efficient(
+    K, num_t=200, factor=10.0, tol=1e-8, block_size=128
+):
     """
     Memory-efficient computation of 1/e relaxation times tau_{ij} for all loci pairs.
 
@@ -589,8 +608,8 @@ def compute_all_tau_1e_memory_efficient(K, num_t=200, factor=10.0, tol=1e-8, blo
         return np.zeros((1, 1), dtype=float)
 
     eigvals, eigvecs = np.linalg.eigh(-K)
-    lam = eigvals[1:]      # drop zero mode
-    vec = eigvecs[:, 1:]   # shape (n, n-1)
+    lam = eigvals[1:]  # drop zero mode
+    vec = eigvecs[:, 1:]  # shape (n, n-1)
 
     if lam.size == 0:
         return np.zeros((n, n), dtype=float)
@@ -612,14 +631,14 @@ def compute_all_tau_1e_memory_efficient(K, num_t=200, factor=10.0, tol=1e-8, blo
 
     for i0 in range(0, n, block_size):
         i1 = min(i0 + block_size, n)
-        Vi = vec[i0:i1, :]                     # (bi, m)
+        Vi = vec[i0:i1, :]  # (bi, m)
         Vi_sq = Vi * Vi
         Vi_inv = Vi * inv_lam[None, :]
         s0_i = np.sum(Vi_sq * inv_lam[None, :], axis=1)  # (bi,)
 
         for j0 in range(i0, n, block_size):
             j1 = min(j0 + block_size, n)
-            Vj = vec[j0:j1, :]                 # (bj, m)
+            Vj = vec[j0:j1, :]  # (bj, m)
             Vj_sq = Vj * Vj
             s0_j = np.sum(Vj_sq * inv_lam[None, :], axis=1)  # (bj,)
 
@@ -673,6 +692,7 @@ def compute_all_tau_1e_memory_efficient(K, num_t=200, factor=10.0, tol=1e-8, blo
     np.fill_diagonal(tau_mat, 0.0)
     return tau_mat
 
+
 def compute_all_tau_integral(a):
     """
     Compute first‐moment (tau1) and second‐moment (tau2) relaxation times
@@ -686,7 +706,7 @@ def compute_all_tau_integral(a):
     Returns
     -------
     tau1 : (n×n) ndarray
-        First‐moment relaxation time for each pair (i,j): 
+        First‐moment relaxation time for each pair (i,j):
           tau1[i,j] = (∑_p E_p(i,j)/λ_p^2) / (∑_p E_p(i,j)/λ_p)
     tau2 : (n×n) ndarray
         Second‐moment relaxation time ratio for each pair (i,j):
@@ -696,22 +716,22 @@ def compute_all_tau_integral(a):
     eigvals, eigvecs = np.linalg.eigh(-a)  # eigvals ascending
 
     # 2) Discard the zero‐mode
-    lam = eigvals[1:]             # shape (n-1,)
-    vec = eigvecs[:, 1:]          # shape (n,   n-1)
+    lam = eigvals[1:]  # shape (n-1,)
+    vec = eigvecs[:, 1:]  # shape (n,   n-1)
 
     # 3) Precompute inverse powers
-    inv_lam  = 1.0 / lam           # 1/λ_p
-    inv_lam2 = inv_lam ** 2        # 1/λ_p^2
-    inv_lam3 = inv_lam ** 3        # 1/λ_p^3
+    inv_lam = 1.0 / lam  # 1/λ_p
+    inv_lam2 = inv_lam**2  # 1/λ_p^2
+    inv_lam3 = inv_lam**3  # 1/λ_p^3
 
     # 4) Compute squared differences for all (i,j,p)
     #    E[i,j,p] = (V[p,i] - V[p,j])^2
     #    vec shape -> (n, m), we want (n, n, m)
     diff = vec[:, None, :] - vec[None, :, :]  # shape (n, n, m)
-    E = diff * diff                          # squared differences
+    E = diff * diff  # squared differences
 
     # 5) Weighted sums via tensordot over the mode axis
-    sum0 = np.tensordot(E, inv_lam,  axes=([2], [0]))  # ∑ E/λ_p
+    sum0 = np.tensordot(E, inv_lam, axes=([2], [0]))  # ∑ E/λ_p
     sum1 = np.tensordot(E, inv_lam2, axes=([2], [0]))  # ∑ E/λ_p^2
     sum2 = np.tensordot(E, inv_lam3, axes=([2], [0]))  # ∑ E/λ_p^3
 
@@ -723,6 +743,7 @@ def compute_all_tau_integral(a):
     np.fill_diagonal(tau2, 0.0)
 
     return tau1, tau2
+
 
 def compute_all_tau_integral_memory_efficient(a, block_size=256, tol=1e-14):
     """
@@ -766,8 +787,8 @@ def compute_all_tau_integral_memory_efficient(a, block_size=256, tol=1e-14):
     eigvals, eigvecs = np.linalg.eigh(-a)
 
     # 2) Discard the zero mode
-    lam = eigvals[1:]       # shape (n-1,)
-    vec = eigvecs[:, 1:]    # shape (n, n-1)
+    lam = eigvals[1:]  # shape (n-1,)
+    vec = eigvecs[:, 1:]  # shape (n, n-1)
     if lam.size == 0:
         zero = np.zeros((n, n), dtype=float)
         return zero, zero
@@ -815,9 +836,13 @@ def compute_all_tau_integral_memory_efficient(a, block_size=256, tol=1e-14):
             sum1 = s1_i[:, None] + s1_j[None, :] - 2.0 * m1
             sum2 = s2_i[:, None] + s2_j[None, :] - 2.0 * m2
 
-            with np.errstate(divide='ignore', invalid='ignore'):
-                t1_blk = np.divide(sum1, sum0, out=np.zeros_like(sum1), where=np.abs(sum0) > tol)
-                t2_blk = np.divide(sum2, sum1, out=np.zeros_like(sum2), where=np.abs(sum1) > tol)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t1_blk = np.divide(
+                    sum1, sum0, out=np.zeros_like(sum1), where=np.abs(sum0) > tol
+                )
+                t2_blk = np.divide(
+                    sum2, sum1, out=np.zeros_like(sum2), where=np.abs(sum1) > tol
+                )
 
             tau1[i0:i1, j0:j1] = t1_blk
             tau2[i0:i1, j0:j1] = t2_blk
@@ -829,24 +854,26 @@ def compute_all_tau_integral_memory_efficient(a, block_size=256, tol=1e-14):
     np.fill_diagonal(tau2, 0.0)
     return tau1, tau2
 
+
 def compute_tau_ij_integral(a, i, j):
     # a is the connectivity matrix
-    eigval, eigvec = np.linalg.eigh(-a) # note negative sign
+    eigval, eigvec = np.linalg.eigh(-a)  # note negative sign
 
-    lam = eigval[1:] # ignore the p=0 mode
-    vec = eigvec[:, 1:] # remove the eigvector corresponding to p=0 mode
+    lam = eigval[1:]  # ignore the p=0 mode
+    vec = eigvec[:, 1:]  # remove the eigvector corresponding to p=0 mode
 
-    v_pi = vec[i, :] # V_{p,i}
-    v_pj = vec[j, :] # V_{p,j}
+    v_pi = vec[i, :]  # V_{p,i}
+    v_pj = vec[j, :]  # V_{p,j}
     E_ps = (v_pi - v_pj) ** 2
 
     sum0 = np.sum(E_ps / lam)
-    sum1 = np.sum(E_ps / lam ** 2.)
-    sum2 = np.sum(E_ps / lam ** 3.)
+    sum1 = np.sum(E_ps / lam**2.0)
+    sum2 = np.sum(E_ps / lam**3.0)
 
     tau1 = sum1 / sum0
     tau2 = sum2 / sum1
     return tau1, tau2
+
 
 def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
     """
@@ -875,15 +902,15 @@ def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
     """
     # 1) Diagonalize -K so eigenvalues are positive
     eigvals, eigvecs = np.linalg.eigh(-K)
-    
+
     # 2) Discard the zero (COM) mode
-    lam = eigvals[1:]                # shape (n-1,)
-    vec = eigvecs[:, 1:]             # shape (n,   n-1)
+    lam = eigvals[1:]  # shape (n-1,)
+    vec = eigvecs[:, 1:]  # shape (n,   n-1)
 
     # 3) Mode-difference squared for pair (i,j)
-    v_i = vec[i, :]                  # (n-1,)
-    v_j = vec[j, :]                  # (n-1,)
-    E_p = (v_i - v_j)**2             # (n-1,)
+    v_i = vec[i, :]  # (n-1,)
+    v_j = vec[j, :]  # (n-1,)
+    E_p = (v_i - v_j) ** 2  # (n-1,)
 
     # 4) Compute G2_ij(0)
     G2_0 = np.sum(E_p / lam)
@@ -898,8 +925,11 @@ def compute_tau_ij_1e(K, i, j, t_min=0.0, t_max=None, factor=10.0, tol=1e-8):
         t_max = factor * tau_slow
 
     # 7) Root‐find G_norm(t) = 1/e
-    tau_ij = scipy.optimize.brentq(lambda t: G_norm(t) - 1/np.e, t_min, t_max, xtol=tol)
+    tau_ij = scipy.optimize.brentq(
+        lambda t: G_norm(t) - 1 / np.e, t_min, t_max, xtol=tol
+    )
     return tau_ij
+
 
 # ------------------------------
 # Stress relaxation G(t)
@@ -937,18 +967,20 @@ def compute_stress_relaxation(
 
     tau_p = -zeta / eigvalue[nonzero_modes]
     G_t = np.sum(
-        np.exp(-np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
+        np.exp(-2.0 * np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
         axis=1,
     ) / len(a)
     return np.column_stack((t, G_t))
 
 
 # Modulus
-def compute_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+def compute_modulus(
+    a: np.ndarray, freq: np.ndarray, zeta: float = 1.0
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute the storage and loss moduli for a polymer system.
     The zero eigenvalue (corresponding to center-of-mass motion) is excluded.
-    
+
     Parameters
     ----------
     a : np.ndarray
@@ -957,14 +989,14 @@ def compute_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple
         Array of frequencies at which to compute the moduli
     zeta : float, optional
         Friction coefficient, by default 1.0
-        
+
     Returns
     -------
     tuple[np.ndarray, np.ndarray]
         Two 2D arrays containing:
         - First array: frequencies and storage modulus
         - Second array: frequencies and loss modulus
-        
+
     Raises
     ------
     ValueError
@@ -977,36 +1009,43 @@ def compute_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple
         raise ValueError("freq must be a 1D array")
     if not isinstance(zeta, (int, float)) or zeta <= 0:
         raise ValueError("zeta must be a positive number")
-        
+
     # Compute eigenvalues and eigenvectors
     eigvalue, eigvector = np.linalg.eigh(a)
-    
+
     # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
-    eigvalue = eigvalue[:-1]             # Shape: (n_modes,)
-    eigvector = eigvector[:, :-1]        # Shape: (n_monomers, n_modes)
-    
+    eigvalue = eigvalue[:-1]  # Shape: (n_modes,)
+    eigvector = eigvector[:, :-1]  # Shape: (n_monomers, n_modes)
+
     # Compute normal modes and relaxation times
     eigvalue_inv = 1.0 / eigvalue
     normal_modes_square_mean = -eigvalue_inv
     tau_p = -zeta / eigvalue
-    
+
     # Reshape frequency for broadcasting
     freq_reshaped = np.expand_dims(freq, axis=-1)
-    
-    # Compute moduli
-    storage_modulus = np.sum((freq_reshaped * tau_p) ** 2. / 
-                           (1 + (freq_reshaped * tau_p) ** 2), axis=-1)
-    loss_modulus = np.sum((freq_reshaped * tau_p) / 
-                         (1 + (freq_reshaped * tau_p) ** 2), axis=-1)
-    
-    return (np.column_stack((freq, storage_modulus)), 
-            np.column_stack((freq, loss_modulus)))
 
-def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Compute moduli
+    storage_modulus = np.sum(
+        (freq_reshaped * tau_p) ** 2.0 / (1 + (freq_reshaped * tau_p) ** 2), axis=-1
+    )
+    loss_modulus = np.sum(
+        (freq_reshaped * tau_p) / (1 + (freq_reshaped * tau_p) ** 2), axis=-1
+    )
+
+    return (
+        np.column_stack((freq, storage_modulus)),
+        np.column_stack((freq, loss_modulus)),
+    )
+
+
+def compute_monomer_modulus(
+    a: np.ndarray, freq: np.ndarray, zeta: float = 1.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute the storage and loss moduli for individual monomers in a polymer system.
     The zero eigenvalue (corresponding to center-of-mass motion) is excluded.
-    
+
     Parameters
     ----------
     a : np.ndarray
@@ -1015,7 +1054,7 @@ def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) 
         Array of frequencies at which to compute the moduli
     zeta : float, optional
         Friction coefficient, by default 1.0
-        
+
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray]
@@ -1023,7 +1062,7 @@ def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) 
         - First array: frequencies
         - Second array: storage modulus for each monomer (shape: n_freqs × n_monomers)
         - Third array: loss modulus for each monomer (shape: n_freqs × n_monomers)
-        
+
     Raises
     ------
     ValueError
@@ -1036,40 +1075,57 @@ def compute_monomer_modulus(a: np.ndarray, freq: np.ndarray, zeta: float = 1.0) 
         raise ValueError("freq must be a 1D array")
     if not isinstance(zeta, (int, float)) or zeta <= 0:
         raise ValueError("zeta must be a positive number")
-    
+
     # Compute eigenvalues and eigenvectors
     eigvals, eigvecs = np.linalg.eigh(a)
-    
+
     # Exclude the last eigenvalue (zero eigenvalue) and corresponding eigenvector
-    eigvals = eigvals[:-1]             # Shape: (n_modes,)
-    eigvecs = eigvecs[:, :-1]          # Shape: (n_monomers, n_modes)
-    
+    eigvals = eigvals[:-1]  # Shape: (n_modes,)
+    eigvecs = eigvecs[:, :-1]  # Shape: (n_monomers, n_modes)
+
     # Relaxation times τ_p
-    tau_p = -zeta / eigvals           # Shape: (n_modes,)
-    
+    tau_p = -zeta / eigvals  # Shape: (n_modes,)
+
     # Compute ωτ_p for all frequencies and modes
-    omega_tau_p = freq[:, np.newaxis] * tau_p[np.newaxis, :]  # Shape: (n_freqs, n_modes)
-    
+    omega_tau_p = (
+        freq[:, np.newaxis] * tau_p[np.newaxis, :]
+    )  # Shape: (n_freqs, n_modes)
+
     # Calculate f_p(ω) and g_p(ω)
-    f_p = (omega_tau_p ** 2) / (1 + omega_tau_p ** 2)         # For storage modulus
-    g_p = omega_tau_p / (1 + omega_tau_p ** 2)                # For loss modulus
-    
+    f_p = (omega_tau_p**2) / (1 + omega_tau_p**2)  # For storage modulus
+    g_p = omega_tau_p / (1 + omega_tau_p**2)  # For loss modulus
+
     # Square of eigenvector components (V_{pi}^2)
-    eigvecs_squared = eigvecs ** 2                            # Shape: (n_monomers, n_modes)
-    
+    eigvecs_squared = eigvecs**2  # Shape: (n_monomers, n_modes)
+
     # Compute G'_i(ω) and G''_i(ω) using Einstein summation
-    G_prime_i = np.einsum('mp,fp->fm', eigvecs_squared, f_p)        # Shape: (n_freqs, n_monomers)
-    G_double_prime_i = np.einsum('mp,fp->fm', eigvecs_squared, g_p) # Shape: (n_freqs, n_monomers)
-    
+    G_prime_i = np.einsum(
+        "mp,fp->fm", eigvecs_squared, f_p
+    )  # Shape: (n_freqs, n_monomers)
+    G_double_prime_i = np.einsum(
+        "mp,fp->fm", eigvecs_squared, g_p
+    )  # Shape: (n_freqs, n_monomers)
+
     return freq, G_prime_i, G_double_prime_i
+
 
 # ------------------------------
 
 
-def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, method='euler-maruyama', update_zero_modes=True, zero_mode_tol=1e-10):
+def Ornstein_Uhlenbeck_update(
+    x,
+    dt,
+    k,
+    zeta,
+    beta,
+    force_projection=0.0,
+    method="euler-maruyama",
+    update_zero_modes=True,
+    zero_mode_tol=1e-10,
+):
     """
     Update variable x for a Ornstein Uhlenbeck process
-    
+
     Parameters
     ----------
     x : Array for value of x of each degree of freedom
@@ -1081,19 +1137,19 @@ def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, meth
     method : 'euler-maruyama' or 'exact'
     update_zero_modes : if True, zero eigenvalue modes (COM) will diffuse; if False, COM is fixed
     zero_mode_tol : tolerance for identifying zero eigenvalue modes
-    
+
     Notes
     -----
     For OU process: dX = θ(μ - X)dt + σ dW
     where θ = k/ζ, σ = sqrt(2/(ζβ))
-    
+
     With external force, the long-term mean μ satisfies:
     θμ = force_projection/ζ
     => μ = force_projection/(ζθ) = force_projection/k
-    
+
     For Euler-Maruyama: directly use force_projection/ζ
     For exact method: calculate μ = force_projection/k (handling division by zero for zero modes)
-    
+
     For standard connectivity matrices (e.g. Rouse), eigenvalues are non-positive, so
     k = -eigvalue ≥ 0 and all modes are stable or zero; both methods are then appropriate.
     """
@@ -1101,63 +1157,73 @@ def Ornstein_Uhlenbeck_update(x, dt, k, zeta, beta, force_projection = 0.0, meth
         rand_noise = np.random.randn(*x.shape)
     else:
         rand_noise = np.random.randn()
-    
+
     theta = k[:, np.newaxis] / zeta
-    
+
     # Identify zero eigenvalue modes
     zero_modes_mask = np.abs(k) < zero_mode_tol
 
-    if method == 'euler-maruyama':
+    if method == "euler-maruyama":
         # Euler-Maruyama: dX = -θX dt + (force_projection/ζ) dt + σ dW
         # No need to divide by eigenvalue here
-        dx = - theta * x * dt + force_projection * dt / zeta + np.sqrt(2.0 * dt / (zeta * beta)) * rand_noise
+        dx = (
+            -theta * x * dt
+            + force_projection * dt / zeta
+            + np.sqrt(2.0 * dt / (zeta * beta)) * rand_noise
+        )
         x_new = x + dx
-    elif method == 'exact':
-        sigma = (2. / (zeta * beta)) ** .5
-        mu = np.exp(- theta * dt)
-        
+    elif method == "exact":
+        sigma = (2.0 / (zeta * beta)) ** 0.5
+        mu = np.exp(-theta * dt)
+
         # Calculate force drift term: μ(1 - e^(-θt))
         # For non-zero modes: μ = force_projection/k, so drift = (force_projection/k)(1 - e^(-θt))
         # For zero modes (k ≈ 0): drift reduces to (force_projection/ζ) * t
         if isinstance(force_projection, np.ndarray):
             force_drift = np.zeros_like(force_projection)
             non_zero_mask = ~zero_modes_mask
-            
+
             # Non-zero modes: (force_projection/k)(1 - e^(-θt))
-            force_drift[non_zero_mask] = (force_projection[non_zero_mask] / k[non_zero_mask, np.newaxis]) * (1 - mu[non_zero_mask])
-            
+            force_drift[non_zero_mask] = (
+                force_projection[non_zero_mask] / k[non_zero_mask, np.newaxis]
+            ) * (1 - mu[non_zero_mask])
+
             # Zero modes: (force_projection/ζ) * t
-            force_drift[zero_modes_mask] = (force_projection[zero_modes_mask] / zeta) * dt
+            force_drift[zero_modes_mask] = (
+                force_projection[zero_modes_mask] / zeta
+            ) * dt
         else:
             # force_projection is a scalar (0.0)
             force_drift = 0.0
-        
+
         # For non-zero modes: use standard Gillespie formula
-        noise_term = np.sqrt((sigma ** 2. / (2. * theta)) * (1. - mu ** 2.))
-        
+        noise_term = np.sqrt((sigma**2.0 / (2.0 * theta)) * (1.0 - mu**2.0))
+
         # For zero modes (theta ≈ 0): analytically reduce to sqrt(sigma^2 * t)
         # As theta -> 0: sqrt(sigma^2/(2*theta) * (1 - exp(-2*theta*t))) -> sqrt(sigma^2 * t)
         noise_term[zero_modes_mask] = sigma * np.sqrt(dt)
-        
+
         # Gillespie exact solution: X(t) = X(0)e^(-θt) + μ(1-e^(-θt)) + noise
         x_new = x * mu + force_drift + noise_term * rand_noise
-    
+
     # If user wants to fix COM (zero modes), set them to their initial values
     if not update_zero_modes:
         x_new[zero_modes_mask] = x[zero_modes_mask]
-    
+
     return x_new
+
 
 def construct_connectivity_matrix_rouse(n, k):
     """
     Function to construct a ideal chain connectivity matrix given the number of monomers and the spring constant
     """
-    A = np.diag(np.full(n-1, k), 1)
+    A = np.diag(np.full(n - 1, k), 1)
     A += A.T
-    A[np.diag_indices(n)] = -2*k
+    A[np.diag_indices(n)] = -2 * k
     A[0, 0] = -k
-    A[n-1, n-1] = -k
+    A[n - 1, n - 1] = -k
     return A
+
 
 def construct_connectivity_matrix_random(n, m, k):
     """
@@ -1184,6 +1250,7 @@ def construct_connectivity_matrix_random(n, m, k):
 
     return A
 
+
 def sigma2omega(sigma_mtx):
     """
     Return Omega matrix given the sigma matrix
@@ -1192,7 +1259,9 @@ def sigma2omega(sigma_mtx):
     sigma_mtx_square = np.power(sigma_mtx, 2.0)
     sigma_row_sum = np.sum(sigma_mtx_square, axis=1)
     sigma_sum = np.sum(sigma_mtx_square)
-    return (sigma_row_sum[:, np.newaxis] + sigma_row_sum - sigma_sum / n) / (2 * n) - sigma_mtx_square / 2.0
+    return (sigma_row_sum[:, np.newaxis] + sigma_row_sum - sigma_sum / n) / (
+        2 * n
+    ) - sigma_mtx_square / 2.0
 
 
 def dmap2a_direct(dmap):
@@ -1201,7 +1270,7 @@ def dmap2a_direct(dmap):
     """
     sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
     Omega = sigma2omega(sigma_mtx)
-    a_direct = nearestNSD(- scipy.linalg.pinvh(Omega), 0.0)
+    a_direct = nearestNSD(-scipy.linalg.pinvh(Omega), 0.0)
 
     return a_direct
 
@@ -1209,7 +1278,7 @@ def dmap2a_direct(dmap):
 def ddmap2a_direct(ddmap):
     sigma_mtx = np.sqrt(ddmap / 3.0)
     Omega = sigma2omega(sigma_mtx)
-    a_direct = nearestNSD(- scipy.linalg.pinvh(Omega), 0.0)
+    a_direct = nearestNSD(-scipy.linalg.pinvh(Omega), 0.0)
 
     return a_direct
 
@@ -1217,7 +1286,7 @@ def ddmap2a_direct(ddmap):
 def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     """
     Return mean distance map given the connectivity matrix A theoretically
-    
+
     Parameters
     ----------
     A : np.ndarray
@@ -1228,7 +1297,7 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
         If True, also return the eigenvalues of A. This is useful for avoiding
         redundant eigendecomposition when eigenvalues are needed elsewhere
         (e.g., for entropy computation). Default is False.
-    
+
     Returns
     -------
     dmap : np.ndarray
@@ -1247,7 +1316,7 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     temp[temp == np.inf] = 0.0
     temp[temp >= TOL] = 0.0
     temp[temp <= -TOL] = 0.0
-    #temp[np.abs(temp) <= 10**-7] = 0.0
+    # temp[np.abs(temp) <= 10**-7] = 0.0
 
     # replace all positive element to be zero
     if force_positive_definite:
@@ -1260,7 +1329,7 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     sigma = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
 
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma
-    
+
     if return_eigenvalues:
         return dmap, eigvalue
     return dmap
@@ -1269,20 +1338,20 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
 def a2dmap_theory_with_force_applied(A, force):
     """
     Return mean distance map given the connectivity matrix A with external force applied.
-    
+
     This function computes the theoretical mean distance map when the polymer is under
     constant external force. The equilibrium positions shift due to the force, and the
     distance map reflects both this shift and thermal fluctuations.
-    
+
     Theory:
     -------
     Without force: <(R_i - R_j)²> = Ω_ii + Ω_jj - 2Ω_ij, where Ω = -V * Λ^(-1) * V^T
-    
+
     With force: Equilibrium positions shift by R_eq = A^(-1) * F = V * (V^T * F) / Λ
     The mean squared distance becomes:
     <(R_i - R_j)²> = (R_eq,i - R_eq,j)² + (Ω_ii + Ω_jj - 2Ω_ij)
                    = equilibrium shift² + thermal fluctuations
-    
+
     Parameters
     ----------
     A : (N, N) array_like
@@ -1292,20 +1361,20 @@ def a2dmap_theory_with_force_applied(A, force):
         - 'loci': list of int, indices where force is applied
         - 'amplitude': float, magnitude of force
         - 'direction': (3,) array_like, direction of force (will be normalized)
-    
+
     Returns
     -------
     dmap : (N, N) ndarray
         Mean distance map with force applied. dmap[i,j] is the mean distance
         between beads i and j under the applied force.
-    
+
     Examples
     --------
     >>> A = construct_connectivity_matrix_rouse(10, 1.0)
     >>> force = {'loci': [0], 'amplitude': 5.0, 'direction': [1, 0, 0]}
     >>> dmap = a2dmap_theory_with_force_applied(A, force)
     >>> print(dmap.shape)  # (10, 10)
-    
+
     Notes
     -----
     - For zero eigenvalues (COM mode), we set 1/λ = 0
@@ -1315,93 +1384,95 @@ def a2dmap_theory_with_force_applied(A, force):
       where σ² is the mean squared distance
     """
     TOL = 1e8
-    
+
     # Validate force input
     if not isinstance(force, dict):
-        raise TypeError("force must be a dictionary with keys: 'loci', 'amplitude', 'direction'")
-    required_keys = ['loci', 'amplitude', 'direction']
+        raise TypeError(
+            "force must be a dictionary with keys: 'loci', 'amplitude', 'direction'"
+        )
+    required_keys = ["loci", "amplitude", "direction"]
     for key in required_keys:
         if key not in force:
             raise ValueError(f"force dictionary must contain key: {key}")
-    
+
     # Extract force parameters
-    force_loci = force['loci']
-    force_amplitude = force['amplitude']
-    force_direction = np.array(force['direction'])
-    
+    force_loci = force["loci"]
+    force_amplitude = force["amplitude"]
+    force_direction = np.array(force["direction"])
+
     # Normalize force direction
     force_direction = force_direction / np.linalg.norm(force_direction)
-    
+
     # Create force vector B in real space
     N = A.shape[0]
     B = np.zeros((N, 3))
     for locus in force_loci:
         if locus < 0 or locus >= N:
-            raise ValueError(f"force locus {locus} is out of range [0, {N-1}]")
+            raise ValueError(f"force locus {locus} is out of range [0, {N - 1}]")
         B[locus] = force_amplitude * force_direction
-    
+
     # Eigendecomposition
     eigvalue, eigvector = np.linalg.eigh(A)
-    
+
     # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
     temp = -1.0 / eigvalue
-    
+
     # Handle infinities and large values (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0
     temp[temp == np.inf] = 0.0
     temp[np.abs(temp) >= TOL] = 0.0
-    
+
     # Compute Ω matrix for thermal fluctuations: Ω = V * diag(-1/λ) * V^T
     # Avoid materializing a dense diagonal matrix:
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = np.diag(Omega)
-    
+
     # Thermal fluctuation contribution (variance in each dimension)
     # σ² (per dimension) = Ω_ii + Ω_jj - 2Ω_ij
     # This represents <(R_i - R_j)²> / 3 for thermal fluctuations
     sigma_thermal = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
-    
+
     # Compute equilibrium displacement due to force
     # R_eq = A^(-1) * B = V * (V^T * B) / λ
     # For zero eigenvalues, set 1/λ = 0
     temp_force = 1.0 / eigvalue
     temp_force[np.abs(temp_force) >= TOL] = 0.0
     temp_force[np.isinf(temp_force)] = 0.0
-    
+
     # Project force to eigenmode space: V^T * B
     force_projection = eigvector.T @ B  # Shape: (n_modes, 3)
-    
+
     # Compute equilibrium positions: R_eq = V * (V^T * B / λ)
     X_eq = force_projection * temp_force[:, np.newaxis]  # Shape: (n_modes, 3)
     R_eq = eigvector @ X_eq  # Shape: (N, 3)
-    
+
     # For the distance calculation, we need to consider that:
     # - Thermal fluctuations contribute equally in all 3 dimensions: 3*σ²_thermal
     # - Equilibrium shift is a fixed vector displacement
-    # 
+    #
     # The mean distance for a 3D Gaussian with mean μ and isotropic variance σ² in each dim:
     # If there's also a displacement d, the distribution becomes non-central chi
     # For simplicity, we compute the squared distance from equilibrium positions
     # and add thermal fluctuation variance
-    
+
     # Compute squared equilibrium separations for all pairs.
     delta_R_eq_sq = scipy.spatial.distance.cdist(
-        R_eq, R_eq, metric='sqeuclidean'
+        R_eq, R_eq, metric="sqeuclidean"
     )  # Shape: (N, N)
-    
+
     # Combined variance: thermal variance (3*σ²) + equilibrium shift²
     # σ²_total (in each dimension) remains sigma_thermal²
     # But equilibrium shift adds a constant offset to the distance
-    
+
     # For mean distance with both effects:
     # We use: <|r|> = 2*sqrt(2/π) * sqrt(σ²_thermal + (Δr_eq/sqrt(3))²)
     # where the equilibrium shift is distributed across 3 dimensions
-    
+
     sigma_combined = np.sqrt(sigma_thermal**2 + delta_R_eq_sq / 3.0)
-    
+
     # Mean distance: <d> = 2*sqrt(2/π) * σ_combined
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma_combined
-    
+
     return dmap
 
 
@@ -1410,9 +1481,13 @@ def dmap2cmap(dmap, rc):
     Return contact map given the mean distance map and the contact threshold
     """
     sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
-    cmap = scipy.special.erf(rc/(np.sqrt(2) * sigma_mtx)) - \
-        np.sqrt(2.0/np.pi) * np.exp(-0.5 * rc**2.0 /
-                                    np.power(sigma_mtx, 2.0)) * rc / sigma_mtx
+    cmap = (
+        scipy.special.erf(rc / (np.sqrt(2) * sigma_mtx))
+        - np.sqrt(2.0 / np.pi)
+        * np.exp(-0.5 * rc**2.0 / np.power(sigma_mtx, 2.0))
+        * rc
+        / sigma_mtx
+    )
     np.fill_diagonal(cmap, 1.0)
     return cmap
 
@@ -1470,7 +1545,7 @@ def optimal_rotate(P, Q, return_rotation=False, allow_reflection=False):
             V[:, -1] = -V[:, -1]
 
     # calculate the final rotation matrix U
-    #U = V * Wt
+    # U = V * Wt
     U = np.dot(V, Wt)
 
     if not return_rotation:
@@ -1480,23 +1555,24 @@ def optimal_rotate(P, Q, return_rotation=False, allow_reflection=False):
 
 
 def write2xyz(fout, xyzs, alignment=True, allow_reflection=True):
-    natoms = xyzs.shape[1] # number of atoms
+    natoms = xyzs.shape[1]  # number of atoms
     xyz0 = xyzs[0]
 
-    with open(fout, 'w') as f:
+    with open(fout, "w") as f:
         for snapshot in xyzs:
             if alignment:
                 xyz = optimal_rotate(snapshot, xyz0, allow_reflection=allow_reflection)
             else:
                 xyz = snapshot
-            f.write('{}\n\n'.format(natoms))
+            f.write("{}\n\n".format(natoms))
             for idx, item in enumerate(xyz):
-                f.write('{} {} {} {}\n'.format('C', item[0], item[1], item[2]))
+                f.write("{} {} {} {}\n".format("C", item[0], item[1], item[2]))
 
-def write2xyz_traj(fout, traj, recenter = False):
+
+def write2xyz_traj(fout, traj, recenter=False):
     natoms = traj.shape[1]
 
-    with open(fout, 'w') as f:
+    with open(fout, "w") as f:
         for snapshot in traj:
             if recenter:
                 snapshot = snapshot - snapshot.mean(axis=0)
@@ -1511,7 +1587,7 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """
     TOL = 10**8.0
     eigvalue, eigvector = np.linalg.eigh(A)
-    temp = 1.0/eigvalue[:, np.newaxis]
+    temp = 1.0 / eigvalue[:, np.newaxis]
 
     # replace close zero eigvenvalue with zero
     temp[temp == -np.inf] = 0.0
@@ -1526,24 +1602,24 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     # get positions
     positions = []
     for _ in range(ensemble):
-        position = eigvector @ (np.sqrt(-temp) *
-                                np.random.randn(len(eigvalue), 3))
+        position = eigvector @ (np.sqrt(-temp) * np.random.randn(len(eigvalue), 3))
         positions.append(position)
 
     return np.array(positions)
 
+
 def a2xyz_sample_with_force_applied(A, force, ensemble=1):
     """
     Generate ensemble of 3D structures with external force applied.
-    
+
     This function generates equilibrium structures under constant external force.
     The equilibrium position is determined by: R_eq = A^(-1) * F
     where A is the connectivity matrix and F is the force vector.
-    
+
     In eigenmode space: X_eq = (V^T * F) / λ, where λ are eigenvalues.
     For zero eigenvalues (COM mode), we set 1/λ = 0, which means the COM
     drifts freely and we sample it from the thermal distribution.
-    
+
     Parameters
     ----------
     A : (N, N) array_like
@@ -1555,19 +1631,19 @@ def a2xyz_sample_with_force_applied(A, force, ensemble=1):
         - 'direction': (3,) array_like, direction of force (will be normalized)
     ensemble : int, optional
         Number of independent samples to generate. Default is 1.
-    
+
     Returns
     -------
     positions : (ensemble, N, 3) ndarray
         Sampled bead coordinates with force applied
-    
+
     Examples
     --------
     >>> A = construct_connectivity_matrix_rouse(10)
     >>> force = {'loci': [0], 'amplitude': 1.0, 'direction': [1, 0, 0]}
     >>> positions = a2xyz_sample_with_force_applied(A, force, ensemble=100)
     >>> print(positions.shape)  # (100, 10, 3)
-    
+
     Notes
     -----
     - The connectivity matrix A should have exactly one zero eigenvalue (COM mode)
@@ -1577,70 +1653,71 @@ def a2xyz_sample_with_force_applied(A, force, ensemble=1):
     - Thermal fluctuations around equilibrium are sampled using Gaussian noise
     """
     TOL = 1e8
-    
+
     # Validate force input
     if not isinstance(force, dict):
-        raise TypeError("force must be a dictionary with keys: 'loci', 'amplitude', 'direction'")
-    required_keys = ['loci', 'amplitude', 'direction']
+        raise TypeError(
+            "force must be a dictionary with keys: 'loci', 'amplitude', 'direction'"
+        )
+    required_keys = ["loci", "amplitude", "direction"]
     for key in required_keys:
         if key not in force:
             raise ValueError(f"force dictionary must contain key: {key}")
-    
+
     # Extract force parameters
-    force_loci = force['loci']
-    force_amplitude = force['amplitude']
-    force_direction = np.array(force['direction'])
-    
+    force_loci = force["loci"]
+    force_amplitude = force["amplitude"]
+    force_direction = np.array(force["direction"])
+
     # Normalize force direction
     force_direction = force_direction / np.linalg.norm(force_direction)
-    
+
     # Create force vector B in real space
     N = A.shape[0]
     B = np.zeros((N, 3))
     for locus in force_loci:
         if locus < 0 or locus >= N:
-            raise ValueError(f"force locus {locus} is out of range [0, {N-1}]")
+            raise ValueError(f"force locus {locus} is out of range [0, {N - 1}]")
         B[locus] = force_amplitude * force_direction
-    
+
     # Eigendecomposition
     eigvalue, eigvector = np.linalg.eigh(A)
-    
+
     # Compute 1/eigenvalue, handling zero eigenvalues
     temp = 1.0 / eigvalue[:, np.newaxis]
-    
+
     # Replace infinities and large values with zero (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0
     temp[temp == np.inf] = 0.0
     temp[np.abs(temp) >= TOL] = 0.0
-    
+
     # Project force into eigenmode space: V^T * B
     force_projection = eigvector.T @ B  # Shape: (n_modes, 3)
-    
+
     # Compute equilibrium eigenmode values: X_eq = (V^T * B) / λ
     # For zero eigenvalues, this will be zero (COM drifts freely)
     X_eq = force_projection * temp  # Broadcasting: (n_modes, 3) * (n_modes, 1)
-    
+
     # Sample thermal fluctuations around equilibrium
     positions = []
     for _ in range(ensemble):
         # Random thermal fluctuations in eigenmode space
         # The variance is proportional to sqrt(-1/λ) for each mode
         thermal_fluctuations = np.sqrt(-temp) * np.random.randn(len(eigvalue), 3)
-        
+
         # Total eigenmode values = equilibrium + fluctuations
         X_total = X_eq + thermal_fluctuations
-        
+
         # Transform back to real space: R = V * X
         position = eigvector @ X_total
         positions.append(position)
-    
+
     return np.array(positions)
 
-def a2xyz_sample_fixed_end(A,
-                           xyz_start,
-                           xyz_end,
-                           ensemble=1,
-                           force_positive_definite=False):
+
+def a2xyz_sample_fixed_end(
+    A, xyz_start, xyz_end, ensemble=1, force_positive_definite=False
+):
     """
     Generate `ensemble` random polymer configurations from connectivity matrix A,
     *with* bead 0 fixed at xyz_start and bead n−1 fixed at xyz_end.
@@ -1665,8 +1742,8 @@ def a2xyz_sample_fixed_end(A,
     # 1) Make a copy of A and add a large negative diag‐entry at the two ends
     A_copy = np.array(A, dtype=float)
     w = -1e5
-    A_copy[0,   0]   += w
-    A_copy[-1, -1]   += w
+    A_copy[0, 0] += w
+    A_copy[-1, -1] += w
 
     # 2) Eigendecompose
     evals, evecs = np.linalg.eigh(A_copy)
@@ -1681,12 +1758,12 @@ def a2xyz_sample_fixed_end(A,
 
     # 4) Compute end‐to‐end distance and linear "b" term
     xyz_start = np.array(xyz_start, float)
-    xyz_end   = np.array(xyz_end,   float)
+    xyz_end = np.array(xyz_end, float)
     L = np.linalg.norm(xyz_end - xyz_start)
 
     n = len(evals)
     b = np.zeros((n, 3))
-    b[-1, 2] = -w * L   # ensures the last bead sits at z=L in the internal frame
+    b[-1, 2] = -w * L  # ensures the last bead sits at z=L in the internal frame
 
     # 5) Sample `ensemble` positions
     out = []
@@ -1694,15 +1771,15 @@ def a2xyz_sample_fixed_end(A,
         # random + shift in eigenspace
         coeff = np.sqrt(-temp) * np.random.randn(n, 3)
         shift = (evecs.T @ b) * (-1.0 / evals)[:, None]
-        xyz   = evecs @ (coeff + shift)
+        xyz = evecs @ (coeff + shift)
 
         # 6) Hard‐set the two ends along the z‐axis. This is not strictly necessary if w is large enough.
-        xyz[0]    = [0.0, 0.0, 0.0]
-        xyz[-1]   = [0.0, 0.0, L]
+        xyz[0] = [0.0, 0.0, 0.0]
+        xyz[-1] = [0.0, 0.0, L]
 
         # 7) xyz now is oriented in such way that the first monomer is at [0,0,0] and last is at [0,0,L]
         #    Hence we need to rotate+translate into the user‐specified endpoints
-        ref1 = np.array([[0,0,0], [0,0,L]])
+        ref1 = np.array([[0, 0, 0], [0, 0, L]])
         ref2 = np.vstack((xyz_start, xyz_end))
         _, R = optimal_rotate(ref1, ref2, return_rotation=True)
 
@@ -1714,6 +1791,7 @@ def a2xyz_sample_fixed_end(A,
     out = np.array(out)
 
     return out
+
 
 def interpolate_missing(matrix):
     matrix_copy = np.copy(matrix)
@@ -1728,7 +1806,8 @@ def interpolate_missing(matrix):
     newarr = matrix_copy[~matrix_copy.mask]
 
     GD1 = scipy.interpolate.griddata(
-        (x1, y1), newarr.ravel(), (xx, yy), method='nearest')
+        (x1, y1), newarr.ravel(), (xx, yy), method="nearest"
+    )
     return GD1
 
 
@@ -1737,27 +1816,35 @@ def objective_func(rc, A_mtx, cmap_exp):
     y = cmap_exp / np.nanmax(cmap_exp)
     logx = interpolate_missing(np.log(x))
     logy = interpolate_missing(np.log(y))
-    res = np.power(logx[np.triu_indices_from(logx, k=1)] -
-                   logy[np.triu_indices_from(logy, k=1)], 2.).mean()**0.5
+    res = (
+        np.power(
+            logx[np.triu_indices_from(logx, k=1)]
+            - logy[np.triu_indices_from(logy, k=1)],
+            2.0,
+        ).mean()
+        ** 0.5
+    )
     return res
 
+
 # FUNCTION TO CONVERT CMAP TO DMAP
-def cmap2dmap_core(cmap_exp, rc, alpha, not_normalize, norm_max=1.0, mode='log'):
+def cmap2dmap_core(cmap_exp, rc, alpha, not_normalize, norm_max=1.0, mode="log"):
     # rc is the prefactor
     # norm_max is the maximum contact probability
-    if mode == 'raw':
+    if mode == "raw":
         if not_normalize:
             log10_pmap = np.log10(cmap_exp)
         else:
-            log10_pmap = np.log10(
-                cmap_exp) + np.log10(norm_max) - np.log10(np.nanmax(cmap_exp))
-    elif mode == 'log':
+            log10_pmap = (
+                np.log10(cmap_exp) + np.log10(norm_max) - np.log10(np.nanmax(cmap_exp))
+            )
+    elif mode == "log":
         if not_normalize:
             log10_pmap = np.copy(cmap_exp)
         else:
             log10_pmap = cmap_exp + np.log10(norm_max) - np.nanmax(cmap_exp)
 
-    return rc * 10 ** (-1.0/alpha * log10_pmap)
+    return rc * 10 ** (-1.0 / alpha * log10_pmap)
 
 
 def cmap2dmap(cmap, alpha, not_normalize):
@@ -1765,7 +1852,7 @@ def cmap2dmap(cmap, alpha, not_normalize):
     # we take log on contact map
     # and then interpolate the missing data. Any zero contact pair will be interpolated
     cmap_log = interpolate_missing(np.log10(cmap))
-    cmap_log = np.array((cmap_log + cmap_log.T) / 2.)
+    cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # lastly, convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
     return dmap
@@ -1776,7 +1863,7 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     # we take log on contact map
     # unlike cmap2dmap(), this function does not interpolate the missing data. Just leave the missing data as is
     cmap_log = np.log10(cmap)
-    cmap_log = np.array((cmap_log + cmap_log.T) / 2.)
+    cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
     return dmap
@@ -1791,16 +1878,19 @@ def nearestNSD(X, delta):
 def ddmap2cov(ddmap):
     # convert a squared distance map to covariance matrix
     n = ddmap.shape[0]
-    omega2_mtx = ddmap / 3.
+    omega2_mtx = ddmap / 3.0
     omega2_row_sum = np.sum(omega2_mtx, axis=1)
     omega2_sum = np.sum(omega2_mtx)
-    return (omega2_row_sum[:, np.newaxis] + omega2_row_sum - omega2_sum / n) / (2 * n) - omega2_mtx / 2.0
+    return (omega2_row_sum[:, np.newaxis] + omega2_row_sum - omega2_sum / n) / (
+        2 * n
+    ) - omega2_mtx / 2.0
 
 
 def dmap2cov(dmap):
     # convert a distance map to covariance matrix
-    ddmap = (3. * np.pi / 8.) * np.power(dmap, 2.)
+    ddmap = (3.0 * np.pi / 8.0) * np.power(dmap, 2.0)
     return ddmap2cov(ddmap)
+
 
 def checkEMD(ddmap, neg_tol=1e-10):
     # check whether a squared distance map is a valid EDM (avg of EDMs is EDM in some dim; tiny neg evals = numerical noise)
@@ -1810,11 +1900,14 @@ def checkEMD(ddmap, neg_tol=1e-10):
     if min_eig < -0.1:  # unacceptably non-PSD
         return False
     if min_eig < -neg_tol:  # meaningfully negative but within tolerance → warn
-        print("[red]Warning: The smallest eigenvalue of the covariance matrix is negative. \
+        print(
+            "[red]Warning: The smallest eigenvalue of the covariance matrix is negative. \
 Direct inversion method [italic]may[/italic] not work. Check the final results. \
-If the results are not good enough, please try iterative scaling or gradient descent method.")
+If the results are not good enough, please try iterative scaling or gradient descent method."
+        )
     return True
-    
+
+
 def subnetwork_schur(A, keep, tol=1e-12):
     """
     Compute the marginal (Schur‐complement) connectivity matrix on a subset of nodes.
@@ -1849,7 +1942,7 @@ def subnetwork_schur(A, keep, tol=1e-12):
 
     # invert (or pseudo-invert) A_CC
     # if it's near-singular, pinv is safer
-    if np.linalg.cond(A_CC) > 1/tol:
+    if np.linalg.cond(A_CC) > 1 / tol:
         A_CC_inv = np.linalg.pinv(A_CC, rcond=tol)
     else:
         A_CC_inv = np.linalg.inv(A_CC)
@@ -1858,7 +1951,10 @@ def subnetwork_schur(A, keep, tol=1e-12):
     A_eff = A_SS - A_SC @ A_CC_inv @ A_CS
     return A_eff
 
-def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilon=1e-12, return_scales=False):
+
+def neighbor_balance_symmetric(
+    C, *, not_normalize=False, circular=False, epsilon=1e-12, return_scales=False
+):
     """
     Symmetric neighbor balancing:
 
@@ -1894,7 +1990,7 @@ def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilo
     idx = np.arange(n)
 
     if circular:
-        left_idx  = (idx - 1) % n
+        left_idx = (idx - 1) % n
         right_idx = (idx + 1) % n
         s = 0.5 * (X[idx, left_idx] + X[idx, right_idx])
     else:
@@ -1904,15 +2000,15 @@ def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilo
             s[1:-1] = 0.5 * (np.diag(X, k=-1)[:-1] + np.diag(X, k=1)[1:])
         elif n == 2:
             # degenerate case: each has only one neighbor
-            s[:] = np.array([X[0,1], X[1,0]])
+            s[:] = np.array([X[0, 1], X[1, 0]])
         else:
             # n == 1: no neighbors; avoid divide by zero by using epsilon
             s[:] = epsilon
 
         # edges: use the single available neighbor
         if n >= 2:
-            s[0]   = X[0, 1]
-            s[-1]  = X[-1, -2]
+            s[0] = X[0, 1]
+            s[-1] = X[-1, -2]
 
     # Guard against zeros/negatives
     s = np.maximum(s, epsilon)
@@ -1928,20 +2024,21 @@ def neighbor_balance_symmetric(C, *, not_normalize=False, circular=False, epsilo
         return C_bal, s
     return C_bal
 
-#------------------------------------------------------------------#
+
+# ------------------------------------------------------------------#
 
 
 def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
     """Compute the entropy of the maximum entropy model from connectivity matrix A.
-    
+
     The model is a multivariate Gaussian distribution. The entropy is:
         H = constant + log(det(K+))
     where K = -A is the positive semi-definite matrix, and K+ is its pseudo-inverse.
-    
+
     For numerical stability, we compute:
         log(det(K+)) = sum_i log(1/λ_i) = -sum_i log(λ_i)
     for all non-zero eigenvalues λ_i of K.
-    
+
     Parameters
     ----------
     A : (n,n) array
@@ -1950,34 +2047,34 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
         Tolerance for identifying zero eigenvalues.
     eigvals : array_like, optional
         Precomputed eigenvalues of K = -A. If provided, avoids recomputing eigenvalues.
-    
+
     Returns
     -------
     entropy : float
         log(det(K+)) where K = -A and K+ is pseudo-inverse.
     """
     K = -A
-    
+
     if eigvals is not None:
         eigvals = np.asarray(eigvals)
     else:
         eigvals = np.linalg.eigvalsh(K)
-    
+
     positive_mask = eigvals > zero_tol
     positive_eigvals = eigvals[positive_mask]
-    
+
     if len(positive_eigvals) == 0:
         max_eigval = np.max(eigvals) if len(eigvals) > 0 else 0.0
         if max_eigval < zero_tol:
             return -np.inf
         return np.nan
-    
-    with np.errstate(divide='ignore', invalid='ignore'):
+
+    with np.errstate(divide="ignore", invalid="ignore"):
         log_terms = -np.log(positive_eigvals)
-    
+
     if np.any(~np.isfinite(log_terms)):
         return np.nan
-    
+
     entropy = np.sum(log_terms)
     if not np.isfinite(entropy):
         return np.nan
@@ -2032,12 +2129,13 @@ def sample_conditioned_pair_vector(r_eq, K, pair, b):
     g = _conditioned_pair_gain(K, pair)
 
     # current pair vector: r_ij = (delta^T r_eq)^T = r_eq[i] - r_eq[j]
-    r_ij_eq = r_eq[i] - r_eq[j]   # shape (3,)
+    r_ij_eq = r_eq[i] - r_eq[j]  # shape (3,)
 
     # r_cond = r_eq + g (b - r_ij_eq)^T
     r_cond = r_eq + g[:, None] * (b - r_ij_eq)[None, :]
 
     return r_cond
+
 
 def random_unit_vector():
     v = np.random.normal(size=3)
@@ -2084,9 +2182,7 @@ def sample_conditioned_pair_distance_batch(X_eq, K, pair, b_scalar):
     """
     X_eq = np.asarray(X_eq)
     if X_eq.ndim != 3 or X_eq.shape[2] != 3:
-        raise ValueError(
-            f"X_eq must have shape (ensemble, N, 3), got {X_eq.shape}"
-        )
+        raise ValueError(f"X_eq must have shape (ensemble, N, 3), got {X_eq.shape}")
 
     i, j = pair
     g = _conditioned_pair_gain(K, pair)

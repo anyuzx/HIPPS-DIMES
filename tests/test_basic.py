@@ -75,7 +75,7 @@ def test_compute_stress_relaxation():
     eigvals = np.linalg.eigvalsh(A)
     lam_nz = eigvals[np.abs(eigvals) > 1e-12]
     expected = np.sum(
-        np.exp(-np.asarray(t)[:, None] / (-1.0 / lam_nz)[None, :]),
+        np.exp(-2.0 * np.asarray(t)[:, None] / (-1.0 / lam_nz)[None, :]),
         axis=1,
     ) / len(A)
 
@@ -103,7 +103,7 @@ def test_compute_stress_relaxation_stretched_exponent():
     lam_nz = eigvals[np.abs(eigvals) > 1e-12]
     tau_p = -1.0 / lam_nz
     expected = np.sum(
-        np.exp(-np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
+        np.exp(-2.0 * np.power(t[:, None] / tau_p[None, :], stretched_exponent)),
         axis=1,
     ) / len(A)
 

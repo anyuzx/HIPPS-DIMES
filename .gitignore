@@ -130,3 +130,5 @@ dmypy.json
 .DS_Store
 .qodo
 .codex
+
+doc/source/schematic.ai

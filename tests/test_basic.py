@@ -5,6 +5,7 @@ import pytest
 
 # Import the main module
 import HippsDimes
+import hipps_dimes
 
 
 def test_import():
@@ -68,6 +69,41 @@ def test_compute_modulus():
     # At omega * tau_p / 2 = 1, one unnormalized Maxwell mode has G' = G'' = 1/2.
     assert storage_mod[0, 1] == pytest.approx(0.5)
     assert loss_mod[0, 1] == pytest.approx(0.5)
+
+
+def test_compute_monomer_mechanical_susceptibility():
+    """Monomer susceptibility should use tau_p directly with a 1/zeta prefactor."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)
+    zeta = 2.0
+    internal_eigenvalue = np.linalg.eigvalsh(A)[0]
+    tau_p = -zeta / internal_eigenvalue
+    freq = np.array([0.0, 1.0 / tau_p, 2.0 / tau_p])
+
+    freq_out, chi_prime, chi_double_prime = (
+        HippsDimes.compute_monomer_mechanical_susceptibility(A, freq, zeta)
+    )
+
+    mode_weight = 0.5
+    denominator = 1.0 + (freq * tau_p) ** 2
+    expected_prime = mode_weight * tau_p / (zeta * denominator)
+    expected_double_prime = (
+        mode_weight * freq * tau_p**2 / (zeta * denominator)
+    )
+    expected_prime = np.column_stack((expected_prime, expected_prime))
+    expected_double_prime = np.column_stack(
+        (expected_double_prime, expected_double_prime)
+    )
+
+    assert np.allclose(freq_out, freq)
+    assert np.allclose(chi_prime, expected_prime)
+    assert np.allclose(chi_double_prime, expected_double_prime)
+    assert chi_prime[1, 0] == pytest.approx(chi_double_prime[1, 0])
+    assert (
+        hipps_dimes.compute_monomer_mechanical_susceptibility
+        is HippsDimes.compute_monomer_mechanical_susceptibility
+    )
+    assert not hasattr(HippsDimes, "compute_monomer_modulus")
+    assert not hasattr(hipps_dimes, "compute_monomer_modulus")
 
 
 def test_compute_stress_relaxation():

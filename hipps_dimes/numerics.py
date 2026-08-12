@@ -1041,29 +1041,40 @@ def compute_modulus(
     )
 
 
-def compute_monomer_modulus(
+def compute_monomer_mechanical_susceptibility(
     a: np.ndarray, freq: np.ndarray, zeta: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Compute the storage and loss moduli for individual monomers in a polymer system.
+    Compute the complex mechanical susceptibility of each monomer.
     The zero eigenvalue (corresponding to center-of-mass motion) is excluded.
+
+    chi_i'(omega) = (1 / zeta) * sum_{p>0}
+        v_{pi}^2 * tau_p / (1 + (omega * tau_p)^2)
+
+    chi_i''(omega) = (1 / zeta) * sum_{p>0}
+        v_{pi}^2 * omega * tau_p^2 / (1 + (omega * tau_p)^2)
+
+    where tau_p = -zeta / lambda_p. Unlike the system-level modulus,
+    monomer susceptibility uses tau_p directly, without a factor of two.
 
     Parameters
     ----------
     a : np.ndarray
         Connectivity matrix of the polymer system
     freq : np.ndarray
-        Array of frequencies at which to compute the moduli
+        Array of angular frequencies at which to compute the susceptibility
     zeta : float, optional
-        Friction coefficient, by default 1.0
+        Monomer friction coefficient, by default 1.0
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray]
         Three arrays containing:
         - First array: frequencies
-        - Second array: storage modulus for each monomer (shape: n_freqs × n_monomers)
-        - Third array: loss modulus for each monomer (shape: n_freqs × n_monomers)
+        - Second array: real susceptibility for each monomer
+          (shape: n_freqs × n_monomers)
+        - Third array: imaginary susceptibility for each monomer
+          (shape: n_freqs × n_monomers)
 
     Raises
     ------
@@ -1093,22 +1104,23 @@ def compute_monomer_modulus(
         freq[:, np.newaxis] * tau_p[np.newaxis, :]
     )  # Shape: (n_freqs, n_modes)
 
-    # Calculate f_p(ω) and g_p(ω)
-    f_p = (omega_tau_p**2) / (1 + omega_tau_p**2)  # For storage modulus
-    g_p = omega_tau_p / (1 + omega_tau_p**2)  # For loss modulus
+    # Modal contributions to chi_i'(omega) and chi_i''(omega)
+    denominator = 1 + omega_tau_p**2
+    chi_prime_p = tau_p[np.newaxis, :] / (zeta * denominator)
+    chi_double_prime_p = omega_tau_p * chi_prime_p
 
     # Square of eigenvector components (V_{pi}^2)
     eigvecs_squared = eigvecs**2  # Shape: (n_monomers, n_modes)
 
-    # Compute G'_i(ω) and G''_i(ω) using Einstein summation
-    G_prime_i = np.einsum(
-        "mp,fp->fm", eigvecs_squared, f_p
+    # Weight each mode by v_{pi}^2 for every monomer i
+    chi_prime_i = np.einsum(
+        "mp,fp->fm", eigvecs_squared, chi_prime_p
     )  # Shape: (n_freqs, n_monomers)
-    G_double_prime_i = np.einsum(
-        "mp,fp->fm", eigvecs_squared, g_p
+    chi_double_prime_i = np.einsum(
+        "mp,fp->fm", eigvecs_squared, chi_double_prime_p
     )  # Shape: (n_freqs, n_monomers)
 
-    return freq, G_prime_i, G_double_prime_i
+    return freq, chi_prime_i, chi_double_prime_i
 
 
 # ------------------------------

@@ -445,11 +445,11 @@ model.run_with_force(
 traj = model.traj  # shape: (n_snapshots, N, 3)
 ```
 
-## Modulus calculation
+## Linear mechanical response
 
-HIPPS-DIMES also provides utilities to compute **linear viscoelastic moduli** from a connectivity matrix `a`. These routines decompose the polymer into normal modes (excluding the zero/center-of-mass mode) and evaluate the frequency-dependent **storage modulus** \(G'(\omega)\) and **loss modulus** \(G''(\omega)\).
+HIPPS-DIMES provides utilities to compute system-level **linear viscoelastic moduli** and per-locus **mechanical susceptibilities** from a connectivity matrix `a`. These routines decompose the polymer into normal modes, excluding the zero/center-of-mass mode.
 
-> **Note on units**: `freq` is interpreted as **angular frequency** \(\omega\). The returned moduli are in the model’s internal units and depend on the friction coefficient `zeta` used to define relaxation times.
+> **Note on units**: `freq` is interpreted as **angular frequency** \(\omega\). The returned response functions are in the model’s internal units and depend on the friction coefficient `zeta` used to define relaxation times.
 
 ### `compute_modulus(a, freq, zeta=1.0)`
 
@@ -463,20 +463,34 @@ Computes *system-level* moduli by summing contributions from all non-zero normal
   - `(freq, G_storage)` as a `(n_freq, 2)` array (`[omega, G'(omega)]`)
   - `(freq, G_loss)` as a `(n_freq, 2)` array (`[omega, G''(omega)]`)
 
-### `compute_monomer_modulus(a, freq, zeta=1.0)`
+### `compute_monomer_mechanical_susceptibility(a, freq, zeta=1.0)`
 
-Computes *per-locus* moduli, i.e. how each locus contributes to the viscoelastic response.
+Computes the real and imaginary parts of the *per-locus mechanical susceptibility*:
+
+\[
+\chi_i'(\omega) = \frac{1}{\zeta}\sum_{p>0}v_{pi}^2
+\frac{\tau_p}{1+(\omega\tau_p)^2},
+\qquad
+\chi_i''(\omega) = \frac{1}{\zeta}\sum_{p>0}v_{pi}^2
+\frac{\omega\tau_p^2}{1+(\omega\tau_p)^2}.
+\]
+
+Here, \(\tau_p=-\zeta/\lambda_p\). There is no factor of two in these monomer-level response functions.
 
 - **Returns**
   - `freq`: `(n_freq,)`
-  - `G_prime_i`: `(n_freq, N)` array where `G_prime_i[k, i] = G'_i(freq[k])`
-  - `G_double_prime_i`: `(n_freq, N)` array where `G_double_prime_i[k, i] = G''_i(freq[k])`
+  - `chi_prime_i`: `(n_freq, N)` array containing \(\chi_i'(\omega)\)
+  - `chi_double_prime_i`: `(n_freq, N)` array containing \(\chi_i''(\omega)\)
 
-#### Example: compute moduli
+#### Example: compute mechanical response
 
 ```python
 import numpy as np
-from HippsDimes import run_optimization, compute_modulus, compute_monomer_modulus
+from HippsDimes import (
+    run_optimization,
+    compute_modulus,
+    compute_monomer_mechanical_susceptibility,
+)
 
 # Example: obtain a connectivity matrix 'a' from HIPPS-DIMES
 # (you can also load a saved matrix from disk with np.loadtxt)
@@ -487,8 +501,10 @@ a = results["connectivity_matrix"]
 freq = np.logspace(-3, 3, 200)  # angular frequencies ω
 G_storage, G_loss = compute_modulus(a, freq, zeta=1.0)
 
-# (2) Compute per-locus moduli
-freq_out, Gp_i, Gpp_i = compute_monomer_modulus(a, freq, zeta=1.0)
+# (2) Compute per-locus mechanical susceptibilities
+freq_out, chi_prime_i, chi_double_prime_i = (
+    compute_monomer_mechanical_susceptibility(a, freq, zeta=1.0)
+)
 ```
 
 ## How to cite

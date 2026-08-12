@@ -47,22 +47,27 @@ def test_a2dmap_theory():
 
 
 def test_compute_modulus():
-    """Test the modulus computation."""
-    n = 4
-    k = 1.0
-    A = HippsDimes.construct_connectivity_matrix_rouse(n, k)
-    freq = np.logspace(-2, 2, 10)
+    """Moduli should use tau_p / 2 for stress-mode relaxation."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)
     zeta = 1.0
-    
+
+    internal_eigenvalue = np.linalg.eigvalsh(A)[0]
+    tau_p = -zeta / internal_eigenvalue
+    freq = np.array([2.0 / tau_p])
+
     storage_mod, loss_mod = HippsDimes.compute_modulus(A, freq, zeta)
-    
+
     # Check shapes
     assert storage_mod.shape == (len(freq), 2)
     assert loss_mod.shape == (len(freq), 2)
-    
+
     # Check that frequencies match
     assert np.allclose(storage_mod[:, 0], freq)
     assert np.allclose(loss_mod[:, 0], freq)
+
+    # At omega * tau_p / 2 = 1, one unnormalized Maxwell mode has G' = G'' = 1/2.
+    assert storage_mod[0, 1] == pytest.approx(0.5)
+    assert loss_mod[0, 1] == pytest.approx(0.5)
 
 
 def test_compute_stress_relaxation():

@@ -943,7 +943,7 @@ def compute_stress_relaxation(
     Compute dimensionless stress relaxation function G(t) in HIPPS-DIMES model.
     G(t) here is defined as the sum over internal modes normalized by chain length
 
-    G(t) = (1 / N) * sum_p exp(-(t/tau_p)^stretched_exponent)
+    G(t) = (1 / N) * sum_p exp(-2 * (t/tau_p)^stretched_exponent)
 
     summation over modes p ignore the p=0 mode (center of mass mode)
     N is the chain length, i.e. len(a)
@@ -1025,13 +1025,15 @@ def compute_modulus(
     # Reshape frequency for broadcasting
     freq_reshaped = np.expand_dims(freq, axis=-1)
 
+    # Stress correlations decay as exp(-2t/tau_p), so each mode has an
+    # effective Maxwell relaxation time tau_p / 2.
+    omega_tau = freq_reshaped * tau_p / 2.0
+
     # Compute moduli
     storage_modulus = np.sum(
-        (freq_reshaped * tau_p) ** 2.0 / (1 + (freq_reshaped * tau_p) ** 2), axis=-1
+        omega_tau**2.0 / (1 + omega_tau**2), axis=-1
     )
-    loss_modulus = np.sum(
-        (freq_reshaped * tau_p) / (1 + (freq_reshaped * tau_p) ** 2), axis=-1
-    )
+    loss_modulus = np.sum(omega_tau / (1 + omega_tau**2), axis=-1)
 
     return (
         np.column_stack((freq, storage_modulus)),

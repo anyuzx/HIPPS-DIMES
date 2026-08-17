@@ -709,18 +709,10 @@ class Optimize:
             # Use cached freeze mask
             self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
         
-        # Rebuild diagonal (a2a operation on GPU)
-        # a2a sets diagonal to negative sum of off-diagonal elements in each row
-        # and optionally clamps negative off-diagonal values
-        if enforce_nonnegative_connectivity_matrix:
-            # Clamp off-diagonal to be non-positive (spring constants >= 0)
-            diag_vals = cp.diag(self._A_gpu).copy()
-            self._A_gpu = cp.minimum(self._A_gpu, 0.0)
-            cp.fill_diagonal(self._A_gpu, diag_vals)
-        
-        # Rebuild diagonal: A_ii = -sum(A_ij for j != i)
-        off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
-        cp.fill_diagonal(self._A_gpu, -off_diag_sum)
+        self._A_gpu = a2a(
+            self._A_gpu,
+            fill_negative=enforce_nonnegative_connectivity_matrix,
+        )
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
         if self.has_constraint_mask:
@@ -790,13 +782,10 @@ class Optimize:
         if self.edge_mask is not None:
             self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
 
-        if enforce_nonnegative_connectivity_matrix:
-            diag_vals = cp.diag(self._A_gpu).copy()
-            self._A_gpu = cp.minimum(self._A_gpu, 0.0)
-            cp.fill_diagonal(self._A_gpu, diag_vals)
-
-        off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
-        cp.fill_diagonal(self._A_gpu, -off_diag_sum)
+        self._A_gpu = a2a(
+            self._A_gpu,
+            fill_negative=enforce_nonnegative_connectivity_matrix,
+        )
 
         if self.has_constraint_mask:
             relative_error_gpu = (
@@ -869,15 +858,10 @@ class Optimize:
         if self.edge_mask is not None:
             self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
         
-        # Rebuild diagonal (a2a operation on GPU)
-        if enforce_nonnegative_connectivity_matrix:
-            diag_vals = cp.diag(self._A_gpu).copy()
-            self._A_gpu = cp.minimum(self._A_gpu, 0.0)
-            cp.fill_diagonal(self._A_gpu, diag_vals)
-        
-        # Rebuild diagonal: A_ii = -sum(A_ij for j != i)
-        off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
-        cp.fill_diagonal(self._A_gpu, -off_diag_sum)
+        self._A_gpu = a2a(
+            self._A_gpu,
+            fill_negative=enforce_nonnegative_connectivity_matrix,
+        )
         
         # Compute loss on GPU (avoid CPU transfer for ddmap)
         if self.has_constraint_mask:
@@ -936,13 +920,10 @@ class Optimize:
         if self.edge_mask is not None:
             self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
 
-        if enforce_nonnegative_connectivity_matrix:
-            diag_vals = cp.diag(self._A_gpu).copy()
-            self._A_gpu = cp.minimum(self._A_gpu, 0.0)
-            cp.fill_diagonal(self._A_gpu, diag_vals)
-
-        off_diag_sum = cp.sum(self._A_gpu, axis=1) - cp.diag(self._A_gpu)
-        cp.fill_diagonal(self._A_gpu, -off_diag_sum)
+        self._A_gpu = a2a(
+            self._A_gpu,
+            fill_negative=enforce_nonnegative_connectivity_matrix,
+        )
 
         if self.has_constraint_mask:
             relative_error_gpu = (

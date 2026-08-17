@@ -6,6 +6,7 @@ import pytest
 # Import the main module
 import HippsDimes
 import hipps_dimes
+import hipps_dimes.numerics as numerics
 
 
 def test_import():
@@ -27,6 +28,59 @@ def test_construct_connectivity_matrix_rouse():
     
     # Check row sums (should be zero for Laplacian)
     assert np.allclose(np.sum(A, axis=1), 0.0)
+
+
+def test_a2a_enforces_nonnegative_spring_constants():
+    """Negative off-diagonals are removed while positive springs are retained."""
+    source = np.array(
+        [
+            [-9.0, 2.0, -3.0],
+            [2.0, -9.0, 4.0],
+            [-3.0, 4.0, -9.0],
+        ]
+    )
+    source_before = source.copy()
+
+    result = HippsDimes.a2a(source, fill_negative=True)
+
+    expected = np.array(
+        [
+            [-2.0, 2.0, 0.0],
+            [2.0, -6.0, 4.0],
+            [0.0, 4.0, -4.0],
+        ]
+    )
+    assert np.array_equal(source, source_before)
+    assert np.array_equal(result, expected)
+    assert np.allclose(np.sum(result, axis=1), 0.0)
+    assert np.all(np.linalg.eigvalsh(result) <= 1e-12)
+
+
+@pytest.mark.skipif(
+    not HippsDimes.is_gpu_available(),
+    reason="CuPy GPU is not available",
+)
+def test_a2a_enforces_nonnegative_spring_constants_on_gpu():
+    """GPU normalization should preserve the backend and match the CPU result."""
+    source_cpu = np.array(
+        [
+            [-9.0, 2.0, -3.0],
+            [2.0, -9.0, 4.0],
+            [-3.0, 4.0, -9.0],
+        ]
+    )
+    source_gpu = numerics.cp.asarray(source_cpu)
+    try:
+        source_gpu.copy()
+    except RuntimeError as error:
+        pytest.skip(f"CuPy kernel execution is unavailable: {error}")
+
+    result_gpu = HippsDimes.a2a(source_gpu, fill_negative=True)
+
+    expected = HippsDimes.a2a(source_cpu, fill_negative=True)
+    assert isinstance(result_gpu, numerics.cp.ndarray)
+    assert np.array_equal(numerics.cp.asnumpy(source_gpu), source_cpu)
+    assert np.array_equal(numerics.cp.asnumpy(result_gpu), expected)
 
 
 def test_a2dmap_theory():

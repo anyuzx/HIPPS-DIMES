@@ -1516,15 +1516,14 @@ def a2cmap_theory(A, rc):
 
 
 def a2a(a, fill_negative=False):
-    """
-    Correct the connectivity matrx. Make it Laplacian, and non negative (options)
-    """
-    temp = np.copy(a)
+    """Return a Laplacian-form connectivity matrix on the input array backend."""
+    xp = cp.get_array_module(a) if _CUPY_AVAILABLE else np
+    temp = xp.copy(a)
     if fill_negative:
         temp[temp < 0.0] = 0.0
     # Zero out diagonal first, then set diagonal to negative sum of off-diagonal elements
-    np.fill_diagonal(temp, 0.0)
-    np.fill_diagonal(temp, -np.sum(temp, axis=1))
+    xp.fill_diagonal(temp, 0.0)
+    xp.fill_diagonal(temp, -xp.sum(temp, axis=1))
     return temp
 
 

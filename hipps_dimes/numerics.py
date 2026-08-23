@@ -1888,6 +1888,335 @@ def nearestNSD(X, delta):
     return w @ np.diag(v_new) @ w.T
 
 
+def _squared_distances_from_gram(B):
+    """Return the squared Euclidean distance matrix induced by Gram matrix ``B``."""
+    diagonal = np.diag(B)
+    ddmap = diagonal[:, np.newaxis] + diagonal - 2.0 * B
+    ddmap = 0.5 * (ddmap + ddmap.T)
+    np.fill_diagonal(ddmap, 0.0)
+    return ddmap
+
+
+def _project_centered_psd(X, gram_eigenvalue_floor=0.0):
+    """Project onto ``B @ 1 = 0`` and ``B >= floor * J``."""
+    X = 0.5 * (X + X.T)
+    row_mean = np.mean(X, axis=1, keepdims=True)
+    centered = X - row_mean - row_mean.T + np.mean(X)
+
+    # The floored feasible set is a translation of the centered PSD cone:
+    # {B : B >= floor * J, B @ 1 = 0} = floor * J + {C : C >= 0, C @ 1 = 0}.
+    # Express J without matrix multiplication so the translational mode remains
+    # exactly excluded from the positive spectral floor.
+    n = centered.shape[0]
+    shifted = centered.copy()
+    if gram_eigenvalue_floor != 0.0:
+        shifted += gram_eigenvalue_floor / n
+        shifted[np.diag_indices(n)] -= gram_eigenvalue_floor
+
+    eigenvalues, eigenvectors = np.linalg.eigh(shifted)
+    projected = (eigenvectors * np.maximum(eigenvalues, 0.0)) @ eigenvectors.T
+
+    # Re-center by the congruence J @ projected @ J, expressed with means to
+    # avoid two dense matrix multiplications. This preserves PSD analytically.
+    row_mean = np.mean(projected, axis=1, keepdims=True)
+    projected = projected - row_mean - row_mean.T + np.mean(projected)
+    if gram_eigenvalue_floor != 0.0:
+        projected -= gram_eigenvalue_floor / n
+        projected[np.diag_indices(n)] += gram_eigenvalue_floor
+    return 0.5 * (projected + projected.T)
+
+
+def _nearest_edm_objective_gradient(B, squared_distances, weights):
+    """Evaluate the unique-pair weighted EDM objective and its gradient."""
+    fitted = _squared_distances_from_gram(B)
+    residual = fitted - squared_distances
+    weighted_residual = weights * residual
+
+    # weights and residual are symmetric. Multiplication by 1/4 therefore
+    # evaluates 1/2 * sum_{i < j} w_ij * residual_ij**2.
+    objective = 0.25 * np.sum(weighted_residual * residual)
+    gradient = np.diag(np.sum(weighted_residual, axis=1)) - weighted_residual
+    gradient = 0.5 * (gradient + gradient.T)
+    return float(objective), gradient, fitted
+
+
+def nearest_edm(
+    squared_distances,
+    weights=None,
+    *,
+    gram_eigenvalue_floor=0.0,
+    max_iterations=1000,
+    relative_tolerance=1e-8,
+    absolute_tolerance=1e-10,
+):
+    """Find a weighted least-squares Euclidean distance matrix.
+
+    This function solves
+
+    ``min_B 0.5 * sum_{i < j} w_ij * (D(B)_ij - D_obs_ij)**2``
+
+    subject to ``B @ 1 = 0`` and ``B >= gram_eigenvalue_floor * J``, where
+    ``J = I - 11.T / N`` and
+    ``D(B)_ij = B_ii + B_jj - 2 * B_ij``. The input and returned distance
+    matrices contain *squared* distances. A positive floor gives exactly
+    ``N - 1`` positive internal Gram modes while preserving the translational
+    zero mode. The default zero floor imposes no embedding-rank constraint.
+
+    Parameters
+    ----------
+    squared_distances : (N, N) array_like
+        Symmetric observed squared distances. NaNs may mark unobserved pairs.
+        Infinite values are rejected.
+    weights : (N, N) array_like, optional
+        Symmetric, finite, nonnegative pair weights. A zero weight excludes a
+        pair. When omitted, every finite off-diagonal pair has unit weight.
+    gram_eigenvalue_floor : float, optional
+        Nonnegative lower bound for every Gram eigenvalue in the centered
+        subspace. It has the same units as the squared distances. The
+        translational eigenvalue remains zero. Default is 0.
+    max_iterations : int, optional
+        Maximum number of projected-gradient iterations.
+    relative_tolerance, absolute_tolerance : float, optional
+        Stop when the projected-gradient norm is no larger than
+        ``absolute_tolerance + relative_tolerance * ||gradient||_F``.
+
+    Returns
+    -------
+    fitted_squared_distances : (N, N) ndarray
+        The fitted symmetric, hollow Euclidean distance matrix.
+    gram_matrix : (N, N) ndarray
+        The fitted centered positive-semidefinite Gram matrix.
+    info : dict
+        Convergence status and scalar iteration history.
+
+    Notes
+    -----
+    The monotone accelerated projected-gradient iteration uses a dense
+    eigendecomposition for each PSD projection, so the runtime is O(N^3) per
+    iteration and memory use is O(N^2).
+    """
+    observed = np.asarray(squared_distances, dtype=np.float64)
+    if observed.ndim != 2 or observed.shape[0] != observed.shape[1]:
+        raise ValueError("squared_distances must be a square matrix")
+    if observed.shape[0] < 2:
+        raise ValueError("squared_distances must contain at least two loci")
+    if np.any(np.isinf(observed)):
+        raise ValueError("squared_distances must not contain infinite values")
+
+    n = observed.shape[0]
+    off_diagonal = ~np.eye(n, dtype=bool)
+
+    if weights is None:
+        finite = np.isfinite(observed)
+        if not np.array_equal(finite, finite.T):
+            raise ValueError("the observed-pair pattern must be symmetric")
+        pair_mask = finite & off_diagonal
+        pair_weights = np.zeros_like(observed)
+        pair_weights[pair_mask] = 1.0
+    else:
+        pair_weights = np.asarray(weights, dtype=np.float64)
+        if pair_weights.shape != observed.shape:
+            raise ValueError("weights must have the same shape as squared_distances")
+        if not np.all(np.isfinite(pair_weights)):
+            raise ValueError("weights must be finite")
+        if np.any(pair_weights < 0.0):
+            raise ValueError("weights must be nonnegative")
+        if not np.allclose(pair_weights, pair_weights.T, rtol=1e-12, atol=1e-14):
+            raise ValueError("weights must be symmetric")
+        pair_weights = 0.5 * (pair_weights + pair_weights.T)
+        np.fill_diagonal(pair_weights, 0.0)
+        pair_mask = (pair_weights > 0.0) & off_diagonal
+        if np.any(pair_mask & ~np.isfinite(observed)):
+            raise ValueError("every positive-weight pair must have a finite distance")
+
+    if not np.any(np.triu(pair_mask, k=1)):
+        raise ValueError("at least one off-diagonal pair must be observed")
+    if not np.array_equal(pair_mask, pair_mask.T):
+        raise ValueError("the observed-pair pattern must be symmetric")
+    if not np.allclose(
+        observed[pair_mask], observed.T[pair_mask], rtol=1e-10, atol=1e-12
+    ):
+        raise ValueError("observed squared distances must be symmetric")
+
+    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
+        raise ValueError("max_iterations must be a positive integer")
+    if isinstance(gram_eigenvalue_floor, (bool, np.bool_)) or not np.isscalar(
+        gram_eigenvalue_floor
+    ):
+        raise ValueError("gram_eigenvalue_floor must be a finite nonnegative scalar")
+    try:
+        gram_eigenvalue_floor = float(gram_eigenvalue_floor)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "gram_eigenvalue_floor must be a finite nonnegative scalar"
+        ) from error
+    if not np.isfinite(gram_eigenvalue_floor) or gram_eigenvalue_floor < 0.0:
+        raise ValueError("gram_eigenvalue_floor must be a finite nonnegative scalar")
+    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
+        raise ValueError("convergence tolerances must be nonnegative")
+    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
+        raise ValueError("at least one convergence tolerance must be positive")
+
+    target = np.zeros_like(observed)
+    target[pair_mask] = observed[pair_mask]
+    target = 0.5 * (target + target.T)
+
+    weight_sum = 0.5 * np.sum(pair_weights)
+    B = _project_centered_psd(np.zeros_like(observed), gram_eigenvalue_floor)
+    extrapolated = B.copy()
+    momentum = 1.0
+    current_objective, _, _ = _nearest_edm_objective_gradient(B, target, pair_weights)
+
+    # For H -> D(H), 4 * max_i sum_j w_ij is a safe Hessian-norm bound.
+    # Backtracking protects the iteration against roundoff and permits the
+    # bound to shrink toward a less conservative local value.
+    lipschitz = 4.0 * np.max(np.sum(pair_weights, axis=1))
+    lipschitz = max(float(lipschitz), np.finfo(np.float64).tiny)
+
+    history = {
+        "iteration": [],
+        "objective": [],
+        "weighted_rmse": [],
+        "projected_gradient_norm": [],
+        "relative_projected_gradient_norm": [],
+        "relative_step": [],
+        "step_size": [],
+        "restarted": [],
+    }
+    converged = False
+    status = "max_iterations"
+
+    for iteration in range(1, max_iterations + 1):
+        restarted = False
+        while True:
+            objective, gradient, _ = _nearest_edm_objective_gradient(
+                extrapolated, target, pair_weights
+            )
+
+            for _ in range(60):
+                step_size = 1.0 / lipschitz
+                candidate = _project_centered_psd(
+                    extrapolated - step_size * gradient,
+                    gram_eigenvalue_floor,
+                )
+                candidate_objective, candidate_gradient, _ = (
+                    _nearest_edm_objective_gradient(candidate, target, pair_weights)
+                )
+                proximal_delta = candidate - extrapolated
+                proximal_delta_norm_squared = np.sum(proximal_delta * proximal_delta)
+                majorizer = (
+                    objective
+                    + np.sum(gradient * proximal_delta)
+                    + 0.5 * lipschitz * proximal_delta_norm_squared
+                )
+                slack = 1e-12 * max(1.0, abs(objective), abs(candidate_objective))
+                if candidate_objective <= majorizer + slack:
+                    break
+                lipschitz *= 2.0
+            else:
+                raise RuntimeError("nearest_edm backtracking line search failed")
+
+            monotone_slack = 1e-12 * max(
+                1.0, abs(current_objective), abs(candidate_objective)
+            )
+            if candidate_objective <= current_objective + monotone_slack:
+                break
+            if restarted:
+                raise RuntimeError("nearest_edm monotone restart failed")
+
+            # Restart acceleration from the last accepted feasible iterate.
+            extrapolated = B
+            momentum = 1.0
+            restarted = True
+
+        # Evaluate the projected-gradient mapping at the returned feasible
+        # candidate, rather than using relative iterate change as a proxy for
+        # first-order optimality.
+        certificate = _project_centered_psd(
+            candidate - step_size * candidate_gradient,
+            gram_eigenvalue_floor,
+        )
+        certificate_delta = candidate - certificate
+        projected_gradient_norm = lipschitz * np.linalg.norm(
+            certificate_delta, ord="fro"
+        )
+        gradient_norm = np.linalg.norm(candidate_gradient, ord="fro")
+        relative_projected_gradient_norm = projected_gradient_norm / max(
+            gradient_norm, np.finfo(np.float64).tiny
+        )
+        accepted_delta = candidate - B
+        relative_step = np.linalg.norm(accepted_delta, ord="fro") / max(
+            np.linalg.norm(B, ord="fro"), 1.0
+        )
+        weighted_rmse = np.sqrt(2.0 * candidate_objective / weight_sum)
+
+        history["iteration"].append(iteration)
+        history["objective"].append(candidate_objective)
+        history["weighted_rmse"].append(weighted_rmse)
+        history["projected_gradient_norm"].append(projected_gradient_norm)
+        history["relative_projected_gradient_norm"].append(
+            relative_projected_gradient_norm
+        )
+        history["relative_step"].append(relative_step)
+        history["step_size"].append(step_size)
+        history["restarted"].append(restarted)
+
+        previous_B = B
+        B = candidate
+        current_objective = candidate_objective
+        if projected_gradient_norm <= (
+            absolute_tolerance + relative_tolerance * gradient_norm
+        ):
+            converged = True
+            status = "optimality_tolerance"
+            break
+
+        next_momentum = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * momentum**2))
+        extrapolated = B + ((momentum - 1.0) / next_momentum) * (B - previous_B)
+        momentum = next_momentum
+
+        # Try a modestly larger step on the next iteration. Backtracking will
+        # restore the majorization bound when this is too aggressive.
+        lipschitz *= 0.9
+
+    for key, values in history.items():
+        history[key] = np.asarray(values)
+
+    fitted_squared_distances = _squared_distances_from_gram(B)
+    final_objective = float(history["objective"][-1])
+    final_weighted_rmse = float(history["weighted_rmse"][-1])
+    final_projected_gradient_norm = float(history["projected_gradient_norm"][-1])
+    final_relative_projected_gradient_norm = float(
+        history["relative_projected_gradient_norm"][-1]
+    )
+    info = {
+        "converged": converged,
+        "status": status,
+        "message": (
+            "projected-gradient optimality tolerance reached"
+            if converged
+            else "maximum number of iterations reached"
+        ),
+        "iterations": int(history["iteration"][-1]),
+        "objective": final_objective,
+        "weighted_rmse": final_weighted_rmse,
+        "projected_gradient_norm": final_projected_gradient_norm,
+        "relative_projected_gradient_norm": (final_relative_projected_gradient_norm),
+        "gram_eigenvalue_floor": gram_eigenvalue_floor,
+        "weight_sum": float(weight_sum),
+        "history": history,
+    }
+    if not converged:
+        warnings.warn(
+            "nearest_edm reached max_iterations before satisfying the "
+            "projected-gradient optimality tolerance",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    return fitted_squared_distances, B, info
+
+
 def ddmap2cov(ddmap):
     # convert a squared distance map to covariance matrix
     n = ddmap.shape[0]

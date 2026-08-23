@@ -361,6 +361,56 @@ The `run_optimization()` function returns a dictionary with:
 - `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
 
+#### Weighted closest Euclidean distance matrix
+
+`nearest_edm()` projects noisy or incomplete squared-distance observations by
+solving a weighted least-squares problem over centered positive-semidefinite
+Gram matrices. Zero weights and `NaN` distances mark unobserved pairs.
+
+```python
+import hipps_dimes as HD
+import numpy as np
+
+ddmap_observed = np.array(
+    [
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 9.0],
+        [1.0, 9.0, 0.0],
+    ]
+)
+
+ddmap_fit, gram_fit, diagnostics = HD.nearest_edm(ddmap_observed)
+assert diagnostics["converged"]
+```
+
+The input and output are squared-distance matrices. Each unordered pair is
+counted once, and `weights[i, j]` is the coefficient multiplying that pair's
+squared residual. By default, the solver is CPU-only and does not impose a
+three-dimensional rank constraint; it therefore solves a convex problem.
+Inspect `diagnostics["projected_gradient_norm"]` and
+`diagnostics["converged"]` rather than inferring convergence only from small
+changes between iterations.
+
+To require a full set of finite internal Gaussian modes, set a hard floor on
+the centered Gram spectrum:
+
+```python
+ddmap_full_rank, gram_full_rank, diagnostics = HD.nearest_edm(
+    ddmap_observed,
+    gram_eigenvalue_floor=1e-4,
+)
+```
+
+This solves the constrained fitting problem with
+`gram_full_rank >= gram_eigenvalue_floor * J`, where
+`J = I - 11.T / N`. The center-of-mass eigenvalue remains zero and all `N - 1`
+internal Gram eigenvalues are at least the requested floor. The floor has the
+same units as the squared-distance input and is a model regularization
+parameter, not a numerical tolerance. For the HIPPS-DIMES mean-squared-distance
+convention, the corresponding per-coordinate covariance floor is one third of
+the Gram floor. Applying a floor to an already fitted Gram matrix is not
+equivalent to refitting with this constraint.
+
 #### Additional Utility Functions
 
 The package also provides helper functions for direct use:

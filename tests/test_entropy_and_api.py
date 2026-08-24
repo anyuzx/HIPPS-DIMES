@@ -30,10 +30,21 @@ def test_compute_entropy_from_random_connectivity_matrix():
 
     entropy = HippsDimes.compute_entropy_from_A(A)
     eigvals = np.linalg.eigvalsh(-A)
-    expected = np.sum(-np.log(eigvals[eigvals > 1e-12]))
+    internal = np.delete(eigvals, np.argmin(np.abs(eigvals)))
+    expected = np.sum(-np.log(internal[internal > 1e-12]))
 
     assert np.isfinite(entropy)
     assert np.isclose(entropy, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_compute_entropy_explicitly_removes_positive_roundoff_com_mode():
+    """A numerical COM eigenvalue above the cutoff must not enter entropy."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    eigvals = np.array([2.0e-12, 1.0, 2.0, 4.0])
+
+    entropy = HippsDimes.compute_entropy_from_A(A, eigvals=eigvals)
+
+    assert entropy == pytest.approx(-np.log(8.0))
 
 
 def test_run_optimization_smoke_dmap():

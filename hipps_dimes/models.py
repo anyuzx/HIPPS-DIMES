@@ -26,6 +26,13 @@ def _progress_scalar(value):
     return float(value)
 
 
+def _gpu_centered_entropy_from_eigenvalues(eigenvalues, zero_tol=1e-12):
+    """Return ``-log det+ K`` after explicitly excluding the COM mode."""
+    positive_mask = eigenvalues > zero_tol
+    positive_mask[cp.argmin(cp.abs(eigenvalues))] = False
+    return cp.sum(-cp.log(eigenvalues[positive_mask]))
+
+
 def _emit_progress(progress_callback, *, iteration, total, loss, entropy, start_time, method, general_method, use_gpu, noisy=False):
     """Emit a structured progress update to a caller-supplied callback."""
     if progress_callback is None:
@@ -729,9 +736,7 @@ class Optimize:
         # K = -A, so eigenvalues of K = -eigenvalues of A
         # entropy = -sum(log(λ_i)) for positive eigenvalues λ_i of K
         eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self._entropy_gpu = cp.sum(log_terms)
+        self._entropy_gpu = _gpu_centered_entropy_from_eigenvalues(eigvals_K_gpu)
         
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Syncing an (n,n) matrix every iteration can dominate runtime for n~1000.
@@ -798,10 +803,7 @@ class Optimize:
         self._loss_gpu = loss_gpu
 
         eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-
-        self._entropy_gpu = cp.sum(log_terms)
+        self._entropy_gpu = _gpu_centered_entropy_from_eigenvalues(eigvals_K_gpu)
 
     def __update_parameter_gpu_gd(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False):
         """GPU-accelerated version of __update_parameter for GD method using CuPy."""
@@ -878,9 +880,7 @@ class Optimize:
         # K = -A, so eigenvalues of K = -eigenvalues of A
         # entropy = -sum(log(λ_i)) for positive eigenvalues λ_i of K
         eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self._entropy_gpu = cp.sum(log_terms)
+        self._entropy_gpu = _gpu_centered_entropy_from_eigenvalues(eigvals_K_gpu)
         
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Sync only when needed (save_steps) and once at the end of run().
@@ -936,9 +936,7 @@ class Optimize:
         self._loss_gpu = loss_gpu
 
         eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self._entropy_gpu = cp.sum(log_terms)
+        self._entropy_gpu = _gpu_centered_entropy_from_eigenvalues(eigvals_K_gpu)
 
     def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, progress_callback=None, show_progress=True, **kwargs):
         """

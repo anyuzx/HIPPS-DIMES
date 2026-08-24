@@ -2743,11 +2743,19 @@ def compute_entropy_from_A(A, zero_tol=1e-12, eigvals=None):
     else:
         eigvals = np.linalg.eigvalsh(K)
 
-    positive_mask = eigvals > zero_tol
-    positive_eigvals = eigvals[positive_mask]
+    if eigvals.shape != (K.shape[0],):
+        raise ValueError("eigvals must contain one stiffness eigenvalue per locus")
+
+    # A centered connectivity matrix always has one translational (COM) mode.
+    # Its numerically computed value can exceed a fixed absolute tolerance when
+    # the stiffness spectrum becomes very large, so remove it by identity rather
+    # than relying on the cutoff. Additional zero modes remain cutoff based.
+    internal_eigvals = np.delete(eigvals, int(np.argmin(np.abs(eigvals))))
+    positive_mask = internal_eigvals > zero_tol
+    positive_eigvals = internal_eigvals[positive_mask]
 
     if len(positive_eigvals) == 0:
-        max_eigval = np.max(eigvals) if len(eigvals) > 0 else 0.0
+        max_eigval = np.max(internal_eigvals) if len(internal_eigvals) > 0 else 0.0
         if max_eigval < zero_tol:
             return -np.inf
         return np.nan

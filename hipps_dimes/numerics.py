@@ -1940,11 +1940,289 @@ def _nearest_edm_objective_gradient(B, squared_distances, weights):
     return float(objective), gradient, fitted
 
 
+def _centered_orthonormal_basis(n):
+    """Return a deterministic orthonormal basis for ``1.T @ x = 0``."""
+    basis = np.zeros((n, n - 1), dtype=np.float64)
+    for column in range(n - 1):
+        denominator = np.sqrt((column + 1) * (column + 2))
+        basis[: column + 1, column] = 1.0 / denominator
+        basis[column + 1, column] = -(column + 1) / denominator
+    return basis
+
+
+def _rouse_reference_gram(n, spring_constant, basis=None):
+    """Return the Rouse Gram matrix and its reduced-space representation."""
+    if basis is None:
+        basis = _centered_orthonormal_basis(n)
+    connectivity = -construct_connectivity_matrix_rouse(n, spring_constant)
+    reduced_connectivity = basis.T @ connectivity @ basis
+    reduced_gram_inverse = reduced_connectivity / 3.0
+    reduced_gram = np.linalg.inv(reduced_gram_inverse)
+    gram = basis @ reduced_gram @ basis.T
+    return 0.5 * (gram + gram.T), reduced_gram, reduced_gram_inverse
+
+
+def _mean_rouse_kl(reduced_gram, reference_inverse, reference_logdet):
+    """Return Gaussian KL divergence per centered internal mode."""
+    sign, logdet = np.linalg.slogdet(reduced_gram)
+    if sign <= 0.0:
+        return np.inf
+    n_modes = reduced_gram.shape[0]
+    divergence = 0.5 * (
+        np.sum(reference_inverse * reduced_gram.T) - logdet + reference_logdet - n_modes
+    )
+    roundoff = 1e-12 * max(1.0, float(n_modes))
+    if divergence < 0.0 and divergence >= -roundoff:
+        divergence = 0.0
+    return float(divergence / n_modes)
+
+
+def _rouse_kl_prox(trial, step_size, prior_coefficient, reference_inverse):
+    """Apply the reduced-space proximal map for the Rouse KL penalty."""
+    shifted = trial - step_size * prior_coefficient * reference_inverse
+    shifted = 0.5 * (shifted + shifted.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(shifted)
+    product = step_size * prior_coefficient
+    discriminant = np.sqrt(eigenvalues * eigenvalues + 4.0 * product)
+    proximal_eigenvalues = np.empty_like(eigenvalues)
+    nonnegative = eigenvalues >= 0.0
+    proximal_eigenvalues[nonnegative] = 0.5 * (
+        eigenvalues[nonnegative] + discriminant[nonnegative]
+    )
+    proximal_eigenvalues[~nonnegative] = (
+        2.0 * product / (discriminant[~nonnegative] - eigenvalues[~nonnegative])
+    )
+    proximal = (eigenvectors * proximal_eigenvalues) @ eigenvectors.T
+    return 0.5 * (proximal + proximal.T)
+
+
+def _nearest_edm_with_rouse_prior(
+    target,
+    pair_weights,
+    pair_count,
+    spring_constant,
+    prior_weight,
+    max_iterations,
+    relative_tolerance,
+    absolute_tolerance,
+):
+    """Solve the positive-definite closest-EDM problem with a Rouse KL prior."""
+    n = target.shape[0]
+    basis = _centered_orthonormal_basis(n)
+    _, reference_reduced, reference_inverse = _rouse_reference_gram(
+        n, spring_constant, basis
+    )
+    reference_sign, reference_logdet = np.linalg.slogdet(reference_reduced)
+    if reference_sign <= 0.0:
+        raise RuntimeError("the reduced Rouse reference Gram matrix is not positive")
+
+    n_modes = n - 1
+    prior_coefficient = prior_weight / (2.0 * n_modes)
+
+    def data_objective_gradient(reduced_gram):
+        gram = basis @ reduced_gram @ basis.T
+        objective, gradient, fitted = _nearest_edm_objective_gradient(
+            gram, target, pair_weights
+        )
+        return (
+            objective / pair_count,
+            (basis.T @ gradient @ basis) / pair_count,
+            objective,
+            fitted,
+        )
+
+    def total_objective(reduced_gram, normalized_data_objective):
+        mean_kl = _mean_rouse_kl(reduced_gram, reference_inverse, reference_logdet)
+        return (
+            normalized_data_objective + prior_weight * mean_kl,
+            mean_kl,
+        )
+
+    reduced_gram = reference_reduced.copy()
+    extrapolated = reduced_gram.copy()
+    momentum = 1.0
+    current_data_objective, _, _, _ = data_objective_gradient(reduced_gram)
+    current_total_objective, _ = total_objective(reduced_gram, current_data_objective)
+
+    # The unnormalized data-term Hessian bound is divided by the observed
+    # unordered-pair count to match the mean data objective.
+    lipschitz = 4.0 * np.max(np.sum(pair_weights, axis=1)) / pair_count
+    lipschitz = max(float(lipschitz), np.finfo(np.float64).tiny)
+    weight_sum = 0.5 * np.sum(pair_weights)
+
+    history = {
+        "iteration": [],
+        "objective": [],
+        "normalized_data_objective": [],
+        "weighted_rmse": [],
+        "mean_rouse_kl": [],
+        "rouse_prior_penalty": [],
+        "total_objective": [],
+        "proximal_gradient_norm": [],
+        "relative_proximal_gradient_norm": [],
+        "relative_step": [],
+        "step_size": [],
+        "restarted": [],
+    }
+    converged = False
+    status = "max_iterations"
+
+    for iteration in range(1, max_iterations + 1):
+        restarted = False
+        while True:
+            data_objective, data_gradient, _, _ = data_objective_gradient(extrapolated)
+
+            for _ in range(60):
+                step_size = 1.0 / lipschitz
+                candidate = _rouse_kl_prox(
+                    extrapolated - step_size * data_gradient,
+                    step_size,
+                    prior_coefficient,
+                    reference_inverse,
+                )
+                (
+                    candidate_data_objective,
+                    candidate_data_gradient,
+                    candidate_raw_objective,
+                    _,
+                ) = data_objective_gradient(candidate)
+                proximal_delta = candidate - extrapolated
+                majorizer = (
+                    data_objective
+                    + np.sum(data_gradient * proximal_delta)
+                    + 0.5 * lipschitz * np.sum(proximal_delta * proximal_delta)
+                )
+                slack = 1e-12 * max(
+                    1.0, abs(data_objective), abs(candidate_data_objective)
+                )
+                if candidate_data_objective <= majorizer + slack:
+                    break
+                lipschitz *= 2.0
+            else:
+                raise RuntimeError("nearest_edm Rouse-prior backtracking failed")
+
+            candidate_total_objective, candidate_mean_kl = total_objective(
+                candidate, candidate_data_objective
+            )
+            monotone_slack = 1e-12 * max(
+                1.0,
+                abs(current_total_objective),
+                abs(candidate_total_objective),
+            )
+            if candidate_total_objective <= current_total_objective + monotone_slack:
+                break
+            if restarted:
+                raise RuntimeError("nearest_edm Rouse-prior monotone restart failed")
+            extrapolated = reduced_gram
+            momentum = 1.0
+            restarted = True
+
+        certificate = _rouse_kl_prox(
+            candidate - step_size * candidate_data_gradient,
+            step_size,
+            prior_coefficient,
+            reference_inverse,
+        )
+        proximal_gradient_norm = lipschitz * np.linalg.norm(
+            candidate - certificate, ord="fro"
+        )
+        candidate_inverse = np.linalg.inv(candidate)
+        prior_gradient = prior_coefficient * (reference_inverse - candidate_inverse)
+        optimality_scale = max(
+            np.linalg.norm(candidate_data_gradient, ord="fro"),
+            np.linalg.norm(prior_gradient, ord="fro"),
+            np.finfo(np.float64).tiny,
+        )
+        relative_proximal_gradient_norm = proximal_gradient_norm / optimality_scale
+        relative_step = np.linalg.norm(candidate - reduced_gram, ord="fro") / max(
+            np.linalg.norm(reduced_gram, ord="fro"), 1.0
+        )
+        weighted_rmse = np.sqrt(2.0 * candidate_raw_objective / weight_sum)
+
+        history["iteration"].append(iteration)
+        history["objective"].append(candidate_raw_objective)
+        history["normalized_data_objective"].append(candidate_data_objective)
+        history["weighted_rmse"].append(weighted_rmse)
+        history["mean_rouse_kl"].append(candidate_mean_kl)
+        history["rouse_prior_penalty"].append(prior_weight * candidate_mean_kl)
+        history["total_objective"].append(candidate_total_objective)
+        history["proximal_gradient_norm"].append(proximal_gradient_norm)
+        history["relative_proximal_gradient_norm"].append(
+            relative_proximal_gradient_norm
+        )
+        history["relative_step"].append(relative_step)
+        history["step_size"].append(step_size)
+        history["restarted"].append(restarted)
+
+        previous_reduced_gram = reduced_gram
+        reduced_gram = candidate
+        current_total_objective = candidate_total_objective
+        if proximal_gradient_norm <= (
+            absolute_tolerance + relative_tolerance * optimality_scale
+        ):
+            converged = True
+            status = "optimality_tolerance"
+            break
+
+        next_momentum = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * momentum**2))
+        extrapolated = reduced_gram + ((momentum - 1.0) / next_momentum) * (
+            reduced_gram - previous_reduced_gram
+        )
+        momentum = next_momentum
+        lipschitz *= 0.9
+
+    for key, values in history.items():
+        history[key] = np.asarray(values)
+
+    gram = basis @ reduced_gram @ basis.T
+    gram = 0.5 * (gram + gram.T)
+    fitted_squared_distances = _squared_distances_from_gram(gram)
+    final = {
+        key: float(values[-1])
+        for key, values in history.items()
+        if key not in {"iteration", "restarted"}
+    }
+    info = {
+        "converged": converged,
+        "status": status,
+        "message": (
+            "proximal-gradient optimality tolerance reached"
+            if converged
+            else "maximum number of iterations reached"
+        ),
+        "iterations": int(history["iteration"][-1]),
+        "objective": final["objective"],
+        "normalized_data_objective": final["normalized_data_objective"],
+        "weighted_rmse": final["weighted_rmse"],
+        "mean_rouse_kl": final["mean_rouse_kl"],
+        "rouse_prior_penalty": final["rouse_prior_penalty"],
+        "total_objective": final["total_objective"],
+        "proximal_gradient_norm": final["proximal_gradient_norm"],
+        "relative_proximal_gradient_norm": final["relative_proximal_gradient_norm"],
+        "gram_eigenvalue_floor": 0.0,
+        "rouse_prior_weight": prior_weight,
+        "rouse_spring_constant": spring_constant,
+        "observed_pair_count": int(pair_count),
+        "weight_sum": float(weight_sum),
+        "history": history,
+    }
+    if not converged:
+        warnings.warn(
+            "nearest_edm reached max_iterations before satisfying the "
+            "proximal-gradient optimality tolerance",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return fitted_squared_distances, gram, info
+
+
 def nearest_edm(
     squared_distances,
     weights=None,
     *,
     gram_eigenvalue_floor=0.0,
+    rouse_prior_weight=0.0,
+    rouse_spring_constant=None,
     max_iterations=1000,
     relative_tolerance=1e-8,
     absolute_tolerance=1e-10,
@@ -1960,7 +2238,9 @@ def nearest_edm(
     ``D(B)_ij = B_ii + B_jj - 2 * B_ij``. The input and returned distance
     matrices contain *squared* distances. A positive floor gives exactly
     ``N - 1`` positive internal Gram modes while preserving the translational
-    zero mode. The default zero floor imposes no embedding-rank constraint.
+    zero mode. Alternatively, a positive ``rouse_prior_weight`` adds a
+    normalized Gaussian KL penalty relative to a full-rank free Rouse chain.
+    The hard floor and soft prior cannot be enabled together.
 
     Parameters
     ----------
@@ -1974,11 +2254,20 @@ def nearest_edm(
         Nonnegative lower bound for every Gram eigenvalue in the centered
         subspace. It has the same units as the squared distances. The
         translational eigenvalue remains zero. Default is 0.
+    rouse_prior_weight : float, optional
+        Nonnegative dimensionless weight for the mean per-mode Gaussian KL
+        divergence from a free Rouse-chain Gram matrix. With a positive value,
+        the data objective is divided by the number of observed unordered
+        pairs. Default is 0, which retains the projected-gradient algorithm.
+    rouse_spring_constant : float, optional
+        Positive Rouse spring constant in reduced units with ``kBT = 1``.
+        When the prior is active and this is omitted, use ``3 / median(Delta_i,
+        i+1)`` over finite, positive observed adjacent squared distances.
     max_iterations : int, optional
         Maximum number of projected-gradient iterations.
     relative_tolerance, absolute_tolerance : float, optional
-        Stop when the projected-gradient norm is no larger than
-        ``absolute_tolerance + relative_tolerance * ||gradient||_F``.
+        Stop when the applicable projected- or proximal-gradient norm is no
+        larger than an absolute plus relative optimality scale.
 
     Returns
     -------
@@ -2052,6 +2341,35 @@ def nearest_edm(
         ) from error
     if not np.isfinite(gram_eigenvalue_floor) or gram_eigenvalue_floor < 0.0:
         raise ValueError("gram_eigenvalue_floor must be a finite nonnegative scalar")
+    if isinstance(rouse_prior_weight, (bool, np.bool_)) or not np.isscalar(
+        rouse_prior_weight
+    ):
+        raise ValueError("rouse_prior_weight must be a finite nonnegative scalar")
+    try:
+        rouse_prior_weight = float(rouse_prior_weight)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "rouse_prior_weight must be a finite nonnegative scalar"
+        ) from error
+    if not np.isfinite(rouse_prior_weight) or rouse_prior_weight < 0.0:
+        raise ValueError("rouse_prior_weight must be a finite nonnegative scalar")
+    if rouse_spring_constant is not None:
+        if isinstance(rouse_spring_constant, (bool, np.bool_)) or not np.isscalar(
+            rouse_spring_constant
+        ):
+            raise ValueError("rouse_spring_constant must be a finite positive scalar")
+        try:
+            rouse_spring_constant = float(rouse_spring_constant)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "rouse_spring_constant must be a finite positive scalar"
+            ) from error
+        if not np.isfinite(rouse_spring_constant) or rouse_spring_constant <= 0.0:
+            raise ValueError("rouse_spring_constant must be a finite positive scalar")
+    if rouse_prior_weight > 0.0 and gram_eigenvalue_floor > 0.0:
+        raise ValueError(
+            "gram_eigenvalue_floor and rouse_prior_weight cannot both be positive"
+        )
     if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
         raise ValueError("convergence tolerances must be nonnegative")
     if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
@@ -2062,6 +2380,29 @@ def nearest_edm(
     target = 0.5 * (target + target.T)
 
     weight_sum = 0.5 * np.sum(pair_weights)
+    pair_count = int(np.count_nonzero(np.triu(pair_mask, k=1)))
+    if rouse_prior_weight > 0.0:
+        if rouse_spring_constant is None:
+            adjacent = target[np.arange(n - 1), np.arange(1, n)]
+            adjacent_observed = pair_mask[np.arange(n - 1), np.arange(1, n)]
+            adjacent = adjacent[adjacent_observed & (adjacent > 0.0)]
+            if adjacent.size == 0:
+                raise ValueError(
+                    "rouse_spring_constant cannot be inferred without a finite "
+                    "positive observed adjacent squared distance"
+                )
+            rouse_spring_constant = 3.0 / float(np.median(adjacent))
+        return _nearest_edm_with_rouse_prior(
+            target,
+            pair_weights,
+            pair_count,
+            rouse_spring_constant,
+            rouse_prior_weight,
+            max_iterations,
+            relative_tolerance,
+            absolute_tolerance,
+        )
+
     B = _project_centered_psd(np.zeros_like(observed), gram_eigenvalue_floor)
     extrapolated = B.copy()
     momentum = 1.0

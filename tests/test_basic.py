@@ -440,6 +440,196 @@ def test_nearest_edm_rejects_invalid_gram_eigenvalue_floor(floor):
         hipps_dimes.nearest_edm(target, gram_eigenvalue_floor=floor)
 
 
+def test_centered_orthonormal_basis_has_expected_geometry():
+    basis = numerics._centered_orthonormal_basis(7)
+
+    assert basis.shape == (7, 6)
+    assert np.allclose(basis.T @ basis, np.eye(6), atol=1e-14)
+    assert np.allclose(np.sum(basis, axis=0), 0.0, atol=1e-14)
+
+
+def test_rouse_kl_prox_is_positive_and_satisfies_scalar_optimality():
+    trial = np.diag([-2.0, 0.5, 3.0])
+    reference_inverse = np.diag([0.25, 2.0, 4.0])
+    step_size = 0.2
+    coefficient = 0.3
+
+    proximal = numerics._rouse_kl_prox(trial, step_size, coefficient, reference_inverse)
+    eigenvalues = np.diag(proximal)
+    residual = (
+        eigenvalues
+        - np.diag(trial)
+        + step_size * coefficient * (np.diag(reference_inverse) - 1.0 / eigenvalues)
+    )
+
+    assert np.all(eigenvalues > 0.0)
+    assert np.allclose(residual, 0.0, atol=1e-13)
+
+
+def test_nearest_edm_rouse_prior_recovers_exact_rouse_reference():
+    n = 6
+    spring_constant = 2.0
+    reference, _, _ = numerics._rouse_reference_gram(n, spring_constant)
+    target = numerics._squared_distances_from_gram(reference)
+
+    fitted, gram, info = hipps_dimes.nearest_edm(
+        target,
+        rouse_prior_weight=0.1,
+        rouse_spring_constant=spring_constant,
+    )
+
+    assert info["converged"]
+    assert info["mean_rouse_kl"] == pytest.approx(0.0, abs=1e-13)
+    assert info["normalized_data_objective"] == pytest.approx(0.0, abs=1e-26)
+    assert np.allclose(fitted, target, atol=1e-13)
+    assert np.allclose(gram, reference, atol=1e-13)
+    assert np.all(np.linalg.eigvalsh(gram)[1:] > 0.0)
+
+
+def test_nearest_edm_stronger_rouse_prior_moves_fit_toward_reference():
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0, 2.0],
+            [1.0, 0.0, 9.0, 3.0],
+            [1.0, 9.0, 0.0, 1.0],
+            [2.0, 3.0, 1.0, 0.0],
+        ]
+    )
+    weights = np.zeros_like(target)
+    off_diagonal = ~np.eye(len(target), dtype=bool)
+    weights[off_diagonal] = 1.0 / np.square(target[off_diagonal])
+
+    _, weak_gram, weak = hipps_dimes.nearest_edm(
+        target,
+        weights,
+        rouse_prior_weight=1e-4,
+        rouse_spring_constant=3.0,
+        max_iterations=1000,
+        relative_tolerance=1e-7,
+    )
+    _, strong_gram, strong = hipps_dimes.nearest_edm(
+        target,
+        weights,
+        rouse_prior_weight=1.0,
+        rouse_spring_constant=3.0,
+        max_iterations=1000,
+        relative_tolerance=1e-7,
+    )
+
+    assert weak["converged"] and strong["converged"]
+    assert strong["mean_rouse_kl"] < weak["mean_rouse_kl"]
+    assert strong["normalized_data_objective"] > weak["normalized_data_objective"]
+    assert np.all(np.linalg.eigvalsh(weak_gram)[1:] > 0.0)
+    assert np.all(np.linalg.eigvalsh(strong_gram)[1:] > 0.0)
+    assert np.all(np.diff(weak["history"]["total_objective"]) <= 1e-12)
+    assert np.all(np.diff(strong["history"]["total_objective"]) <= 1e-12)
+
+
+def test_nearest_edm_rouse_prior_supports_missing_pairs_and_infers_scale():
+    target = np.array(
+        [
+            [0.0, 1.0, 4.0, np.nan],
+            [1.0, 0.0, 2.0, 5.0],
+            [4.0, 2.0, 0.0, 3.0],
+            [np.nan, 5.0, 3.0, 0.0],
+        ]
+    )
+
+    fitted, gram, info = hipps_dimes.nearest_edm(
+        target,
+        rouse_prior_weight=0.01,
+        max_iterations=1000,
+        relative_tolerance=1e-6,
+    )
+
+    assert info["converged"]
+    assert info["observed_pair_count"] == 5
+    assert info["rouse_spring_constant"] == pytest.approx(3.0 / 2.0)
+    assert np.isfinite(fitted).all()
+    assert np.all(np.linalg.eigvalsh(gram)[1:] > 0.0)
+    assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
+
+
+def test_nearest_edm_rouse_prior_relative_objective_is_scale_equivariant():
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 9.0],
+            [1.0, 9.0, 0.0],
+        ]
+    )
+    off_diagonal = ~np.eye(len(target), dtype=bool)
+    weights = np.zeros_like(target)
+    weights[off_diagonal] = 1.0 / np.square(target[off_diagonal])
+    options = {
+        "rouse_prior_weight": 0.1,
+        "rouse_spring_constant": 3.0,
+        "max_iterations": 1000,
+        "relative_tolerance": 1e-7,
+    }
+
+    fitted, gram, info = hipps_dimes.nearest_edm(target, weights, **options)
+    scale = 7.0
+    scaled_fitted, scaled_gram, scaled_info = hipps_dimes.nearest_edm(
+        scale * target,
+        weights / scale**2,
+        **{
+            **options,
+            "rouse_spring_constant": options["rouse_spring_constant"] / scale,
+        },
+    )
+
+    assert info["converged"] and scaled_info["converged"]
+    assert np.allclose(scaled_fitted / scale, fitted, rtol=1e-8, atol=1e-9)
+    assert np.allclose(scaled_gram / scale, gram, rtol=1e-8, atol=1e-9)
+    assert scaled_info["total_objective"] == pytest.approx(
+        info["total_objective"], rel=1e-10
+    )
+
+
+def test_nearest_edm_zero_rouse_prior_is_bitwise_backward_compatible():
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 9.0],
+            [1.0, 9.0, 0.0],
+        ]
+    )
+
+    default = hipps_dimes.nearest_edm(target)
+    explicit = hipps_dimes.nearest_edm(
+        target, rouse_prior_weight=0.0, rouse_spring_constant=2.0
+    )
+
+    assert np.array_equal(default[0], explicit[0])
+    assert np.array_equal(default[1], explicit[1])
+    assert default[2].keys() == explicit[2].keys()
+    for key in default[2]["history"]:
+        assert np.array_equal(default[2]["history"][key], explicit[2]["history"][key])
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"rouse_prior_weight": -0.1}, "finite nonnegative"),
+        ({"rouse_prior_weight": np.nan}, "finite nonnegative"),
+        (
+            {"rouse_prior_weight": 0.1, "rouse_spring_constant": 0.0},
+            "finite positive",
+        ),
+        (
+            {"rouse_prior_weight": 0.1, "gram_eigenvalue_floor": 0.1},
+            "cannot both be positive",
+        ),
+    ],
+)
+def test_nearest_edm_rejects_invalid_rouse_prior_options(options, message):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match=message):
+        hipps_dimes.nearest_edm(target, **options)
+
+
 def test_compute_modulus():
     """Moduli should use tau_p / 2 for stress-mode relaxation."""
     A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)

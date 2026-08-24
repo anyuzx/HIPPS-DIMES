@@ -411,6 +411,38 @@ convention, the corresponding per-coordinate covariance floor is one third of
 the Gram floor. Applying a floor to an already fitted Gram matrix is not
 equivalent to refitting with this constraint.
 
+As a physically structured alternative to the hard floor, add a soft Rouse
+prior:
+
+```python
+relative_weights = np.zeros_like(ddmap_observed)
+observed = np.isfinite(ddmap_observed) & (ddmap_observed > 0.0)
+relative_weights[observed] = 1.0 / ddmap_observed[observed] ** 2
+
+ddmap_rouse, gram_rouse, diagnostics = HD.nearest_edm(
+    ddmap_observed,
+    relative_weights,
+    rouse_prior_weight=1e-3,
+    rouse_spring_constant=None,
+)
+```
+
+For a positive prior weight, the solver divides the data objective by the
+number of observed unordered pairs and adds the prior weight times the mean
+per-mode Gaussian KL divergence from a free Rouse-chain Gram matrix. With the
+raw inverse-square weights above, the data term is exactly half the mean
+squared relative-distance error. If `rouse_spring_constant` is omitted, it is
+calibrated as `3 / median(ddmap_observed[i, i+1])` over observed positive
+adjacent pairs in reduced units with `kBT=1`. The soft prior guarantees `N-1`
+positive internal Gram modes without pinning them to a common spectral floor.
+It cannot be combined with a positive `gram_eigenvalue_floor`.
+
+Inspect `diagnostics["normalized_data_objective"]`,
+`diagnostics["mean_rouse_kl"]`, `diagnostics["total_objective"]`, and
+`diagnostics["proximal_gradient_norm"]` when the prior is active. The prior
+weight is a model-selection parameter; full rank alone does not identify a
+physically correct value.
+
 #### Additional Utility Functions
 
 The package also provides helper functions for direct use:

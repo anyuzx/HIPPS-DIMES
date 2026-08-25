@@ -827,5 +827,597 @@ def test_a2xyz_sample_conditioned_pair_distance_enforces_pair_norm():
     assert np.allclose(pair_distances, target_distance, rtol=1e-10, atol=1e-10)
 
 
+def test_gaussian_covariance_objective_gradient_matches_finite_difference():
+    """The exact soft-constraint objective should expose its true matrix gradient."""
+    n = 5
+    basis = numerics._centered_orthonormal_basis(n)
+    upper = np.triu_indices(n, k=1)
+    pair_vectors = basis[upper[0]] - basis[upper[1]]
+    reduced_gram = np.diag(np.linspace(0.8, 2.0, n - 1))
+    target = np.einsum(
+        "ij,ij->i", pair_vectors @ reduced_gram, pair_vectors, optimize=True
+    )
+    target *= np.linspace(0.95, 1.05, len(target))
+    inverse_variance = np.linspace(2.0, 5.0, len(target))
+    direction = np.arange((n - 1) ** 2, dtype=float).reshape(n - 1, n - 1)
+    direction = 0.5 * (direction + direction.T)
+    direction /= np.linalg.norm(direction)
+
+    objective, gradient, *_ = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram, pair_vectors, target, inverse_variance
+    )
+    step = 1e-6
+    forward = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram + step * direction,
+        pair_vectors,
+        target,
+        inverse_variance,
+    )[0]
+    backward = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram - step * direction,
+        pair_vectors,
+        target,
+        inverse_variance,
+    )[0]
+
+    assert np.isfinite(objective)
+    assert (forward - backward) / (2.0 * step) == pytest.approx(
+        np.sum(gradient * direction), rel=1e-7, abs=1e-8
+    )
+
+
+def test_gaussian_negative_entropy_proximal_map_is_positive_and_exact():
+    """The log-determinant proximal eigenvalues should solve their quadratics."""
+    trial_eigenvalues = np.array([-1e12, -2.0, 0.0, 3.0])
+    trial = np.diag(trial_eigenvalues)
+    step_size = 0.2
+
+    proximal, observed_eigenvalues, updated_eigenvalues = (
+        numerics._proximal_gaussian_negative_entropy(trial, step_size)
+    )
+
+    assert np.array_equal(observed_eigenvalues, trial_eigenvalues)
+    assert np.all(updated_eigenvalues > 0.0)
+    assert np.allclose(np.linalg.eigvalsh(proximal), updated_eigenvalues)
+    assert np.allclose(
+        np.square(updated_eigenvalues)
+        - observed_eigenvalues * updated_eigenvalues,
+        1.5 * step_size,
+        rtol=1e-13,
+        atol=1e-14,
+    )
+
+
+def test_gaussian_covariance_fit_stays_physical_and_satisfies_stationarity():
+    """The COV solver should converge inside the cone for heteroscedastic noise."""
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    fitted, gram, connectivity, info = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        max_iterations=30,
+        relative_tolerance=1e-9,
+        save_steps=[1],
+    )
+
+    assert info["converged"]
+    assert info["status"] == "optimality_tolerance"
+    assert np.all(np.diff(info["history"]["objective"]) <= 1e-10)
+    internal_gram = np.linalg.eigvalsh(gram)[1:]
+    assert np.all(internal_gram > 0.0)
+    connectivity_eigenvalues = np.linalg.eigvalsh(connectivity)
+    assert connectivity_eigenvalues[-1] <= 1e-10
+    assert np.count_nonzero(connectivity_eigenvalues < -1e-10) == n - 1
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+    upper = np.triu_indices(n, k=1)
+    # With Hamiltonian 1/2 sum k_ij r_ij^2, the exact first-order condition is
+    # D_fit-D_obs = variance_ij * k_ij / 2.
+    assert np.allclose(
+        (fitted - target)[upper],
+        0.5 * variance[upper] * connectivity[upper],
+        rtol=1e-7,
+        atol=1e-10,
+    )
+    assert sorted(info["connectivity_matrix_at_steps"]) == [1]
+
+
+def test_covariance_fista_matches_covariance_solver_with_signed_couplings():
+    """FISTA should monotonically converge to the calibrated COV solution."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    truth = numerics._connectivity_from_grounded_precision(grounded_precision)
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    variance = np.square(0.02 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    fitted_cov, gram_cov, connectivity_cov, info_cov = (
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            variance,
+            max_iterations=40,
+            relative_tolerance=1e-10,
+        )
+    )
+    fitted_fista, gram_fista, connectivity_fista, info_fista = (
+        HippsDimes.fit_gaussian_noise_covariance_fista(
+            target,
+            variance,
+            max_iterations=300,
+            relative_tolerance=1e-8,
+            save_steps=[1],
+        )
+    )
+
+    assert info_cov["converged"]
+    assert info_fista["converged"]
+    assert info_fista["status"] == "optimality_tolerance"
+    assert info_fista["accelerated"]
+    assert info_fista["monotone_restart"]
+    assert info_fista["allows_signed_offdiagonal_connectivity"]
+    assert info_fista["backtracking_reductions"] > 0
+    assert sorted(info_fista["connectivity_matrix_at_steps"]) == [1]
+    objective = info_fista["history"]["objective"]
+    assert np.all(np.diff(objective) <= 1e-10)
+    assert np.all(
+        info_fista["history"]["minimum_internal_gram_eigenvalue"] > 0.0
+    )
+    assert np.any(truth[np.triu_indices(n, k=1)] < 0.0)
+    assert np.any(connectivity_fista[np.triu_indices(n, k=1)] < 0.0)
+    assert np.allclose(fitted_fista, fitted_cov, rtol=2e-8, atol=1e-9)
+    assert np.allclose(gram_fista, gram_cov, rtol=2e-8, atol=1e-9)
+    assert np.allclose(
+        connectivity_fista, connectivity_cov, rtol=2e-8, atol=1e-9
+    )
+    assert np.max(np.abs(np.sum(connectivity_fista, axis=1))) <= 1e-12
+
+
+def test_covariance_fista_handles_invalid_target_edm_without_projection():
+    """The analytic proximal map should keep every iterate SPD for an invalid EDM."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    perturbed_value = 0.2 * target[0, n - 1]
+    target[0, n - 1] = perturbed_value
+    target[n - 1, 0] = perturbed_value
+    variance = np.square(0.03 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    assert np.linalg.eigvalsh(
+        numerics._centered_gram_from_squared_distances(target)
+    )[0] < -1e-3
+
+    _, gram, connectivity, info = (
+        HippsDimes.fit_gaussian_noise_covariance_fista(
+            target,
+            variance,
+            max_iterations=500,
+            relative_tolerance=1e-7,
+        )
+    )
+
+    assert info["converged"]
+    assert np.all(np.diff(info["history"]["objective"]) <= 1e-10)
+    assert np.all(info["history"]["minimum_internal_gram_eigenvalue"] > 0.0)
+    assert np.linalg.eigvalsh(gram)[1] > 0.0
+    assert np.linalg.eigvalsh(-connectivity)[1] > 0.0
+
+
+def test_gaussian_connectivity_cholesky_gradient_matches_finite_difference():
+    """The signed connectivity dual should expose its exact packed gradient."""
+    dimension = 4
+    lower = np.tril_indices(dimension)
+    diagonal_mask = lower[0] == lower[1]
+    factor = np.eye(dimension)
+    factor[lower] = np.linspace(-0.15, 0.20, len(lower[0]))
+    factor[np.diag_indices(dimension)] = [0.8, 1.1, 0.9, 1.2]
+    parameters = numerics._pack_log_cholesky(factor, lower, diagonal_mask)
+    inverse_sqrt_reference = np.diag([0.7, 1.2, 0.9, 1.1])
+    whitened_observed_covariance = np.array(
+        [
+            [1.0, 0.10, -0.03, 0.02],
+            [0.10, 0.9, 0.04, 0.0],
+            [-0.03, 0.04, 1.2, 0.08],
+            [0.02, 0.0, 0.08, 0.8],
+        ]
+    )
+    internal_variance = np.ones((dimension, dimension))
+    np.fill_diagonal(internal_variance, 0.0)
+    pinned_variance = np.linspace(0.5, 1.1, dimension)
+    direction = np.linspace(-0.3, 0.4, len(parameters))
+    direction /= np.linalg.norm(direction)
+
+    objective, gradient, _ = (
+        numerics._gaussian_connectivity_cholesky_objective_gradient(
+            parameters,
+            lower,
+            diagonal_mask,
+            inverse_sqrt_reference,
+            whitened_observed_covariance,
+            internal_variance,
+            pinned_variance,
+        )
+    )
+    step = 1e-6
+    forward = numerics._gaussian_connectivity_cholesky_objective_gradient(
+        parameters + step * direction,
+        lower,
+        diagonal_mask,
+        inverse_sqrt_reference,
+        whitened_observed_covariance,
+        internal_variance,
+        pinned_variance,
+    )[0]
+    backward = numerics._gaussian_connectivity_cholesky_objective_gradient(
+        parameters - step * direction,
+        lower,
+        diagonal_mask,
+        inverse_sqrt_reference,
+        whitened_observed_covariance,
+        internal_variance,
+        pinned_variance,
+    )[0]
+
+    assert np.isfinite(objective)
+    assert (forward - backward) / (2.0 * step) == pytest.approx(
+        np.dot(gradient, direction), rel=1e-7, abs=1e-8
+    )
+
+
+def test_connectivity_cholesky_matches_covariance_solver_with_signed_couplings():
+    """CHOL and COV should solve the same calibrated Gaussian model."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    truth = numerics._connectivity_from_grounded_precision(grounded_precision)
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    variance = np.square(0.02 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    fitted_cov, gram_cov, connectivity_cov, info_cov = (
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            variance,
+            max_iterations=40,
+            relative_tolerance=1e-10,
+        )
+    )
+    fitted_chol, gram_chol, connectivity_chol, info_chol = (
+        HippsDimes.fit_gaussian_noise_connectivity_cholesky(
+            target,
+            variance,
+            max_iterations=300,
+            gradient_tolerance=1e-10,
+            function_tolerance=1e-15,
+            stationarity_tolerance=1e-8,
+            save_steps=[1],
+        )
+    )
+
+    assert info_cov["converged"]
+    assert info_chol["converged"]
+    assert info_chol["allows_signed_offdiagonal_connectivity"]
+    assert info_chol["maximum_function_evaluations"] == 300 * 51 + 1
+    assert info_chol["optimizer_function_evaluations"] <= info_chol[
+        "maximum_function_evaluations"
+    ]
+    assert "0.125" in info_chol["objective_definition"]
+    assert sorted(info_chol["connectivity_matrix_at_steps"]) == [1]
+    assert np.any(truth[np.triu_indices(n, k=1)] < 0.0)
+    assert np.any(connectivity_chol[np.triu_indices(n, k=1)] < 0.0)
+    assert np.allclose(fitted_chol, fitted_cov, rtol=2e-7, atol=2e-8)
+    assert np.allclose(gram_chol, gram_cov, rtol=2e-7, atol=2e-8)
+    assert np.allclose(connectivity_chol, connectivity_cov, rtol=2e-7, atol=2e-8)
+    assert np.max(np.abs(np.sum(connectivity_chol, axis=1))) <= 1e-12
+    eigenvalues = np.linalg.eigvalsh(connectivity_chol)
+    assert eigenvalues[-1] <= 1e-10
+    assert np.count_nonzero(eigenvalues < -1e-10) == n - 1
+    upper = np.triu_indices(n, k=1)
+    assert np.allclose(
+        (fitted_chol - target)[upper],
+        0.5 * variance[upper] * connectivity_chol[upper],
+        rtol=2e-5,
+        atol=2e-8,
+    )
+
+
+def test_gaussian_connectivity_coordinate_minimum_is_exact_and_stable():
+    """A CIS edge step should attain its line optimum inside the SPD domain."""
+    current_connectivity = -0.2
+    current_squared_distance = 2.4
+    observed_squared_distance = 2.0
+    variance = 0.3
+
+    delta, determinant_ratio, objective_change = (
+        numerics._gaussian_connectivity_coordinate_minimum(
+            current_connectivity,
+            current_squared_distance,
+            observed_squared_distance,
+            variance,
+        )
+    )
+    updated_connectivity = current_connectivity + delta
+    updated_squared_distance = current_squared_distance / determinant_ratio
+
+    assert determinant_ratio > 0.0
+    assert determinant_ratio == pytest.approx(
+        1.0 + delta * current_squared_distance / 3.0
+    )
+    assert objective_change < 0.0
+    assert updated_squared_distance - observed_squared_distance == pytest.approx(
+        0.5 * variance * updated_connectivity,
+        rel=1e-13,
+        abs=1e-13,
+    )
+
+
+def test_gaussian_l1_coordinate_minimum_selects_exact_zero_kink():
+    """The exact L1 edge update should select zero when its KKT interval holds."""
+    current_connectivity = 0.2
+    current_squared_distance = 2.4
+    rho = current_squared_distance / 3.0
+    zero_determinant_ratio = 1.0 - rho * current_connectivity
+    observed_squared_distance = (
+        current_squared_distance / zero_determinant_ratio
+    )
+
+    delta, determinant_ratio, objective_change = (
+        numerics._gaussian_connectivity_coordinate_minimum(
+            current_connectivity,
+            current_squared_distance,
+            observed_squared_distance,
+            0.3,
+            0.1,
+        )
+    )
+
+    assert current_connectivity + delta == 0.0
+    assert determinant_ratio == pytest.approx(zero_determinant_ratio)
+    assert objective_change < 0.0
+    assert (
+        current_squared_distance / determinant_ratio
+        - observed_squared_distance
+    ) == pytest.approx(0.0, abs=1e-14)
+
+
+def test_l1_fista_and_coordinate_descent_match_with_exact_sparsity():
+    """L1-FISTA and L1-CIS should attain the same unique signed sparse fit."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    connectivity_l1 = 0.1
+
+    fitted_fista, gram_fista, connectivity_fista, info_fista = (
+        HippsDimes.fit_gaussian_noise_covariance_fista(
+            target,
+            variance,
+            connectivity_l1=connectivity_l1,
+            max_iterations=500,
+            relative_tolerance=1e-9,
+        )
+    )
+    fitted_cis, gram_cis, connectivity_cis, info_cis = (
+        HippsDimes.fit_gaussian_noise_connectivity_coordinate_descent(
+            target,
+            variance,
+            connectivity_l1=connectivity_l1,
+            max_iterations=200,
+            stationarity_tolerance=1e-9,
+        )
+    )
+
+    assert info_fista["converged"]
+    assert info_cis["converged"]
+    assert info_fista["status"] == "stationarity_tolerance"
+    assert info_fista["convergence_definition"] == (
+        "physical L1 KKT stationarity residual norm"
+    )
+    assert info_fista["relative_gradient_norm"] > 1e-9
+    assert info_fista["connectivity_l1"] == connectivity_l1
+    assert info_cis["connectivity_l1"] == connectivity_l1
+    assert info_fista["relative_stationarity_residual"] <= 1e-9
+    assert info_cis["relative_stationarity_residual"] <= 1e-9
+    assert np.count_nonzero(
+        connectivity_cis[np.triu_indices(n, k=1)] == 0.0
+    ) > 0
+    assert np.all(np.diff(info_fista["history"]["objective"]) <= 1e-10)
+    assert np.all(np.diff(info_cis["history"]["objective"]) <= 1e-10)
+    assert np.linalg.norm(fitted_fista - fitted_cis) / np.linalg.norm(
+        fitted_cis
+    ) <= 1e-7
+    assert np.linalg.norm(gram_fista - gram_cis) / np.linalg.norm(
+        gram_cis
+    ) <= 1e-7
+    assert np.linalg.norm(connectivity_fista - connectivity_cis) / np.linalg.norm(
+        connectivity_cis
+    ) <= 2e-7
+    assert info_fista["connectivity_dual_objective"] == pytest.approx(
+        info_cis["connectivity_dual_objective"], rel=2e-9, abs=2e-8
+    )
+
+
+@pytest.mark.parametrize(
+    "solver",
+    [
+        HippsDimes.fit_gaussian_noise_covariance_fista,
+        HippsDimes.fit_gaussian_noise_connectivity_coordinate_descent,
+    ],
+)
+@pytest.mark.parametrize("invalid_l1", [-1.0, np.inf, np.nan, True])
+def test_exact_l1_solvers_reject_invalid_coefficient(solver, invalid_l1):
+    """Both exact L1 solvers should reject invalid sparsity coefficients."""
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="connectivity_l1"):
+        solver(target, 0.1, connectivity_l1=invalid_l1, max_iterations=1)
+
+
+@pytest.mark.parametrize(
+    "solver, solver_options",
+    [
+        (
+            HippsDimes.fit_gaussian_noise_covariance_fista,
+            {"max_iterations": 200, "relative_tolerance": 1e-8},
+        ),
+        (
+            HippsDimes.fit_gaussian_noise_connectivity_coordinate_descent,
+            {"max_iterations": 100, "stationarity_tolerance": 1e-8},
+        ),
+    ],
+)
+def test_exact_l1_solvers_preserve_zero_coefficient_path(solver, solver_options):
+    """An explicit zero L1 coefficient should preserve the original result."""
+    n = 4
+    grounded_precision = np.eye(n - 1) + 0.1 * np.ones((n - 1, n - 1))
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+
+    baseline = solver(target, 0.01, **solver_options)
+    explicit_zero = solver(
+        target, 0.01, connectivity_l1=0.0, **solver_options
+    )
+
+    for baseline_matrix, zero_matrix in zip(baseline[:3], explicit_zero[:3]):
+        assert np.array_equal(baseline_matrix, zero_matrix)
+    assert baseline[3]["iterations"] == explicit_zero[3]["iterations"]
+    assert baseline[3]["objective"] == explicit_zero[3]["objective"]
+
+
+def test_connectivity_coordinate_descent_matches_covariance_solver_signed_case():
+    """CIS should converge monotonically to the calibrated COV solution."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    truth = numerics._connectivity_from_grounded_precision(grounded_precision)
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    variance = np.square(0.02 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    fitted_cov, gram_cov, connectivity_cov, info_cov = (
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            variance,
+            max_iterations=40,
+            relative_tolerance=1e-10,
+        )
+    )
+    fitted_cis, gram_cis, connectivity_cis, info_cis = (
+        HippsDimes.fit_gaussian_noise_connectivity_coordinate_descent(
+            target,
+            variance,
+            max_iterations=120,
+            stationarity_tolerance=1e-10,
+            save_steps=[1],
+        )
+    )
+
+    assert info_cov["converged"]
+    assert info_cis["converged"]
+    assert info_cis["status"] == "stationarity_tolerance"
+    assert info_cis["relative_stationarity_residual"] <= 1e-10
+    assert info_cis["allows_signed_offdiagonal_connectivity"]
+    assert info_cis["coordinate_updates"] == (
+        info_cis["iterations"] * info_cis["pairs_per_sweep"]
+    )
+    assert sorted(info_cis["connectivity_matrix_at_steps"]) == [1]
+    assert np.all(np.diff(info_cis["history"]["objective"]) <= 1e-11)
+    assert np.all(info_cis["history"]["minimum_coordinate_determinant_ratio"] > 0.0)
+    assert np.any(truth[np.triu_indices(n, k=1)] < 0.0)
+    assert np.any(connectivity_cis[np.triu_indices(n, k=1)] < 0.0)
+    assert np.allclose(fitted_cis, fitted_cov, rtol=3e-6, atol=1e-7)
+    assert np.allclose(gram_cis, gram_cov, rtol=3e-6, atol=1e-7)
+    assert np.allclose(connectivity_cis, connectivity_cov, rtol=3e-6, atol=3e-7)
+    assert np.max(np.abs(np.sum(connectivity_cis, axis=1))) <= 1e-12
+    eigenvalues = np.linalg.eigvalsh(connectivity_cis)
+    assert eigenvalues[-1] <= 1e-10
+    assert np.count_nonzero(eigenvalues < -1e-10) == n - 1
+    upper = np.triu_indices(n, k=1)
+    assert np.allclose(
+        (fitted_cis - target)[upper],
+        0.5 * variance[upper] * connectivity_cis[upper],
+        rtol=1e-6,
+        atol=2e-9,
+    )
+
+
+def test_coordinate_descent_safeguards_invalid_edm_boundary_start():
+    """CIS should damp and retry instead of losing SPD to boundary roundoff."""
+    n = 5
+    grounded_precision = np.eye(n - 1) + 0.15 * np.ones((n - 1, n - 1))
+    target = numerics._squared_distances_from_grounded_precision(
+        grounded_precision
+    )
+    perturbed_value = 0.2 * target[0, n - 1]
+    target[0, n - 1] = perturbed_value
+    target[n - 1, 0] = perturbed_value
+    variance = np.square(0.03 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    assert np.linalg.eigvalsh(
+        numerics._centered_gram_from_squared_distances(target)
+    )[0] < -1e-3
+
+    with pytest.warns(RuntimeWarning, match="max_iterations"):
+        _, _, connectivity, info = (
+            HippsDimes.fit_gaussian_noise_connectivity_coordinate_descent(
+                target,
+                variance,
+                max_iterations=5,
+                initial_gram_floor_relative=1e-8,
+            )
+        )
+
+    assert info["sweep_retries"] > 0
+    assert info["damped_sweeps"] > 0
+    assert info["minimum_accepted_sweep_relaxation"] < 1.0
+    assert np.all(info["history"]["sweep_relaxation"] > 0.0)
+    assert np.all(info["history"]["sweep_relaxation"] <= 1.0)
+    assert np.all(np.diff(info["history"]["objective"]) <= 1e-8)
+    assert np.linalg.eigvalsh(-connectivity[:-1, :-1])[0] > 0.0
+
+
+def test_heteroscedastic_iterative_scaling_uses_elementwise_proximal_shrink():
+    """A variance matrix should generalize the historical scalar shrink pairwise."""
+    n = 5
+    initial = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        initial, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.zeros((n, n), dtype=float)
+    upper = np.triu_indices(n, k=1)
+    variance[upper] = np.linspace(0.01, 0.10, len(upper[0]))
+    variance[(upper[1], upper[0])] = variance[upper]
+    learning_rate = 2.0
+    optimizer = HippsDimes.Optimize(target, connectivity_matrix=initial.copy())
+
+    _, _, _, observed, _ = optimizer.run_noisy(
+        1,
+        variance,
+        learning_rate=learning_rate,
+        method="IS",
+        show_progress=False,
+    )
+
+    expected = initial / (1.0 + learning_rate * variance)
+    expected = HippsDimes.a2a(expected)
+    assert np.allclose(observed, expected, rtol=1e-12, atol=1e-12)
+
+
 if __name__ == "__main__":
     pytest.main([__file__]) 

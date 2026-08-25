@@ -26,6 +26,38 @@ def _progress_scalar(value):
     return float(value)
 
 
+def _coerce_gaussian_noise_variance(noise_variance, n):
+    """Validate a scalar or heteroscedastic Gaussian-variance matrix."""
+    if isinstance(noise_variance, (bool, np.bool_)):
+        raise ValueError("gaussian_noise_variance must be non-negative")
+    if np.isscalar(noise_variance):
+        try:
+            value = float(noise_variance)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "gaussian_noise_variance must be a finite non-negative scalar or matrix"
+            ) from error
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError("gaussian_noise_variance must be non-negative and finite")
+        return value
+
+    matrix = np.asarray(noise_variance, dtype=np.float64)
+    if matrix.shape != (n, n):
+        raise ValueError(
+            f"gaussian_noise_variance matrix must have shape ({n}, {n}), "
+            f"got {matrix.shape}"
+        )
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError("gaussian_noise_variance matrix must be finite")
+    if np.any(matrix < 0.0):
+        raise ValueError("gaussian_noise_variance matrix must be non-negative")
+    if not np.allclose(matrix, matrix.T, rtol=1e-12, atol=1e-14):
+        raise ValueError("gaussian_noise_variance matrix must be symmetric")
+    matrix = 0.5 * (matrix + matrix.T)
+    np.fill_diagonal(matrix, 0.0)
+    return matrix
+
+
 def _gpu_centered_entropy_from_eigenvalues(eigenvalues, zero_tol=1e-12):
     """Return ``-log det+ K`` after explicitly excluding the COM mode."""
     positive_mask = eigenvalues > zero_tol
@@ -634,11 +666,10 @@ class Optimize:
             self.theta = self.A + learning_rate * gradient_t
             self.A = self.theta + (t / (t + 3)) * (self.theta - theta_previous)
 
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self.A = self.A * shrink
-            if method == 'GD' and self.theta is not None:
-                self.theta = self.theta * shrink
+        shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
+        self.A = self.A * shrink
+        if method == 'GD' and self.theta is not None:
+            self.theta = self.theta * shrink
 
         self.A = np.nan_to_num(self.A)
         self.A = 0.5 * (self.A + self.A.T)
@@ -778,9 +809,8 @@ class Optimize:
         else:
             self._A_gpu = self._A_gpu + learning_rate * gradient_t_gpu
 
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self._A_gpu = self._A_gpu * shrink
+        shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
+        self._A_gpu = self._A_gpu * shrink
 
         self._A_gpu = cp.nan_to_num(self._A_gpu)
         self._A_gpu = 0.5 * (self._A_gpu + self._A_gpu.T)
@@ -910,10 +940,9 @@ class Optimize:
         momentum_rate = t / (t + 3)
         self._A_gpu = self._theta_gpu + momentum_rate * (self._theta_gpu - theta_previous_gpu)
 
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self._A_gpu = self._A_gpu * shrink
-            self._theta_gpu = self._theta_gpu * shrink
+        shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
+        self._A_gpu = self._A_gpu * shrink
+        self._theta_gpu = self._theta_gpu * shrink
 
         self._A_gpu = cp.nan_to_num(self._A_gpu)
         self._A_gpu = 0.5 * (self._A_gpu + self._A_gpu.T)
@@ -1138,8 +1167,10 @@ class Optimize:
         ----------
         epoch : int
             Number of iterations
-        gaussian_noise_variance : float
-            Noise variance for constraints (L2 shrink strength).
+        gaussian_noise_variance : float or (n, n) array_like
+            Scalar or pair-specific noise variance (L2 shrink strength). A
+            matrix applies an elementwise proximal shrink to the independent
+            off-diagonal connectivity parameters.
         general_method : str
             Only 'optimization' is supported for the noisy solver.
         save_steps : list of int, optional
@@ -1165,6 +1196,16 @@ class Optimize:
         """
         if general_method != 'optimization':
             raise ValueError("run_noisy supports only general_method='optimization'")
+
+        gaussian_noise_variance = _coerce_gaussian_noise_variance(
+            gaussian_noise_variance, self.n
+        )
+        if self.use_gpu and not np.isscalar(gaussian_noise_variance):
+            gaussian_noise_variance_backend = cp.asarray(
+                gaussian_noise_variance, dtype=self._gpu_dtype
+            )
+        else:
+            gaussian_noise_variance_backend = gaussian_noise_variance
 
         console = Console()
         method_name = kwargs.get('method')
@@ -1197,7 +1238,11 @@ class Optimize:
             disable=not show_progress,
         ) as pbar:
             for t in pbar:
-                self.__update_parameter_noisy(t, gaussian_noise_variance=gaussian_noise_variance, **kwargs)
+                self.__update_parameter_noisy(
+                    t,
+                    gaussian_noise_variance=gaussian_noise_variance_backend,
+                    **kwargs,
+                )
                 if self.use_gpu:
                     loss_hist_gpu[t] = self._loss_gpu
                     entropy_hist_gpu[t] = self._entropy_gpu

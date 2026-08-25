@@ -698,3 +698,501 @@ def test_run_optimization_show_progress_false_suppresses_progress_bar_output(cap
     combined_output = captured.out + captured.err
     assert "Performing optimization" not in combined_output
     assert "iteration/s" not in combined_output
+
+
+def test_run_optimization_covariance_method_records_exact_solver_contract():
+    """COV should expose its cone certificate and heteroscedastic provenance."""
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="ddmap",
+        method="COV",
+        gaussian_noise_variance=variance,
+        iteration=30,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        save_steps=[1],
+    )
+    parameters = dict(
+        zip(results["run_parameters"]["parameter"], results["run_parameters"]["value"])
+    )
+
+    assert results["covariance_optimization"]["converged"]
+    assert results["gram_matrix"].shape == (n, n)
+    assert np.allclose(results["gaussian_noise_variance"], variance)
+    assert sorted(results["connectivity_matrix_at_steps"]) == [1]
+    assert {
+        "objective",
+        "data_objective",
+        "relative_gradient_norm",
+        "minimum_internal_gram_eigenvalue",
+    } <= set(results["iteration_series"])
+    assert parameters["gaussian_noise_variance_kind"] == "matrix"
+    assert parameters["gaussian_noise_solver"] == "convex_covariance_cone"
+    assert parameters["use_gpu_enabled"] is False
+
+
+def test_run_optimization_fista_method_records_proximal_solver_contract():
+    """FISTA should expose its proximal and covariance-cone certificates."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="ddmap",
+        method="FISTA",
+        gaussian_noise_variance=variance,
+        iteration=500,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        save_steps=[1],
+    )
+    parameters = dict(
+        zip(results["run_parameters"]["parameter"], results["run_parameters"]["value"])
+    )
+    optimization = results["covariance_proximal_optimization"]
+
+    assert optimization["converged"]
+    assert optimization["accelerated"]
+    assert optimization["monotone_restart"]
+    assert optimization["allows_signed_offdiagonal_connectivity"]
+    assert optimization["requires_complete_pairwise_observations"]
+    assert results["gram_matrix"].shape == (n, n)
+    assert np.allclose(results["gaussian_noise_variance"], variance)
+    assert sorted(results["connectivity_matrix_at_steps"]) == [1]
+    assert {
+        "objective",
+        "relative_gradient_norm",
+        "proximal_gradient_mapping_norm",
+        "minimum_internal_gram_eigenvalue",
+        "step_size",
+        "restarted",
+    } <= set(results["iteration_series"])
+    assert np.all(np.diff(results["iteration_series"]["objective"]) <= 1e-10)
+    assert parameters["gaussian_noise_variance_kind"] == "matrix"
+    assert parameters["gaussian_noise_solver"] == "covariance_proximal_fista"
+    assert parameters["use_gpu_enabled"] is False
+
+
+def test_run_optimization_cholesky_method_records_signed_solver_contract():
+    """CHOL should expose L-BFGS and physical-stationarity diagnostics."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="ddmap",
+        method="CHOL",
+        gaussian_noise_variance=variance,
+        iteration=100,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        save_steps=[1],
+    )
+    parameters = dict(
+        zip(results["run_parameters"]["parameter"], results["run_parameters"]["value"])
+    )
+    optimization = results["connectivity_cholesky_optimization"]
+
+    assert optimization["converged"]
+    assert optimization["optimizer_success"]
+    assert optimization["allows_signed_offdiagonal_connectivity"]
+    assert results["gram_matrix"].shape == (n, n)
+    assert np.allclose(results["gaussian_noise_variance"], variance)
+    assert sorted(results["connectivity_matrix_at_steps"]) == [1]
+    assert {
+        "objective",
+        "gaussian_connectivity_penalty",
+        "relative_stationarity_residual",
+        "minimum_grounded_precision_eigenvalue",
+    } <= set(results["iteration_series"])
+    assert parameters["gaussian_noise_variance_kind"] == "matrix"
+    assert parameters["gaussian_noise_solver"] == (
+        "signed_connectivity_cholesky_lbfgsb"
+    )
+    assert parameters["use_gpu_enabled"] is False
+
+
+def test_run_optimization_cis_method_records_exact_coordinate_contract():
+    """CIS should expose sweep-level and physical-stationarity diagnostics."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="ddmap",
+        method="CIS",
+        gaussian_noise_variance=variance,
+        iteration=100,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        save_steps=[1],
+    )
+    parameters = dict(
+        zip(results["run_parameters"]["parameter"], results["run_parameters"]["value"])
+    )
+    optimization = results["connectivity_coordinate_optimization"]
+
+    assert optimization["converged"]
+    assert optimization["status"] == "stationarity_tolerance"
+    assert optimization["allows_signed_offdiagonal_connectivity"]
+    assert optimization["coordinate_updates"] == (
+        optimization["iterations"] * optimization["pairs_per_sweep"]
+    )
+    assert results["gram_matrix"].shape == (n, n)
+    assert np.allclose(results["gaussian_noise_variance"], variance)
+    assert sorted(results["connectivity_matrix_at_steps"]) == [1]
+    assert {
+        "objective",
+        "gaussian_connectivity_penalty",
+        "relative_stationarity_residual",
+        "minimum_coordinate_determinant_ratio",
+    } <= set(results["iteration_series"])
+    assert parameters["gaussian_noise_variance_kind"] == "matrix"
+    assert parameters["gaussian_noise_solver"] == (
+        "signed_connectivity_exact_cyclic_coordinate_descent"
+    )
+    assert parameters["use_gpu_enabled"] is False
+
+
+@pytest.mark.parametrize(
+    "method, info_key, iterations",
+    [
+        ("FISTA", "covariance_proximal_optimization", 1000),
+        ("CIS", "connectivity_coordinate_optimization", 200),
+    ],
+)
+def test_run_optimization_combines_gaussian_noise_with_exact_l1(
+    method, info_key, iterations
+):
+    """The public API should expose the shared Gaussian plus L1 objective."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="ddmap",
+        method=method,
+        gaussian_noise_variance=variance,
+        lamd=0.1,
+        reg="L1",
+        iteration=iterations,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    parameters = dict(
+        zip(results["run_parameters"]["parameter"], results["run_parameters"]["value"])
+    )
+    optimization = results[info_key]
+
+    assert optimization["converged"]
+    assert optimization["connectivity_l1"] == 0.1
+    assert optimization["relative_stationarity_residual"] <= 1e-7
+    assert optimization["connectivity_l1_penalty"] > 0.0
+    assert parameters["lamd"] == 0.1
+    assert parameters["reg"] == "L1"
+    assert parameters["connectivity_l1"] == 0.1
+
+
+@pytest.mark.parametrize(
+    "method, reg",
+    [("COV", "L1"), ("CHOL", "L1"), ("FISTA", "L2"), ("CIS", "L2")],
+)
+def test_gaussian_noise_rejects_unsupported_extra_regularization(method, reg):
+    """Only exact L1-FISTA and L1-CIS may combine noise variance with lamd."""
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="only for method='FISTA' or method='CIS'"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.1,
+            lamd=0.01,
+            reg=reg,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_cli_covariance_method_loads_heteroscedastic_variance_map(tmp_path):
+    """The CLI should load a .npy variance map and preserve it in pickle output."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    target_path = tmp_path / "target.npy"
+    variance_path = tmp_path / "variance.npy"
+    output_prefix = tmp_path / "covariance_fit"
+    np.save(target_path, target)
+    np.save(variance_path, variance)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(target_path),
+            str(output_prefix),
+            "--input-type",
+            "ddmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "COV",
+            "--gaussian-noise-variance-map",
+            str(variance_path),
+            "--iteration",
+            "30",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(tmp_path / "covariance_fit_HIPPS_DIMES_results.pkl", "rb") as fin:
+        payload = pickle.load(fin)
+    assert payload["covariance_optimization"]["converged"]
+    assert np.allclose(payload["gaussian_noise_variance"], variance)
+
+
+def test_cli_fista_method_loads_heteroscedastic_variance_map(tmp_path):
+    """The CLI should expose FISTA and preserve its convergence certificate."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    target_path = tmp_path / "target.npy"
+    variance_path = tmp_path / "variance.npy"
+    output_prefix = tmp_path / "fista_fit"
+    np.save(target_path, target)
+    np.save(variance_path, variance)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(target_path),
+            str(output_prefix),
+            "--input-type",
+            "ddmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "FISTA",
+            "--gaussian-noise-variance-map",
+            str(variance_path),
+            "--lamd",
+            "0.1",
+            "--reg",
+            "L1",
+            "--iteration",
+            "1000",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(tmp_path / "fista_fit_HIPPS_DIMES_results.pkl", "rb") as fin:
+        payload = pickle.load(fin)
+    assert payload["covariance_proximal_optimization"]["converged"]
+    assert payload["covariance_proximal_optimization"]["connectivity_l1"] == 0.1
+    assert np.allclose(payload["gaussian_noise_variance"], variance)
+
+
+def test_cli_cholesky_method_loads_heteroscedastic_variance_map(tmp_path):
+    """The CLI should expose CHOL and preserve its convergence certificate."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    target_path = tmp_path / "target.npy"
+    variance_path = tmp_path / "variance.npy"
+    output_prefix = tmp_path / "cholesky_fit"
+    np.save(target_path, target)
+    np.save(variance_path, variance)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(target_path),
+            str(output_prefix),
+            "--input-type",
+            "ddmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "CHOL",
+            "--gaussian-noise-variance-map",
+            str(variance_path),
+            "--iteration",
+            "100",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(tmp_path / "cholesky_fit_HIPPS_DIMES_results.pkl", "rb") as fin:
+        payload = pickle.load(fin)
+    assert payload["connectivity_cholesky_optimization"]["converged"]
+    assert np.allclose(payload["gaussian_noise_variance"], variance)
+
+
+def test_cli_cis_method_loads_heteroscedastic_variance_map(tmp_path):
+    """The CLI should expose CIS and preserve its convergence certificate."""
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    target_path = tmp_path / "target.npy"
+    variance_path = tmp_path / "variance.npy"
+    output_prefix = tmp_path / "coordinate_fit"
+    np.save(target_path, target)
+    np.save(variance_path, variance)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(target_path),
+            str(output_prefix),
+            "--input-type",
+            "ddmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "CIS",
+            "--gaussian-noise-variance-map",
+            str(variance_path),
+            "--lamd",
+            "0.1",
+            "--reg",
+            "L1",
+            "--iteration",
+            "100",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(tmp_path / "coordinate_fit_HIPPS_DIMES_results.pkl", "rb") as fin:
+        payload = pickle.load(fin)
+    assert payload["connectivity_coordinate_optimization"]["converged"]
+    assert payload["connectivity_coordinate_optimization"]["connectivity_l1"] == 0.1
+    assert np.allclose(payload["gaussian_noise_variance"], variance)
+
+
+@pytest.mark.parametrize("method", ["COV", "FISTA", "CHOL", "CIS"])
+def test_exact_gaussian_methods_require_positive_noise_variance(method):
+    """The calibrated Gaussian solvers have no zero-variance mode."""
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="requires positive Gaussian noise variance"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.0,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("method", ["FISTA", "CHOL", "CIS"])
+def test_connectivity_methods_reject_missing_pair_constraints(method):
+    """Complete-pair Gaussian solvers must not silently fit missing edges."""
+    target = np.array(
+        [
+            [0.0, 1.0, np.nan],
+            [1.0, 0.0, 1.5],
+            [np.nan, 1.5, 0.0],
+        ]
+    )
+
+    with pytest.raises(ValueError, match="every off-diagonal squared distance"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.1,
+            ignore_missing_data=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("method", ["FISTA", "CHOL", "CIS"])
+def test_signed_connectivity_methods_reject_nonnegative_enforcement(method):
+    """Signed exact solvers must not silently project their connectivity."""
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="signed-connectivity solver"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.1,
+            enforce_nonnegative_connectivity_matrix=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )

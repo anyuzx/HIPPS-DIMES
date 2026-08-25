@@ -33,10 +33,11 @@ def _parse_save_steps(save_steps_str):
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
 @click.option('-s', '--selection', type=str, required=False, help='For cooler: any valid selector for cooler.Cooler.matrix().fetch(), e.g. "chr1" or "chr1::start-end". For .hic: use "chr1:start1-end1,chr2:start2-end2"')
-@click.option('-m', '--method', type=click.Choice(['IS', 'GD', 'DI'], case_sensitive=True), default='IS', show_default=True, help='specify the method. IS: Iterative Scaling. GD: Gradient Descent. DI: Direct Inversion. When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.')
-@click.option('-l', '--lamd', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Specify the weight for the regularization.')
-@click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
-@click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Noise variance for independent Gaussian noise on constraints (IS/GD only). Cannot be combined with --lamd.')
+@click.option('-m', '--method', type=click.Choice(['IS', 'GD', 'DI', 'COV', 'FISTA', 'CHOL', 'CIS'], case_sensitive=True), default='IS', show_default=True, help='specify the method. IS: legacy Iterative Scaling. GD: Gradient Descent. DI: Direct Inversion. COV: Newton-CG Gaussian fit in the covariance cone. FISTA: analytic log-determinant proximal-gradient fit in the covariance cone. CHOL: calibrated signed-connectivity Cholesky/L-BFGS-B fit. CIS: calibrated signed-connectivity exact cyclic coordinate minimization. FISTA, CHOL, and CIS require complete pairwise distances. When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix.')
+@click.option('-l', '--lamd', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Specify the regularization weight. With Gaussian-noise FISTA or CIS, use together with --reg L1 for exact signed-connectivity sparsity.')
+@click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='Specify L1 or L2 regularization. Gaussian-noise FISTA/CIS support only the L1 combination with --lamd.')
+@click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Scalar Gaussian constraint-noise variance (IS/GD heuristic or COV/FISTA/CHOL/CIS calibrated objective). May be combined with --lamd only for FISTA/CIS with --reg L1.')
+@click.option('--gaussian-noise-variance-map', type=click.Path(exists=True, dir_okay=False), default=None, help='Path to a symmetric heteroscedastic variance matrix (.npy or text). Cannot be combined with --gaussian-noise-variance; may be combined with --lamd only for FISTA/CIS with --reg L1.')
 @click.option('--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization')
 @click.option('--momentum', type=click.FloatRange(0, 1), default=0.0, show_default=True, help='Momentum coefficient for IS method. RECOMMENDED: Use 0.95 with --nesterov for fastest convergence (~50%% faster). Use 0.9 for conservative settings. Only applies when method=IS.')
 @click.option('--nesterov', is_flag=True, default=False, show_default=True, help='Use Nesterov Accelerated Gradient (NAG). Enables higher momentum (0.95) without divergence. RECOMMENDED: Use with --momentum 0.95 for fastest convergence.')
@@ -57,7 +58,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-pickle', is_flag=True, default=False, show_default=True, help='Save the returned results dictionary to {output_prefix}_HIPPS_DIMES_results.pkl and suppress the default text/CSV/XYZ file outputs')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, gaussian_noise_variance_map, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -65,6 +66,16 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     """
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
+    if gaussian_noise_variance_map is not None and gaussian_noise_variance > 0.0:
+        raise click.UsageError(
+            '--gaussian-noise-variance-map cannot be combined with '
+            '--gaussian-noise-variance'
+        )
+    resolved_noise_variance = (
+        gaussian_noise_variance_map
+        if gaussian_noise_variance_map is not None
+        else gaussian_noise_variance
+    )
 
     run_optimization(
         input_path=input,
@@ -77,7 +88,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         method=method,
         lamd=lamd,
         reg=reg,
-        gaussian_noise_variance=gaussian_noise_variance,
+        gaussian_noise_variance=resolved_noise_variance,
         iteration=iteration,
         learning_rate=learning_rate,
         momentum=momentum,

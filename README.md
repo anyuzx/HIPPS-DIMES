@@ -142,11 +142,12 @@ This script will generate several files:
   this work 10.1126/science.aaf8084. Default: 4.0.
 - `-s, --selection`: Specify chromosome or region. This option is required
   when the input file has `cooler` or `.hic` format. For cooler files, the value is passed to the `cooler.Cooler.matrix().fetch()` method. For .hic files, use format "chr1:start1-end1,chr2:start2-end2". For details on cooler selectors, please refer to their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
-- `-m, --method`: Specify the method used for optimization. Options: IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
-- `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. Regularization is typically used to avoid over-fitting.
+- `-m, --method`: Specify the method used for optimization. Options: IS (legacy Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion), COV (Newton-CG Gaussian optimization in the covariance cone), FISTA (analytic log-determinant proximal-gradient optimization in the covariance cone), CHOL (signed connectivity-space Cholesky/L-BFGS-B optimization), and CIS (exact cyclic signed-connectivity coordinate minimization). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore-Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
+- `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. With Gaussian-noise FISTA or CIS, `--lamd LAMBDA --reg L1` adds an exact signed-connectivity sparsity penalty while retaining the variance-derived L2 term.
 - `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
-- `--gaussian-noise-variance`: Noise variance for independent Gaussian noise on constraints (IS/GD only). This enables denoising when Gaussian noise with known variance is assumed. Cannot be combined with `--lamd`.
-- `-i, --iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slows down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed for good convergence is larger. Default: 10000.
+- `--gaussian-noise-variance`: Scalar variance for independent Gaussian noise on squared-distance constraints. IS/GD apply the historical proximal-shrink heuristic; COV, FISTA, CHOL, and CIS minimize calibrated Gaussian soft-constraint objectives. It may be combined with `--lamd` only for FISTA or CIS with `--reg L1`.
+- `--gaussian-noise-variance-map`: Path to a symmetric pair-specific variance matrix in NumPy `.npy` or text format. This is the heteroscedastic counterpart of `--gaussian-noise-variance`; the two options are mutually exclusive.
+- `-i, --iteration`: Maximum optimizer iterations. For FISTA, one iteration is one accepted proximal-gradient step; for CIS, one iteration is one deterministic sweep through all unique pair couplings. Default: 10000.
 - `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
 - `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
 - `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
@@ -167,6 +168,174 @@ This script will generate several files:
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
 - `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
 - `-q, --quiet`: Quiet mode: disable fancy tables display, keep only the progress bar.
+
+#### Gaussian-noise solvers
+
+The existing IS/GD noise path applies the scalar or pair-specific proximal
+shrink elementwise to the independent off-diagonal connectivity parameters.
+It is retained for compatibility and comparative experiments, but its
+trajectory is not the optimizer of a Gaussian likelihood.
+
+For a calibrated Gaussian error model on an observed mean-squared-distance
+matrix, use `--method COV`. In the centered internal Gram matrix `B`, COV
+minimizes
+
+```text
+-3/2 logdet(B) + 1/2 sum_{i<j} (D(B)_ij - Dobs_ij)^2 / variance_ij
+```
+
+with `B` strictly positive definite on all internal modes. The default start is
+the weighted closest-EDM solution with a small spectral floor. A preconditioned
+Newton-CG direction and covariance-cone Armijo line search keep every accepted
+iterate physical. COV currently runs on CPU, requires positive variance for
+every observed pair, and cannot be combined with `--lamd`.
+
+```bash
+python -m hipps_dimes observed_ddmap.npy fit \
+  --input-type ddmap --input-format npy \
+  --method COV \
+  --gaussian-noise-variance-map pair_variance.npy \
+  --iteration 100 --no-xyzs --save-pickle
+```
+
+At an optimum, the fitted squared distances and returned connectivity obey the
+stationarity identity
+
+```text
+Dfit_ij - Dobs_ij = variance_ij * A_ij / 2
+```
+
+under the HIPPS-DIMES Hamiltonian convention. Inspect
+`results['covariance_optimization']` for convergence, gradient, initialization,
+variance, and accepted-iterate diagnostics.
+
+For the analytic proximal-gradient implementation discussed above, use
+`--method FISTA`. It minimizes exactly the same convex covariance objective as
+COV, split into the quadratic data term `f(B)` and
+`g(B) = -3/2 logdet(B)`. If `y` is an eigenvalue after a forward step of size
+`eta` on `f`, the exact proximal map is
+
+```text
+x = (y + sqrt(y^2 + 6 eta)) / 2 > 0.
+```
+
+The implementation evaluates this expression with a cancellation-safe branch
+for negative `y`. Thus every accepted internal covariance is strictly positive
+definite by construction; there is no per-iteration cone projection or final
+eigenvalue cutoff. The small spectral floor used by the default closest-EDM
+initializer only supplies a strictly positive starting point and is recorded in
+the diagnostics.
+
+FISTA uses quadratic-majorization backtracking and monotone adaptive restarts.
+It stops only when the Frobenius norm of the full covariance-space gradient
+(data plus entropy) satisfies the stated tolerance. The lower-level Python
+function `fit_gaussian_noise_covariance_fista(..., accelerated=False)` selects
+plain proximal gradient instead. The returned connectivity is recovered only
+after optimization and may contain either negative or positive off-diagonal
+couplings.
+
+```bash
+python -m hipps_dimes observed_ddmap.npy fit_fista \
+  --input-type ddmap --input-format npy \
+  --method FISTA \
+  --gaussian-noise-variance-map pair_variance.npy \
+  --iteration 1000 --no-xyzs --save-pickle
+```
+
+FISTA currently runs on CPU and requires every off-diagonal distance and
+variance. It cannot be combined with nonnegative-connectivity enforcement.
+Optionally, `--lamd LAMBDA --reg L1` adds
+`LAMBDA * sum_{i<j}|k_ij|` to the connectivity dual. The equivalent covariance
+data gradient uses `soft_threshold(Dfit-Dobs, 2*LAMBDA)/variance`; the
+log-determinant proximal map is unchanged.
+Inspect `results['covariance_proximal_optimization']` for the stationarity
+certificate, accepted-step history, step sizes, backtracking reductions,
+restart count, covariance eigenvalues, and saved checkpoints.
+
+For an equivalent optimization written directly in connectivity space, use
+`--method CHOL`. CHOL pins the last locus, writes the grounded precision as
+`P=C0^(-1/2) L L.T C0^(-1/2)`, and optimizes the unconstrained lower triangle
+of `L` (with a log diagonal) by L-BFGS-B. This parameterization spans every
+stable row-sum-zero connectivity matrix and does **not** constrain the signs of
+off-diagonal couplings. Its standard dual objective is
+
+```text
+-3/2 logdet(P) + 1/2 sum_{i<j} k_ij Dobs_ij
+                 + 1/8 sum_{i<j} variance_ij k_ij^2
+```
+
+The `1/8` coefficient is essential: it gives the same stationarity identity as
+COV, `Dfit_ij-Dobs_ij = variance_ij k_ij/2`. Thus the earlier `1/n=1/9`
+calibration in squared-distance space is already accounted for after converting
+the three-dimensional distance covariance to a one-coordinate grounded
+covariance; an additional `/9` must not be applied to the connectivity penalty.
+CHOL currently runs on CPU, requires every off-diagonal distance and variance,
+and cannot be combined with `--lamd` or nonnegative-connectivity enforcement.
+
+```bash
+python -m hipps_dimes observed_ddmap.npy fit_chol \
+  --input-type ddmap --input-format npy \
+  --method CHOL \
+  --gaussian-noise-variance-map pair_variance.npy \
+  --iteration 500 --no-xyzs --save-pickle
+```
+
+Inspect `results['connectivity_cholesky_optimization']` for both the L-BFGS-B
+termination record and the physical stationarity residual.
+
+For an exact coordinate-minimization alternative, use `--method CIS`. CIS
+minimizes the same calibrated connectivity dual as CHOL, but one iteration is a
+deterministic cyclic sweep through all unique pair couplings. For each pair it
+uses the matrix determinant lemma to solve the one-dimensional subproblem in
+closed form and a Sherman–Morrison covariance update. Consequently, every
+coordinate update decreases (or leaves unchanged) the dual objective and keeps
+the grounded precision strictly positive definite. CIS permits both negative and
+positive off-diagonal couplings and stops only after the physical stationarity
+residual
+
+```text
+Dfit_ij - Dobs_ij - variance_ij k_ij / 2
+```
+
+falls below its tolerance. It is therefore a corrected, convergence-certified
+alternative to the historical log-ratio IS heuristic; it is cyclic coordinate
+minimization, not a modified log-ratio update.
+
+For an invalid observed EDM, the closest-EDM initializer can lie on the cone
+boundary. CIS applies a solver-specific spectral floor to that initializer and,
+if a full exact sweep still fails a numerical Cholesky check, retries the sweep
+under-relaxed toward each closed-form coordinate minimum. These safeguards do
+not change the stationary solution; their use is recorded in the diagnostics as
+`damped_sweeps`, `sweep_retries`, and `minimum_accepted_sweep_relaxation`.
+
+```bash
+python -m hipps_dimes observed_ddmap.npy fit_cis \
+  --input-type ddmap --input-format npy \
+  --method CIS \
+  --gaussian-noise-variance-map pair_variance.npy \
+  --iteration 500 --no-xyzs --save-pickle
+```
+
+CIS accepts the same optional `--lamd LAMBDA --reg L1` objective as FISTA. Each
+coordinate update compares the exact negative-branch minimum, the zero kink,
+and the exact positive-branch minimum. Its L1 KKT certificate is
+
+```text
+soft_threshold(Dfit_ij-Dobs_ij, 2*LAMBDA)
+    - variance_ij k_ij / 2 = 0.
+```
+
+At `LAMBDA=0`, both FISTA and CIS follow their original Gaussian code paths.
+For positive `LAMBDA`, their returned diagnostics include the coefficient, L1
+penalty, common connectivity-dual objective, and physical KKT residual.
+
+CIS currently runs on CPU, requires every off-diagonal distance and variance,
+and cannot be combined with nonnegative-connectivity enforcement.
+Its dense rank-one covariance update costs O(N^2) per pair (O(N^4) per full
+sweep), so it is primarily a correctness solver and cross-check for small and
+moderate systems. Inspect `results['connectivity_coordinate_optimization']` for
+the convergence certificate, monotone objective history, coordinate-update
+statistics, and saved checkpoints.
 
 ### Examples
 
@@ -360,6 +529,12 @@ The `run_optimization()` function returns a dictionary with:
 - `'run_parameters'`: Run parameters (pandas DataFrame with columns: parameter, value)
 - `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
+- `'gaussian_noise_variance'`: Validated pair-variance matrix (when a matrix is used)
+- `'gram_matrix'`: Fitted centered mean-squared-distance Gram matrix (COV, FISTA, CHOL, or CIS only)
+- `'covariance_optimization'`: COV convergence certificate, history, and saved checkpoints (COV only)
+- `'covariance_proximal_optimization'`: FISTA stationarity certificate, monotone proximal-gradient history, and saved checkpoints (FISTA only)
+- `'connectivity_cholesky_optimization'`: CHOL convergence certificate, physical stationarity residual, history, and saved checkpoints (CHOL only)
+- `'connectivity_coordinate_optimization'`: CIS convergence certificate, physical stationarity residual, monotone sweep history, and saved checkpoints (CIS only)
 
 #### Weighted closest Euclidean distance matrix
 

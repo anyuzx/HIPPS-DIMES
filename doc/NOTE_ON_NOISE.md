@@ -7,7 +7,9 @@ L(\theta) = \log Z(\theta) - \theta^\top a
 \]
 - Constraints: \(a\) is the vector of all pairwise targets \(a_{ij}=\langle r_{ij}^2\rangle\) (usually \(i<j\)).
 - Parameters: \(\theta_{ij}\) are the Lagrange multipliers for each constraint.
-  - In a “spring/Laplacian” parameterization, off-diagonal connectivity relates as \(K_{ij} = -\theta_{ij}\) for \(i\neq j\), with diagonals determined by row-sum zero.
+  - With the HIPPS-DIMES Hamiltonian \(H=\frac12\sum_{i<j}K_{ij}r_{ij}^2\),
+    \(\theta_{ij}=-K_{ij}/2\), with connectivity diagonals determined by
+    row-sum zero.
 
 ---
 
@@ -78,11 +80,11 @@ If \(\sigma^2=0.005\):
 \]
 
 ### Relation to connectivity \(K_{ij}\)
-If your free parameters are off-diagonal \(K_{ij}\) with \(K_{ij}=-\theta_{ij}\) for \(i\neq j\), then:
+For HIPPS-DIMES, \(K_{ij}=-2\theta_{ij}\) for \(i\neq j\), so:
 \[
 \frac{\sigma^2}{2}\sum_{i<j}\theta_{ij}^2
 =
-\frac{\sigma^2}{2}\sum_{i<j}K_{ij}^2
+\frac{\sigma^2}{8}\sum_{i<j}K_{ij}^2
 \]
 (assuming you regularize only the independent off-diagonals).
 
@@ -99,7 +101,7 @@ If your free parameters are off-diagonal \(K_{ij}\) with \(K_{ij}=-\theta_{ij}\)
 - Adding \(\frac{\sigma^2}{2}\|\theta\|^2\) is fully principled from the Gaussian-noise-on-targets assumption.
 - Whether you implement it as an extra “shrinkage” term inside an IS-like update depends on your update rule.
 
-### Proximal (clean) way to add L2 shrink
+### Proximal shrink inside a generic gradient method
 If your IS-like update proposes:
 \[
 \theta \leftarrow \theta + \eta\;\Delta(\theta)
@@ -110,7 +112,55 @@ then apply exact L2 shrink after the step:
 \theta \leftarrow \frac{\theta + \eta\;\Delta(\theta)}{1+\eta\sigma^2}
 }
 \]
-This isolates the L2 effect from any ad-hoc normalization used in \(\Delta(\theta)\).
+This is the proximal step for the L2 term relative to that proposed update.
+However, composing it with an ad-hoc log-ratio direction does **not** make the
+overall iteration an optimizer of the Gaussian dual: its fixed point generally
+differs from \(\nabla L_{\mathrm{noise}}=0\).
+
+HIPPS-DIMES therefore retains the historical noisy IS path only for backward
+compatibility. The calibrated alternatives are COV, FISTA, CHOL, and CIS.
+FISTA applies the analytic proximal map of the negative log-determinant in the
+covariance cone with backtracking and monotone acceleration; it minimizes the
+same objective as COV. CIS performs exact cyclic coordinate minimization of the
+connectivity dual. All four calibrated solvers check the equivalent physical
+stationarity condition
+\[
+D^{\mathrm{fit}}_{ij}-D^{\mathrm{obs}}_{ij}
+=\frac{\sigma^2_{ij}}{2}K_{ij}.
+\]
+
+### Optional signed sparsity in addition to Gaussian noise
+
+FISTA and CIS can retain the variance-derived quadratic term and add the
+independent connectivity prior
+\[
+\lambda_1\sum_{i<j}|K_{ij}|.
+\]
+This permits both signs but favors exact zero couplings. The common dual is
+\[
+-\frac32\log\det P
++\frac12\sum_{i<j}K_{ij}\hat D_{ij}
++\frac18\sum_{i<j}\sigma_{ij}^2K_{ij}^2
++\lambda_1\sum_{i<j}|K_{ij}|.
+\]
+Its continuous KKT residual is
+\[
+\operatorname{soft}\!\left(
+D^{\mathrm{fit}}_{ij}-D^{\mathrm{obs}}_{ij},\,2\lambda_1
+\right)
+-\frac{\sigma_{ij}^2}{2}K_{ij}.
+\]
+CIS minimizes the negative, zero, and positive branches of every coordinate
+exactly. FISTA uses the equivalent covariance-space squared dead-zone loss,
+whose gradient is the soft-thresholded residual divided by the variance. Both
+reduce exactly to their original Gaussian implementations at \(\lambda_1=0\).
+For positive \(\lambda_1\), FISTA uses the common physical KKT residual above
+as its convergence certificate. This avoids continuing after the
+covariance-gradient diagnostic reaches its floating-point floor. The
+zero-coefficient path retains its original full covariance-gradient stopping
+rule exactly.
+In the CLI and `run_optimization`, select this model with `--method FISTA` or
+`--method CIS` together with `--lamd LAMBDA --reg L1`.
 
 ---
 
@@ -120,4 +170,3 @@ This isolates the L2 effect from any ad-hoc normalization used in \(\Delta(\thet
 - Additive Gaussian noise on MSD targets suggests linear-residual least-squares is statistically matched; log-ratio emphasizes relative errors (often desirable when MSD spans orders of magnitude).
 
 ---
-

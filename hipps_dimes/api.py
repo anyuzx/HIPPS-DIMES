@@ -3,13 +3,14 @@
 import json
 import pickle
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import scipy
 from rich import print
 
-from .models import Optimize
+from .models import Optimize, _coerce_gaussian_noise_variance
 from .numerics import *  # noqa: F401,F403
 
 
@@ -220,6 +221,42 @@ def _subset_connectivity_matrix(connectivity_matrix, kept_loci, original_size):
     )
 
 
+def _load_gaussian_noise_variance(noise_variance):
+    """Load a scalar or pair-variance matrix and report its provenance."""
+    if isinstance(noise_variance, (str, Path)):
+        path = Path(noise_variance).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Gaussian noise-variance map not found: {path}")
+        if path.suffix.lower() == '.npy':
+            value = np.load(path, allow_pickle=False)
+        else:
+            value = np.loadtxt(path)
+        return value, str(path)
+    if np.isscalar(noise_variance):
+        return noise_variance, 'scalar'
+    return np.asarray(noise_variance), 'provided matrix'
+
+
+def _prepare_gaussian_noise_variance(
+    noise_variance, kept_loci, original_size, optimized_size
+):
+    """Validate and, when necessary, subset a pair-variance matrix."""
+    if np.isscalar(noise_variance):
+        return _coerce_gaussian_noise_variance(noise_variance, optimized_size)
+
+    matrix = _ensure_square_matrix(noise_variance, "Gaussian noise-variance map")
+    if matrix.shape[0] == original_size and optimized_size != original_size:
+        kept = np.asarray(kept_loci, dtype=int)
+        matrix = matrix[np.ix_(kept, kept)]
+    elif matrix.shape[0] != optimized_size:
+        raise ValueError(
+            "Gaussian noise-variance map must match either the original input size "
+            f"({original_size}x{original_size}) or optimized size "
+            f"({optimized_size}x{optimized_size}); got {matrix.shape}"
+        )
+    return _coerce_gaussian_noise_variance(matrix, optimized_size)
+
+
 def run_optimization(input_path=None,
                      output_prefix=None,
                      input_matrix=None,
@@ -277,13 +314,27 @@ def run_optimization(input_path=None,
     selection : str, optional
         Region selection for cooler/hic files
     method : str, default='IS'
-        Optimization method: 'IS' (Iterative Scaling), 'GD' (Gradient Descent), or 'DI' (Direct Inversion)
+        Optimization method: 'IS' (Iterative Scaling), 'GD' (Gradient Descent),
+        'DI' (Direct Inversion), 'COV' (Newton-CG covariance-cone fit),
+        'FISTA' (proximal-gradient covariance-cone fit),
+        'CHOL' (signed connectivity-space Cholesky Gaussian-noise fit), or
+        'CIS' (exact cyclic signed-connectivity Gaussian-noise fit).
     lamd : float, default=0.0
-        Regularization weight
+        Regularization weight. With Gaussian-noise FISTA or CIS, ``lamd > 0``
+        and ``reg='L1'`` add an exact signed-connectivity sparsity penalty while
+        retaining the variance-derived Gaussian L2 term.
     reg : str, default='L2'
         Regularization type: 'L1' or 'L2'
-    gaussian_noise_variance : float, default=0.0
-        Noise variance for independent Gaussian noise on constraints.
+    gaussian_noise_variance : float, array_like, or path, default=0.0
+        Scalar independent-Gaussian variance or a symmetric pair-specific
+        variance matrix. Matrix paths may be NumPy ``.npy`` or text files.
+        IS/GD use the historical proximal-shrink heuristic. Methods 'COV',
+        'FISTA', 'CHOL', and 'CIS' minimize equivalent statistically calibrated
+        soft-constraint objectives while keeping every accepted iterate in the
+        covariance cone. FISTA, CHOL, and CIS require complete pairwise
+        observations; CHOL and CIS work directly with signed connectivity
+        parameterizations. Only FISTA and CIS may combine positive Gaussian
+        variance with ``lamd > 0``, and only for ``reg='L1'``.
     iteration : int, default=10000
         Number of optimization iterations
     learning_rate : float, default=10.0
@@ -363,6 +414,11 @@ def run_optimization(input_path=None,
         - 'dmap_final': Final distance map (numpy array)
         - 'connectivity_matrix': Final connectivity matrix (numpy array)
         - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)
+        - 'gram_matrix': Fitted centered squared-distance Gram matrix (COV/FISTA/CHOL/CIS only)
+        - 'covariance_optimization': COV convergence diagnostics (COV only)
+        - 'covariance_proximal_optimization': FISTA convergence diagnostics (FISTA only)
+        - 'connectivity_cholesky_optimization': CHOL optimizer and physical-stationarity diagnostics (CHOL only)
+        - 'connectivity_coordinate_optimization': CIS sweep and physical-stationarity diagnostics (CIS only)
         - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
         - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
         - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
@@ -432,12 +488,24 @@ def run_optimization(input_path=None,
         raise ValueError(
             f"Invalid input_format '{input_format}'. Must be one of {sorted(valid_input_formats)}"
         )
-    if gaussian_noise_variance < 0.0:
-        raise ValueError("gaussian_noise_variance must be non-negative")
-    if gaussian_noise_variance > 0.0 and method == 'DI':
-        raise ValueError("gaussian_noise_variance is only supported for optimization methods (IS/GD), not DI")
-    if gaussian_noise_variance > 0.0 and lamd > 0.0:
-        raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
+    valid_methods = {'IS', 'GD', 'DI', 'COV', 'FISTA', 'CHOL', 'CIS'}
+    exact_gaussian_methods = {'COV', 'FISTA', 'CHOL', 'CIS'}
+    if method not in valid_methods:
+        raise ValueError(f"Invalid method '{method}'. Must be one of {sorted(valid_methods)}")
+    if isinstance(lamd, (bool, np.bool_)):
+        raise ValueError("lamd must be a nonnegative finite scalar")
+    try:
+        lamd = float(lamd)
+    except (TypeError, ValueError) as error:
+        raise ValueError("lamd must be a nonnegative finite scalar") from error
+    if not np.isfinite(lamd) or lamd < 0.0:
+        raise ValueError("lamd must be a nonnegative finite scalar")
+    reg = str(reg).upper()
+    if reg not in {'L1', 'L2'}:
+        raise ValueError("reg must be either 'L1' or 'L2'")
+    raw_noise_variance, noise_variance_source = _load_gaussian_noise_variance(
+        gaussian_noise_variance
+    )
     if log is not None:
         no_log = not log
     if save_pickle and output_prefix is None:
@@ -712,6 +780,58 @@ def run_optimization(input_path=None,
                     )
             if verbose and console:
                 console.print("Loaded the provided connectivity matrix and will use it as initialization.")
+
+        if missing_analysis is not None and missing_analysis.get(
+            'removed_fully_missing_loci_count', 0
+        ) > 0:
+            noise_kept_loci = missing_analysis['kept_loci']
+        else:
+            noise_kept_loci = np.arange(ddmap_target.shape[0], dtype=int)
+        gaussian_noise_variance = _prepare_gaussian_noise_variance(
+            raw_noise_variance,
+            noise_kept_loci,
+            original_matrix_rows,
+            ddmap_target.shape[0],
+        )
+        if np.isscalar(gaussian_noise_variance):
+            has_noise_regularization = gaussian_noise_variance > 0.0
+            noise_variance_kind = 'scalar'
+            positive_noise_variances = np.asarray(
+                [gaussian_noise_variance], dtype=np.float64
+            )
+        else:
+            upper_noise = gaussian_noise_variance[
+                np.triu_indices_from(gaussian_noise_variance, k=1)
+            ]
+            positive_noise_variances = upper_noise[upper_noise > 0.0]
+            has_noise_regularization = positive_noise_variances.size > 0
+            noise_variance_kind = 'matrix'
+
+        if has_noise_regularization and method == 'DI':
+            raise ValueError(
+                "gaussian_noise_variance is supported for IS, GD, COV, FISTA, "
+                "CHOL, or CIS, not DI"
+            )
+        if has_noise_regularization and lamd > 0.0 and not (
+            method in {'FISTA', 'CIS'} and reg == 'L1'
+        ):
+            raise ValueError(
+                "Gaussian noise can be combined with lamd only for method='FISTA' "
+                "or method='CIS' with reg='L1'"
+            )
+        if method in exact_gaussian_methods and not has_noise_regularization:
+            raise ValueError(
+                f"method='{method}' requires positive Gaussian noise variance"
+            )
+        if method in exact_gaussian_methods and use_gpu:
+            raise ValueError(
+                f"method='{method}' currently supports CPU execution only"
+            )
+        if method in {'FISTA', 'CHOL', 'CIS'} and enforce_nonnegative_connectivity_matrix:
+            raise ValueError(
+                f"method='{method}' is a signed-connectivity solver and cannot be "
+                "combined with enforce_nonnegative_connectivity_matrix=True"
+            )
         
         if verbose and console:
             console.print("Initialization completed")
@@ -819,12 +939,22 @@ def run_optimization(input_path=None,
         opt_table.add_column("Parameter", style="dim", width=20)
         opt_table.add_column("Value", style="green")
         
-        method_str = "Iterative Scaling (IS)" if method == 'IS' else "Gradient Descent (GD)" if method == 'GD' else "Direct Inversion (DI)" if method == 'DI' else "Unknown"
+        method_str = (
+            "Iterative Scaling (IS)" if method == 'IS'
+            else "Gradient Descent (GD)" if method == 'GD'
+            else "Direct Inversion (DI)" if method == 'DI'
+            else "Covariance-cone Gaussian fit (COV)" if method == 'COV'
+            else "Covariance proximal-gradient fit (FISTA)" if method == 'FISTA'
+            else "Signed connectivity Cholesky fit (CHOL)" if method == 'CHOL'
+            else "Exact cyclic signed-connectivity fit (CIS)" if method == 'CIS'
+            else "Unknown"
+        )
         opt_table.add_row("Method", method_str)
         
         if method != 'DI':
             opt_table.add_row("Iterations", f"{iteration:,}")
-            opt_table.add_row("Learning Rate", f"{learning_rate}")
+            if method in {'IS', 'GD'}:
+                opt_table.add_row("Learning Rate", f"{learning_rate}")
             
             # Momentum and Nesterov (only for IS)
             if method == 'IS':
@@ -841,8 +971,17 @@ def run_optimization(input_path=None,
                 opt_table.add_row("Regularization", f"{reg} (λ = {lamd})")
             else:
                 opt_table.add_row("Regularization", "None")
-            if gaussian_noise_variance > 0.0:
-                opt_table.add_row("Noise Variance", f"{gaussian_noise_variance}")
+            if has_noise_regularization:
+                if noise_variance_kind == 'scalar':
+                    variance_description = f"{gaussian_noise_variance}"
+                else:
+                    variance_description = (
+                        "heteroscedastic matrix "
+                        f"(min={positive_noise_variances.min():.6g}, "
+                        f"median={np.median(positive_noise_variances):.6g}, "
+                        f"max={positive_noise_variances.max():.6g})"
+                    )
+                opt_table.add_row("Noise Variance", variance_description)
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -891,43 +1030,142 @@ def run_optimization(input_path=None,
             console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
-    model = Optimize(ddmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
-    
-    if use_gpu and model.use_gpu and verbose:
-        dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
-        console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
-
     solver_output_prefix = None if save_pickle else output_prefix
-    
-    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
-                         'momentum': momentum, 'nesterov': nesterov}
+    gaussian_optimization_info = None
+    fitted_gram_matrix = None
+    iteration_extra_series = None
+    use_gpu_enabled = False
 
-    if method == 'IS' or method == 'GD':
-        general_method = 'optimization'
-    elif method == 'DI':
-        general_method = 'direct'
+    if method in exact_gaussian_methods:
+        gaussian_solver = {
+            'COV': fit_gaussian_noise_covariance,
+            'FISTA': fit_gaussian_noise_covariance_fista,
+            'CHOL': fit_gaussian_noise_connectivity_cholesky,
+            'CIS': fit_gaussian_noise_connectivity_coordinate_descent,
+        }[method]
+        solver_arguments = {
+            'initial_connectivity': connectivity_matrix,
+            'max_iterations': iteration,
+            'save_steps': save_steps,
+            'progress_callback': progress_callback,
+        }
+        if method in {'FISTA', 'CIS'}:
+            solver_arguments['connectivity_l1'] = (
+                lamd if reg == 'L1' else 0.0
+            )
+        (
+            fitted_ddmap,
+            fitted_gram_matrix,
+            final_connectivity_matrix,
+            gaussian_optimization_info,
+        ) = gaussian_solver(
+            ddmap_target,
+            gaussian_noise_variance,
+            **solver_arguments,
+        )
+        dmap_maxent = a2dmap_theory(
+            final_connectivity_matrix, force_positive_definite=True
+        )
+        reconstructed_ddmap = (3.0 * np.pi / 8.0) * np.square(dmap_maxent)
+        consistency_scale = max(float(np.max(np.abs(fitted_ddmap))), 1.0)
+        if not np.allclose(
+            reconstructed_ddmap,
+            fitted_ddmap,
+            rtol=1e-8,
+            atol=1e-10 * consistency_scale,
+        ):
+            raise RuntimeError(
+                f"{method} connectivity does not reproduce its fitted "
+                "squared-distance map"
+            )
+        history = gaussian_optimization_info['history']
+        loss = history['loss'].tolist()
+        entropy = history['entropy'].tolist()
+        iteration_extra_series = {
+            key: values
+            for key, values in history.items()
+            if key not in {'iteration', 'loss', 'entropy'}
+        }
+        connectivity_at_steps = gaussian_optimization_info[
+            'connectivity_matrix_at_steps'
+        ]
+        if solver_output_prefix is not None:
+            for step, matrix in connectivity_at_steps.items():
+                np.savetxt(
+                    f'{solver_output_prefix}_connectivity_matrix_iter{step}.txt',
+                    matrix,
+                )
+    else:
+        model = Optimize(
+            ddmap_target,
+            connectivity_matrix=connectivity_matrix,
+            use_gpu=use_gpu,
+            gpu_float32=gpu_float32,
+        )
+        use_gpu_enabled = model.use_gpu
+        if use_gpu and model.use_gpu and verbose:
+            dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
+            console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
 
-    if gaussian_noise_variance > 0.0:
-        keyword_arguments_noisy = {
+        keyword_arguments = {
             'learning_rate': learning_rate,
+            'lamd': lamd,
+            'reg': reg,
             'method': method,
             'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
             'momentum': momentum,
-            'nesterov': nesterov
+            'nesterov': nesterov,
         }
-        loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run_noisy(
-            iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
-            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
-            **keyword_arguments_noisy)
-    else:
-        loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
-            iteration, general_method=general_method, save_steps=save_steps,
-            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
-            **keyword_arguments)
+        general_method = 'optimization' if method in {'IS', 'GD'} else 'direct'
+        if has_noise_regularization:
+            keyword_arguments_noisy = {
+                'learning_rate': learning_rate,
+                'method': method,
+                'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
+                'momentum': momentum,
+                'nesterov': nesterov,
+            }
+            (
+                loss,
+                entropy,
+                dmap_maxent,
+                final_connectivity_matrix,
+                connectivity_at_steps,
+            ) = model.run_noisy(
+                iteration,
+                gaussian_noise_variance=gaussian_noise_variance,
+                general_method=general_method,
+                save_steps=save_steps,
+                output_prefix=solver_output_prefix,
+                progress_callback=progress_callback,
+                show_progress=show_progress,
+                **keyword_arguments_noisy,
+            )
+        else:
+            (
+                loss,
+                entropy,
+                dmap_maxent,
+                final_connectivity_matrix,
+                connectivity_at_steps,
+            ) = model.run(
+                iteration,
+                general_method=general_method,
+                save_steps=save_steps,
+                output_prefix=solver_output_prefix,
+                progress_callback=progress_callback,
+                show_progress=show_progress,
+                **keyword_arguments,
+            )
     
     # Format per-iteration scalar outputs.
-    iteration_series_df = _build_iteration_series_frame(loss, entropy)
+    iteration_series_df = _build_iteration_series_frame(
+        loss, entropy, iteration_extra_series
+    )
+    if method in exact_gaussian_methods and len(iteration_series_df) > 0:
+        iteration_series_df['iteration'] = gaussian_optimization_info['history'][
+            'iteration'
+        ]
 
     # Print regularization norms if requested
     if verbose:
@@ -942,6 +1180,26 @@ def run_optimization(input_path=None,
             console.print("Final loss: {}".format(iteration_series_df['loss'].values[-1]))
             console.print("Final entropy: {}".format(iteration_series_df['entropy'].values[-1]))
 
+    logged_noise_variance = (
+        gaussian_noise_variance
+        if noise_variance_kind == 'scalar'
+        else 'heteroscedastic_matrix'
+    )
+    noise_variance_minimum = (
+        float(np.min(positive_noise_variances))
+        if positive_noise_variances.size
+        else 0.0
+    )
+    noise_variance_median = (
+        float(np.median(positive_noise_variances))
+        if positive_noise_variances.size
+        else 0.0
+    )
+    noise_variance_maximum = (
+        float(np.max(positive_noise_variances))
+        if positive_noise_variances.size
+        else 0.0
+    )
     run_parameters_df = _build_run_parameters_frame({
         'input_source': input_source,
         'output_prefix': output_prefix,
@@ -958,13 +1216,31 @@ def run_optimization(input_path=None,
         'method': method,
         'lamd': lamd,
         'reg': reg,
-        'gaussian_noise_variance': gaussian_noise_variance,
+        'connectivity_l1': (
+            lamd if method in {'FISTA', 'CIS'} and reg == 'L1' else 0.0
+        ),
+        'gaussian_noise_variance': logged_noise_variance,
+        'gaussian_noise_variance_kind': noise_variance_kind,
+        'gaussian_noise_variance_source': noise_variance_source,
+        'gaussian_noise_variance_minimum_positive': noise_variance_minimum,
+        'gaussian_noise_variance_median_positive': noise_variance_median,
+        'gaussian_noise_variance_maximum': noise_variance_maximum,
+        'gaussian_noise_solver': (
+            'convex_covariance_cone' if method == 'COV'
+            else 'covariance_proximal_fista' if method == 'FISTA'
+            else 'signed_connectivity_cholesky_lbfgsb' if method == 'CHOL'
+            else 'signed_connectivity_exact_cyclic_coordinate_descent'
+            if method == 'CIS'
+            else 'iterative_scaling_proximal_heuristic'
+            if has_noise_regularization
+            else 'none'
+        ),
         'iteration': iteration,
         'learning_rate': learning_rate,
         'momentum': momentum,
         'nesterov': nesterov,
         'use_gpu_requested': use_gpu,
-        'use_gpu_enabled': model.use_gpu,
+        'use_gpu_enabled': use_gpu_enabled,
         'gpu_float32': gpu_float32,
         'binsize': binsize,
         'hic_norm': hic_norm,
@@ -1006,6 +1282,26 @@ def run_optimization(input_path=None,
     }
     if connectivity_at_steps:
         results['connectivity_matrix_at_steps'] = connectivity_at_steps
+    if noise_variance_kind == 'matrix':
+        results['gaussian_noise_variance'] = np.asarray(
+            gaussian_noise_variance, dtype=np.float64
+        )
+    if gaussian_optimization_info is not None:
+        results['gram_matrix'] = fitted_gram_matrix
+        if method == 'COV':
+            results['covariance_optimization'] = gaussian_optimization_info
+        elif method == 'FISTA':
+            results['covariance_proximal_optimization'] = (
+                gaussian_optimization_info
+            )
+        elif method == 'CHOL':
+            results['connectivity_cholesky_optimization'] = (
+                gaussian_optimization_info
+            )
+        else:
+            results['connectivity_coordinate_optimization'] = (
+                gaussian_optimization_info
+            )
     if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:
         results['kept_loci'] = missing_analysis['kept_loci']
         results['removed_fully_missing_loci'] = missing_analysis['removed_fully_missing_loci']

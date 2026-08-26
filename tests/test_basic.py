@@ -381,6 +381,235 @@ def test_nearest_edm_rejects_invalid_gram_eigenvalue_floor(floor):
         hipps_dimes.nearest_edm(target, gram_eigenvalue_floor=floor)
 
 
+def test_gaussian_covariance_objective_gradient_matches_finite_difference():
+    """The calibrated COV objective should expose its true matrix gradient."""
+    n = 5
+    basis = numerics._centered_orthonormal_basis(n)
+    pair_i, pair_j = np.triu_indices(n, k=1)
+    pair_vectors = basis[pair_i] - basis[pair_j]
+    reduced_gram = np.diag(np.linspace(0.8, 2.0, n - 1))
+    target = np.einsum(
+        "ij,ij->i", pair_vectors @ reduced_gram, pair_vectors, optimize=True
+    )
+    target *= np.linspace(0.95, 1.05, len(target))
+    inverse_variance = np.linspace(2.0, 5.0, len(target))
+    target_matrix, inverse_variance_matrix = (
+        numerics._gaussian_covariance_pair_matrices(
+            n, pair_i, pair_j, target, inverse_variance
+        )
+    )
+    direction = np.arange((n - 1) ** 2, dtype=float).reshape(n - 1, n - 1)
+    direction = 0.5 * (direction + direction.T)
+    direction /= np.linalg.norm(direction)
+
+    objective, gradient, *_ = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )
+    step = 1e-6
+    forward = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram + step * direction,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )[0]
+    backward = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram - step * direction,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )[0]
+
+    assert np.isfinite(objective)
+    assert (forward - backward) / (2.0 * step) == pytest.approx(
+        np.sum(gradient * direction), rel=1e-7, abs=1e-8
+    )
+
+
+def test_covariance_structured_hessian_and_block_preconditioner_match_pairs():
+    """Structured and blockwise COV kernels should equal explicit pair formulas."""
+    rng = np.random.default_rng(20260826)
+    n = 7
+    basis = numerics._centered_orthonormal_basis(n)
+    all_i, all_j = np.triu_indices(n, k=1)
+    selector = np.arange(len(all_i)) % 4 != 0
+    pair_i = all_i[selector]
+    pair_j = all_j[selector]
+    pair_vectors = basis[pair_i] - basis[pair_j]
+    inverse_variance = np.linspace(1.5, 4.5, len(pair_i))
+    target_pairs = np.linspace(0.9, 1.3, len(pair_i))
+    _, inverse_variance_matrix = numerics._gaussian_covariance_pair_matrices(
+        n, pair_i, pair_j, target_pairs, inverse_variance
+    )
+    direction = rng.normal(size=(n - 1, n - 1))
+    direction = 0.5 * (direction + direction.T)
+
+    pair_quadratic = np.einsum(
+        "ij,ij->i", pair_vectors @ direction, pair_vectors, optimize=True
+    )
+    expected_hessian = pair_vectors.T @ (
+        (inverse_variance * pair_quadratic)[:, np.newaxis] * pair_vectors
+    )
+    expected_hessian = 0.5 * (expected_hessian + expected_hessian.T)
+    observed_hessian = numerics._gaussian_covariance_data_hessian_action(
+        direction, basis, inverse_variance_matrix
+    )
+
+    pair_vectors_squared = np.square(pair_vectors)
+    expected_diagonal = pair_vectors_squared.T @ (
+        inverse_variance[:, np.newaxis] * pair_vectors_squared
+    )
+    observed_diagonal, _ = (
+        numerics._gaussian_covariance_data_preconditioner_diagonal(
+            basis,
+            pair_i,
+            pair_j,
+            inverse_variance,
+            block_size=3,
+        )
+    )
+
+    assert np.allclose(
+        observed_hessian, expected_hessian, rtol=1e-12, atol=1e-12
+    )
+    assert np.allclose(
+        observed_diagonal, expected_diagonal, rtol=1e-12, atol=1e-12
+    )
+
+
+def _rouse_squared_distance_target(n=6):
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    return (3.0 * np.pi / 8.0) * np.square(mean_distance)
+
+
+def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity():
+    """Relative-noise COV should converge physically from legacy Rouse initialization."""
+    n = 6
+    target = _rouse_squared_distance_target(n)
+    relative_std = 0.05
+
+    fitted, gram, connectivity, info = (
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            relative_noise_std=relative_std,
+            max_iterations=30,
+            relative_tolerance=1e-9,
+            save_steps=[1],
+        )
+    )
+
+    variance = np.square(relative_std * target)
+    upper = np.triu_indices(n, k=1)
+    assert info["converged"]
+    assert info["noise_model"] == "heteroskedastic_relative_std"
+    assert info["initialization"]["kind"] == "rouse"
+    assert np.all(np.diff(info["history"]["objective"]) <= 1e-10)
+    assert np.count_nonzero(np.linalg.eigvalsh(gram) > 1e-12) == n - 1
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+    assert np.allclose(
+        (fitted - target)[upper],
+        0.5 * variance[upper] * connectivity[upper],
+        rtol=1e-7,
+        atol=1e-10,
+    )
+    assert info["relative_stationarity_residual"] <= 1e-8
+    assert sorted(info["connectivity_matrix_at_steps"]) == [1]
+
+
+def test_gaussian_covariance_absolute_noise_initializations_match():
+    """Rouse and nearest-EDM starts should reach the same homoskedastic optimum."""
+    target = _rouse_squared_distance_target()
+    variance = 0.02
+
+    rouse = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        max_iterations=40,
+        relative_tolerance=1e-9,
+    )
+    nearest = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        initialization="nearest_edm",
+        max_iterations=40,
+        relative_tolerance=1e-9,
+    )
+
+    assert rouse[3]["converged"]
+    assert nearest[3]["converged"]
+    assert rouse[3]["noise_model"] == "homoskedastic_absolute_variance"
+    assert nearest[3]["initialization"]["kind"] == "weighted_nearest_edm"
+    assert np.allclose(rouse[0], nearest[0], rtol=1e-8, atol=1e-9)
+    assert np.allclose(rouse[2], nearest[2], rtol=1e-8, atol=1e-9)
+
+
+def test_gaussian_covariance_relative_noise_supports_missing_pairs():
+    target = _rouse_squared_distance_target()
+    missing_pairs = ((0, 3), (1, 4))
+    for i, j in missing_pairs:
+        target[i, j] = np.nan
+        target[j, i] = np.nan
+
+    fitted, _, connectivity, info = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        relative_noise_std=0.05,
+        max_iterations=40,
+        relative_tolerance=1e-9,
+    )
+
+    assert info["converged"]
+    assert info["observed_pair_count"] == 13
+    assert np.all(np.isfinite(fitted))
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+
+
+@pytest.mark.parametrize(
+    ("noise_variance", "relative_noise_std", "message"),
+    [
+        (None, None, "exactly one"),
+        (0.1, 0.2, "exactly one"),
+        (0.0, None, "positive finite scalar"),
+        (None, -0.1, "positive finite scalar"),
+        (np.ones((2, 2)), None, "positive finite scalar"),
+    ],
+)
+def test_gaussian_covariance_rejects_invalid_noise_contract(
+    noise_variance, relative_noise_std, message
+):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match=message):
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            noise_variance,
+            relative_noise_std=relative_noise_std,
+        )
+
+
+def test_gaussian_covariance_rejects_nearest_edm_with_connectivity():
+    target = _rouse_squared_distance_target(4)
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            0.1,
+            initialization="nearest_edm",
+            initial_connectivity=connectivity,
+        )
+
+
 def test_compute_modulus():
     """Moduli should use tau_p / 2 for stress-mode relaxation."""
     A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)

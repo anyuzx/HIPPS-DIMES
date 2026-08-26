@@ -10,6 +10,7 @@ https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 
 import os
 import sys
+import time
 import warnings
 import itertools
 
@@ -2208,6 +2209,829 @@ def nearest_edm(
         )
 
     return fitted_squared_distances, B, info
+
+
+_COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE = 4096
+
+
+def _centered_orthonormal_basis(n):
+    """Return a deterministic orthonormal basis for ``1.T @ x = 0``."""
+    basis = np.zeros((n, n - 1), dtype=np.float64)
+    for column in range(n - 1):
+        denominator = np.sqrt((column + 1) * (column + 2))
+        basis[: column + 1, column] = 1.0 / denominator
+        basis[column + 1, column] = -(column + 1) / denominator
+    return basis
+
+
+def _positive_finite_scalar(value, name):
+    """Validate and return one strictly positive finite scalar."""
+    if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+        raise ValueError(f"{name} must be a positive finite scalar")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a positive finite scalar") from error
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a positive finite scalar")
+    return value
+
+
+def _validate_gaussian_covariance_inputs(
+    squared_distances, noise_variance, relative_noise_std
+):
+    """Validate observed pairs and construct their Gaussian variances."""
+    observed = np.asarray(squared_distances, dtype=np.float64)
+    if observed.ndim != 2 or observed.shape[0] != observed.shape[1]:
+        raise ValueError("squared_distances must be a square matrix")
+    if observed.shape[0] < 2:
+        raise ValueError("squared_distances must contain at least two loci")
+    if np.any(np.isinf(observed)):
+        raise ValueError("squared_distances must not contain infinite values")
+
+    n = observed.shape[0]
+    off_diagonal = ~np.eye(n, dtype=bool)
+    finite = np.isfinite(observed)
+    if not np.array_equal(finite & off_diagonal, finite.T & off_diagonal):
+        raise ValueError("the observed-pair pattern must be symmetric")
+    pair_mask = finite & off_diagonal
+    upper_mask = np.triu(pair_mask, k=1)
+    if not np.any(upper_mask):
+        raise ValueError("at least one off-diagonal pair must be observed")
+    if not np.allclose(
+        observed[pair_mask], observed.T[pair_mask], rtol=1e-10, atol=1e-12
+    ):
+        raise ValueError("observed squared distances must be symmetric")
+    if np.any(observed[pair_mask] <= 0.0):
+        raise ValueError("observed off-diagonal squared distances must be positive")
+
+    has_absolute = noise_variance is not None
+    has_relative = relative_noise_std is not None
+    if has_absolute == has_relative:
+        raise ValueError(
+            "provide exactly one of noise_variance or relative_noise_std"
+        )
+
+    pair_i, pair_j = np.where(upper_mask)
+    target_pairs = observed[pair_i, pair_j]
+    if has_absolute:
+        noise_parameter = _positive_finite_scalar(
+            noise_variance, "noise_variance"
+        )
+        pair_variance = np.full(
+            target_pairs.shape, noise_parameter, dtype=np.float64
+        )
+        noise_model = "homoskedastic_absolute_variance"
+    else:
+        noise_parameter = _positive_finite_scalar(
+            relative_noise_std, "relative_noise_std"
+        )
+        pair_variance = np.square(noise_parameter * target_pairs)
+        noise_model = "heteroskedastic_relative_std"
+
+    return (
+        observed,
+        pair_mask,
+        pair_i,
+        pair_j,
+        target_pairs,
+        pair_variance,
+        noise_model,
+        noise_parameter,
+    )
+
+
+def _gaussian_covariance_pair_matrices(
+    n, pair_i, pair_j, target_pairs, inverse_variance
+):
+    """Expand validated unique-pair Gaussian data into symmetric matrices."""
+    target_matrix = np.zeros((n, n), dtype=np.float64)
+    target_matrix[pair_i, pair_j] = target_pairs
+    target_matrix[pair_j, pair_i] = target_pairs
+
+    inverse_variance_matrix = np.zeros((n, n), dtype=np.float64)
+    inverse_variance_matrix[pair_i, pair_j] = inverse_variance
+    inverse_variance_matrix[pair_j, pair_i] = inverse_variance
+    return target_matrix, inverse_variance_matrix
+
+
+def _gaussian_covariance_data_objective_gradient(
+    reduced_gram,
+    basis,
+    target_matrix,
+    inverse_variance_matrix,
+    pair_i,
+    pair_j,
+):
+    """Evaluate the Gaussian data term through the structured EDM operator."""
+    reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
+    gram = basis @ reduced_gram @ basis.T
+    fitted_matrix = _squared_distances_from_gram(gram)
+    residual_matrix = fitted_matrix - target_matrix
+    weighted_residual = inverse_variance_matrix * residual_matrix
+    data_objective = 0.25 * float(np.sum(weighted_residual * residual_matrix))
+    full_gradient = np.diag(np.sum(weighted_residual, axis=1)) - weighted_residual
+    data_gradient = basis.T @ full_gradient @ basis
+    data_gradient = 0.5 * (data_gradient + data_gradient.T)
+    return data_objective, data_gradient, fitted_matrix[pair_i, pair_j]
+
+
+def _gaussian_covariance_data_hessian_action(
+    direction, basis, inverse_variance_matrix
+):
+    """Apply the Gaussian data Hessian without materializing pair tensors."""
+    direction = np.asarray(direction, dtype=np.float64)
+    direction = 0.5 * (direction + direction.T)
+    full_direction = basis @ direction @ basis.T
+    distance_direction = _squared_distances_from_gram(full_direction)
+    weighted_direction = inverse_variance_matrix * distance_direction
+    full_action = np.diag(np.sum(weighted_direction, axis=1)) - weighted_direction
+    reduced_action = basis.T @ full_action @ basis
+    return 0.5 * (reduced_action + reduced_action.T)
+
+
+def _gaussian_covariance_objective_gradient(
+    reduced_gram,
+    basis,
+    target_matrix,
+    inverse_variance_matrix,
+    pair_i,
+    pair_j,
+):
+    """Evaluate the Gaussian soft-constraint objective in the covariance cone."""
+    reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
+    try:
+        cholesky_factor = np.linalg.cholesky(reduced_gram)
+    except np.linalg.LinAlgError:
+        return np.inf, None, None, None, None
+
+    logdet = 2.0 * float(np.sum(np.log(np.diag(cholesky_factor))))
+    inverse_gram = scipy.linalg.cho_solve(
+        (cholesky_factor, True),
+        np.eye(reduced_gram.shape[0], dtype=np.float64),
+        check_finite=False,
+    )
+    inverse_gram = 0.5 * (inverse_gram + inverse_gram.T)
+    data_objective, data_gradient, fitted_pairs = (
+        _gaussian_covariance_data_objective_gradient(
+            reduced_gram,
+            basis,
+            target_matrix,
+            inverse_variance_matrix,
+            pair_i,
+            pair_j,
+        )
+    )
+    negative_entropy = -1.5 * logdet
+    entropy_gradient = -1.5 * inverse_gram
+    gradient = data_gradient + entropy_gradient
+    gradient = 0.5 * (gradient + gradient.T)
+    return (
+        negative_entropy + data_objective,
+        gradient,
+        fitted_pairs,
+        inverse_gram,
+        (negative_entropy, data_objective, entropy_gradient, data_gradient),
+    )
+
+
+def _gaussian_covariance_data_preconditioner_diagonal(
+    basis,
+    pair_i,
+    pair_j,
+    inverse_variance,
+    *,
+    block_size=_COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE,
+    progress_callback=None,
+):
+    """Build the exact data-Hessian diagonal with bounded pair-block memory."""
+    n_modes = basis.shape[1]
+    diagonal = np.zeros((n_modes, n_modes), dtype=np.float64)
+    pair_count = len(pair_i)
+    block_count = (pair_count + block_size - 1) // block_size
+    start_time = time.perf_counter()
+    for block_index, start in enumerate(range(0, pair_count, block_size), start=1):
+        stop = min(start + block_size, pair_count)
+        pair_vectors = basis[pair_i[start:stop]] - basis[pair_j[start:stop]]
+        pair_vectors_squared = np.square(pair_vectors)
+        diagonal += pair_vectors_squared.T @ (
+            inverse_variance[start:stop, np.newaxis] * pair_vectors_squared
+        )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "stage": "covariance_preconditioner",
+                    "iteration": block_index,
+                    "total": block_count,
+                    "pairs_completed": stop,
+                    "pair_count": pair_count,
+                    "method": "COV",
+                    "general_method": "covariance_optimization",
+                    "use_gpu": False,
+                    "noisy": True,
+                }
+            )
+    return diagonal, time.perf_counter() - start_time
+
+
+def _preconditioned_conjugate_gradient(
+    operator,
+    right_hand_side,
+    preconditioner_diagonal,
+    relative_tolerance,
+    max_iterations,
+):
+    """Solve a symmetric positive-definite matrix equation without forming it."""
+    right_hand_side = np.asarray(right_hand_side, dtype=np.float64)
+    diagonal = np.asarray(preconditioner_diagonal, dtype=np.float64)
+    solution = np.zeros_like(right_hand_side)
+    residual = right_hand_side.copy()
+    scale = float(np.linalg.norm(right_hand_side, ord="fro"))
+    if scale == 0.0:
+        return solution, 0, 0.0, True
+    tolerance = float(relative_tolerance) * scale
+
+    preconditioned = residual / diagonal
+    direction = preconditioned.copy()
+    residual_product = float(np.sum(residual * preconditioned))
+    converged = False
+    iteration = 0
+    for iteration in range(1, max_iterations + 1):
+        operator_direction = operator(direction)
+        curvature = float(np.sum(direction * operator_direction))
+        if not np.isfinite(curvature) or curvature <= 0.0:
+            break
+        step = residual_product / curvature
+        solution += step * direction
+        residual -= step * operator_direction
+        residual_norm = float(np.linalg.norm(residual, ord="fro"))
+        if residual_norm <= tolerance:
+            converged = True
+            break
+        preconditioned = residual / diagonal
+        next_product = float(np.sum(residual * preconditioned))
+        if not np.isfinite(next_product) or next_product <= 0.0:
+            break
+        direction = preconditioned + (next_product / residual_product) * direction
+        residual_product = next_product
+
+    solution = 0.5 * (solution + solution.T)
+    residual_norm = float(np.linalg.norm(residual, ord="fro"))
+    return solution, iteration, residual_norm, converged
+
+
+def _rouse_initial_connectivity(squared_distances):
+    """Return the legacy HIPPS-DIMES target-scaled Rouse initialization."""
+    squared_distances = np.asarray(squared_distances, dtype=np.float64)
+    finite_or_nan = squared_distances[~np.isinf(squared_distances)]
+    radius_of_gyration_squared = 0.5 * float(np.nanmean(finite_or_nan))
+    if (
+        not np.isfinite(radius_of_gyration_squared)
+        or radius_of_gyration_squared <= 0.0
+    ):
+        raise ValueError(
+            "squared-distance target must define a positive finite Rouse scale"
+        )
+    spring_constant = squared_distances.shape[0] / (
+        4.0 * radius_of_gyration_squared
+    )
+    connectivity = construct_connectivity_matrix_rouse(
+        squared_distances.shape[0], spring_constant
+    )
+    return connectivity, radius_of_gyration_squared, spring_constant
+
+
+def _reduced_gram_from_connectivity(connectivity, basis):
+    """Validate a centered stable connectivity and return its internal Gram."""
+    n = basis.shape[0]
+    connectivity = np.asarray(connectivity, dtype=np.float64)
+    if connectivity.shape != (n, n) or not np.all(np.isfinite(connectivity)):
+        raise ValueError("initial_connectivity must be a finite NxN matrix")
+    if not np.allclose(connectivity, connectivity.T, rtol=1e-10, atol=1e-12):
+        raise ValueError("initial_connectivity must be symmetric")
+    row_scale = max(float(np.max(np.abs(connectivity))), 1.0)
+    row_sum_error = float(np.max(np.abs(np.sum(connectivity, axis=1))))
+    if row_sum_error > 1e-10 * row_scale:
+        raise ValueError("initial_connectivity rows must sum to zero")
+    reduced_connectivity = basis.T @ (-connectivity) @ basis
+    eigenvalues = np.linalg.eigvalsh(reduced_connectivity)
+    if float(eigenvalues[0]) <= 0.0:
+        raise ValueError("initial_connectivity must be stable in every internal mode")
+    reduced_gram = 3.0 * np.linalg.solve(
+        reduced_connectivity,
+        np.eye(n - 1, dtype=np.float64),
+    )
+    return reduced_gram, eigenvalues
+
+
+def _connectivity_from_reduced_gram(reduced_gram, basis):
+    """Return the physical connectivity associated with an internal Gram matrix."""
+    reduced_connectivity = 3.0 * np.linalg.solve(
+        reduced_gram, np.eye(reduced_gram.shape[0], dtype=np.float64)
+    )
+    connectivity = -(basis @ reduced_connectivity @ basis.T)
+    connectivity = 0.5 * (connectivity + connectivity.T)
+    return a2a(connectivity)
+
+
+def _initialize_gaussian_reduced_gram(
+    observed,
+    pair_mask,
+    pair_i,
+    pair_j,
+    inverse_variance,
+    basis,
+    initialization,
+    initial_connectivity,
+    initial_gram_floor_relative,
+):
+    """Return the requested physical initialization for COV."""
+    if initialization not in {"rouse", "nearest_edm"}:
+        raise ValueError("initialization must be 'rouse' or 'nearest_edm'")
+    if initial_connectivity is not None and initialization == "nearest_edm":
+        raise ValueError(
+            "initial_connectivity cannot be combined with nearest_edm initialization"
+        )
+
+    n = observed.shape[0]
+    n_modes = n - 1
+    if initial_connectivity is not None:
+        reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
+            initial_connectivity, basis
+        )
+        initialization_info = {
+            "kind": "provided_connectivity",
+            "minimum_internal_stiffness": float(eigenvalues[0]),
+            "maximum_internal_stiffness": float(eigenvalues[-1]),
+        }
+    elif initialization == "rouse":
+        connectivity, rg2, spring_constant = _rouse_initial_connectivity(observed)
+        reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
+            connectivity, basis
+        )
+        initialization_info = {
+            "kind": "rouse",
+            "radius_of_gyration_squared": rg2,
+            "spring_constant": spring_constant,
+            "minimum_internal_stiffness": float(eigenvalues[0]),
+            "maximum_internal_stiffness": float(eigenvalues[-1]),
+        }
+    else:
+        normalized_weights = np.zeros_like(observed)
+        normalized_pair_weights = inverse_variance / float(
+            np.mean(inverse_variance)
+        )
+        normalized_weights[pair_i, pair_j] = normalized_pair_weights
+        normalized_weights[pair_j, pair_i] = normalized_pair_weights
+        projection_target = observed.copy()
+        projection_target[~pair_mask] = np.nan
+        np.fill_diagonal(projection_target, 0.0)
+        _, closest_gram, initializer = nearest_edm(
+            projection_target,
+            normalized_weights,
+            max_iterations=2000,
+            relative_tolerance=1e-8,
+            absolute_tolerance=1e-10,
+        )
+        gram_scale = float(np.trace(closest_gram) / n_modes)
+        if not np.isfinite(gram_scale) or gram_scale <= 0.0:
+            raise RuntimeError("nearest-EDM initialization has a nonpositive scale")
+        initial_floor = initial_gram_floor_relative * gram_scale
+        closest_gram = _project_centered_psd(closest_gram, initial_floor)
+        reduced_gram = basis.T @ closest_gram @ basis
+        initialization_info = {
+            "kind": "weighted_nearest_edm",
+            "nearest_edm_converged": bool(initializer["converged"]),
+            "nearest_edm_status": initializer["status"],
+            "nearest_edm_iterations": int(initializer["iterations"]),
+            "nearest_edm_weighted_rmse": float(initializer["weighted_rmse"]),
+            "gram_scale": gram_scale,
+            "gram_eigenvalue_floor": initial_floor,
+        }
+
+    reduced_gram = 0.5 * (reduced_gram + reduced_gram.T)
+    try:
+        np.linalg.cholesky(reduced_gram)
+    except np.linalg.LinAlgError as error:
+        raise RuntimeError(
+            "initial covariance is not strictly positive definite"
+        ) from error
+    return reduced_gram, initialization_info
+
+
+def fit_gaussian_noise_covariance(
+    squared_distances,
+    noise_variance=None,
+    *,
+    relative_noise_std=None,
+    initialization="rouse",
+    initial_connectivity=None,
+    use_gpu=False,
+    max_iterations=100,
+    relative_tolerance=1e-8,
+    absolute_tolerance=1e-10,
+    cg_relative_tolerance=1e-4,
+    cg_max_iterations=None,
+    initial_gram_floor_relative=1e-8,
+    save_steps=None,
+    progress_callback=None,
+):
+    """Fit Gaussian-noisy squared distances inside the covariance cone.
+
+    The strictly positive internal Gram matrix ``B`` minimizes
+
+    ``-3/2 logdet(B) + 1/2 sum_{i<j} (D(B)_ij-Dobs_ij)^2 / v_ij``.
+
+    Supply either one absolute variance or one relative standard deviation
+    ``sigma_ij / Dobs_ij`` shared by all observed pairs. The latter produces
+    ``v_ij = (relative_noise_std * Dobs_ij)**2``.
+    """
+    if use_gpu:
+        raise RuntimeError("the COV GPU backend is not available in this CPU solver")
+    (
+        observed,
+        pair_mask,
+        pair_i,
+        pair_j,
+        target_pairs,
+        pair_variance,
+        noise_model,
+        noise_parameter,
+    ) = _validate_gaussian_covariance_inputs(
+        squared_distances, noise_variance, relative_noise_std
+    )
+
+    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
+        raise ValueError("max_iterations must be a positive integer")
+    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
+        raise ValueError("convergence tolerances must be nonnegative")
+    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
+        raise ValueError("at least one convergence tolerance must be positive")
+    if not np.isfinite(cg_relative_tolerance) or not (
+        0.0 < cg_relative_tolerance < 1.0
+    ):
+        raise ValueError(
+            "cg_relative_tolerance must lie strictly between zero and one"
+        )
+    if not np.isfinite(initial_gram_floor_relative) or (
+        initial_gram_floor_relative <= 0.0
+    ):
+        raise ValueError("initial_gram_floor_relative must be positive and finite")
+
+    n = observed.shape[0]
+    n_modes = n - 1
+    if cg_max_iterations is None:
+        cg_max_iterations = 2 * n_modes
+    if (
+        not isinstance(cg_max_iterations, (int, np.integer))
+        or cg_max_iterations <= 0
+    ):
+        raise ValueError("cg_max_iterations must be a positive integer")
+
+    save_steps_set = set()
+    if save_steps is not None:
+        for step in save_steps:
+            if not isinstance(step, (int, np.integer)) or not (
+                1 <= step <= max_iterations
+            ):
+                raise ValueError(
+                    "save_steps must contain integers between 1 and max_iterations"
+                )
+            save_steps_set.add(int(step))
+
+    basis = _centered_orthonormal_basis(n)
+    inverse_variance = 1.0 / pair_variance
+    target_matrix, inverse_variance_matrix = _gaussian_covariance_pair_matrices(
+        n, pair_i, pair_j, target_pairs, inverse_variance
+    )
+    data_hessian_diagonal, preconditioner_setup_seconds = (
+        _gaussian_covariance_data_preconditioner_diagonal(
+            basis,
+            pair_i,
+            pair_j,
+            inverse_variance,
+            progress_callback=progress_callback,
+        )
+    )
+    reduced_gram, initialization_info = _initialize_gaussian_reduced_gram(
+        observed,
+        pair_mask,
+        pair_i,
+        pair_j,
+        inverse_variance,
+        basis,
+        initialization,
+        initial_connectivity,
+        initial_gram_floor_relative,
+    )
+
+    history = {
+        "iteration": [],
+        "objective": [],
+        "negative_entropy_objective": [],
+        "data_objective": [],
+        "loss": [],
+        "entropy": [],
+        "weighted_rmse": [],
+        "distance_rmse": [],
+        "gradient_norm": [],
+        "relative_gradient_norm": [],
+        "newton_decrement": [],
+        "relative_step": [],
+        "step_size": [],
+        "cg_iterations": [],
+        "cg_relative_residual": [],
+        "minimum_internal_gram_eigenvalue": [],
+        "maximum_internal_gram_eigenvalue": [],
+        "connectivity_offdiagonal_l2": [],
+    }
+    connectivity_at_steps = {}
+    converged = False
+    status = "max_iterations"
+    message = "maximum number of iterations reached"
+    current_state = _gaussian_covariance_objective_gradient(
+        reduced_gram,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )
+
+    for iteration in range(1, max_iterations + 1):
+        objective, gradient, _, inverse_gram, components = current_state
+        negative_entropy, data_objective, entropy_gradient, data_gradient = components
+        gradient_norm = float(np.linalg.norm(gradient, ord="fro"))
+        gradient_scale = max(
+            1.0,
+            float(np.linalg.norm(entropy_gradient, ord="fro")),
+            float(np.linalg.norm(data_gradient, ord="fro")),
+        )
+        relative_gradient_norm = gradient_norm / gradient_scale
+        if gradient_norm <= absolute_tolerance + relative_tolerance * gradient_scale:
+            converged = True
+            status = "optimality_tolerance"
+            message = "first-order optimality tolerance reached"
+            break
+
+        def hessian_operator(direction):
+            direction = 0.5 * (direction + direction.T)
+            data_term = _gaussian_covariance_data_hessian_action(
+                direction, basis, inverse_variance_matrix
+            )
+            entropy_term = 1.5 * inverse_gram @ direction @ inverse_gram
+            result = data_term + entropy_term
+            return 0.5 * (result + result.T)
+
+        preconditioner_diagonal = data_hessian_diagonal + 1.5 * np.outer(
+            np.diag(inverse_gram), np.diag(inverse_gram)
+        )
+        preconditioner_diagonal = np.maximum(
+            preconditioner_diagonal, np.finfo(np.float64).tiny
+        )
+        forcing_tolerance = min(
+            cg_relative_tolerance,
+            max(1e-8, 0.1 * np.sqrt(max(relative_gradient_norm, 0.0))),
+        )
+        direction, cg_iterations, cg_residual, cg_converged = (
+            _preconditioned_conjugate_gradient(
+                hessian_operator,
+                -gradient,
+                preconditioner_diagonal,
+                forcing_tolerance,
+                int(cg_max_iterations),
+            )
+        )
+        directional_derivative = float(np.sum(gradient * direction))
+        if (
+            not np.isfinite(directional_derivative)
+            or directional_derivative >= 0.0
+        ):
+            direction = -gradient / preconditioner_diagonal
+            direction = 0.5 * (direction + direction.T)
+            directional_derivative = float(np.sum(gradient * direction))
+            cg_converged = False
+
+        step_size = 1.0
+        candidate = None
+        candidate_state = None
+        for _ in range(60):
+            trial = reduced_gram + step_size * direction
+            trial = 0.5 * (trial + trial.T)
+            trial_state = _gaussian_covariance_objective_gradient(
+                trial,
+                basis,
+                target_matrix,
+                inverse_variance_matrix,
+                pair_i,
+                pair_j,
+            )
+            trial_objective = trial_state[0]
+            if not np.isfinite(trial_objective):
+                step_size *= 0.5
+                continue
+            if trial_objective <= (
+                objective + 1e-4 * step_size * directional_derivative
+            ):
+                candidate = trial
+                candidate_state = trial_state
+                break
+            step_size *= 0.5
+        if candidate is None:
+            status = "line_search_failed"
+            message = "covariance-cone Armijo line search failed"
+            break
+
+        accepted_delta = candidate - reduced_gram
+        relative_step = float(np.linalg.norm(accepted_delta, ord="fro")) / max(
+            float(np.linalg.norm(reduced_gram, ord="fro")), 1.0
+        )
+        reduced_gram = candidate
+        (
+            candidate_objective,
+            candidate_gradient,
+            candidate_pairs,
+            candidate_inverse,
+            candidate_components,
+        ) = candidate_state
+        (
+            candidate_negative_entropy,
+            candidate_data_objective,
+            candidate_entropy_gradient,
+            candidate_data_gradient,
+        ) = candidate_components
+        current_state = candidate_state
+        candidate_gradient_norm = float(
+            np.linalg.norm(candidate_gradient, ord="fro")
+        )
+        candidate_gradient_scale = max(
+            1.0,
+            float(np.linalg.norm(candidate_entropy_gradient, ord="fro")),
+            float(np.linalg.norm(candidate_data_gradient, ord="fro")),
+        )
+        candidate_relative_gradient = (
+            candidate_gradient_norm / candidate_gradient_scale
+        )
+        residual = candidate_pairs - target_pairs
+        relative_loss = float(np.sqrt(np.mean(np.square(residual / target_pairs))))
+        weighted_rmse = float(
+            np.sqrt(np.mean(np.square(residual) * inverse_variance))
+        )
+        distance_rmse = float(np.sqrt(np.mean(np.square(residual))))
+        gram_eigenvalues = np.linalg.eigvalsh(reduced_gram)
+        logdet = float(np.sum(np.log(gram_eigenvalues)))
+        entropy = logdet - n_modes * np.log(3.0)
+        reduced_connectivity = 3.0 * candidate_inverse
+        full_connectivity = -(basis @ reduced_connectivity @ basis.T)
+        offdiagonal = full_connectivity[np.triu_indices(n, k=1)]
+        connectivity_norm = float(np.linalg.norm(offdiagonal))
+        cg_relative_residual = cg_residual / max(
+            gradient_norm, np.finfo(np.float64).tiny
+        )
+
+        history["iteration"].append(iteration)
+        history["objective"].append(candidate_objective)
+        history["negative_entropy_objective"].append(candidate_negative_entropy)
+        history["data_objective"].append(candidate_data_objective)
+        history["loss"].append(relative_loss)
+        history["entropy"].append(entropy)
+        history["weighted_rmse"].append(weighted_rmse)
+        history["distance_rmse"].append(distance_rmse)
+        history["gradient_norm"].append(candidate_gradient_norm)
+        history["relative_gradient_norm"].append(candidate_relative_gradient)
+        history["newton_decrement"].append(
+            float(np.sqrt(max(-directional_derivative, 0.0)))
+        )
+        history["relative_step"].append(relative_step)
+        history["step_size"].append(step_size)
+        history["cg_iterations"].append(cg_iterations)
+        history["cg_relative_residual"].append(cg_relative_residual)
+        history["minimum_internal_gram_eigenvalue"].append(
+            float(gram_eigenvalues[0])
+        )
+        history["maximum_internal_gram_eigenvalue"].append(
+            float(gram_eigenvalues[-1])
+        )
+        history["connectivity_offdiagonal_l2"].append(connectivity_norm)
+
+        if iteration in save_steps_set:
+            connectivity_at_steps[iteration] = _connectivity_from_reduced_gram(
+                reduced_gram, basis
+            )
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "stage": "covariance_optimization",
+                    "iteration": iteration,
+                    "total": max_iterations,
+                    "objective": float(candidate_objective),
+                    "loss": relative_loss,
+                    "entropy": entropy,
+                    "relative_gradient_norm": candidate_relative_gradient,
+                    "step_size": step_size,
+                    "cg_iterations": cg_iterations,
+                    "cg_converged": bool(cg_converged),
+                    "noisy": True,
+                    "use_gpu": False,
+                    "method": "COV",
+                    "general_method": "covariance_optimization",
+                }
+            )
+
+        if candidate_gradient_norm <= (
+            absolute_tolerance + relative_tolerance * candidate_gradient_scale
+        ):
+            converged = True
+            status = "optimality_tolerance"
+            message = "first-order optimality tolerance reached"
+            break
+
+    for key, values in history.items():
+        dtype = np.int64 if key in {"iteration", "cg_iterations"} else np.float64
+        history[key] = np.asarray(values, dtype=dtype)
+
+    gram = basis @ reduced_gram @ basis.T
+    gram = 0.5 * (gram + gram.T)
+    fitted_squared_distances = _squared_distances_from_gram(gram)
+    connectivity = _connectivity_from_reduced_gram(reduced_gram, basis)
+    if history["iteration"].size == 0:
+        final_state = current_state
+        final_objective = float(final_state[0])
+        final_gradient_norm = float(np.linalg.norm(final_state[1], ord="fro"))
+        final_relative_gradient_norm = final_gradient_norm / max(
+            1.0,
+            float(np.linalg.norm(final_state[4][2], ord="fro")),
+            float(np.linalg.norm(final_state[4][3], ord="fro")),
+        )
+    else:
+        final_objective = float(history["objective"][-1])
+        final_gradient_norm = float(history["gradient_norm"][-1])
+        final_relative_gradient_norm = float(history["relative_gradient_norm"][-1])
+
+    fitted_pairs = fitted_squared_distances[pair_i, pair_j]
+    stationarity = (
+        fitted_pairs
+        - target_pairs
+        - 0.5 * pair_variance * connectivity[pair_i, pair_j]
+    )
+    stationarity_norm = float(np.linalg.norm(stationarity))
+    stationarity_scale = max(
+        1.0,
+        float(np.linalg.norm(fitted_pairs - target_pairs)),
+        float(
+            np.linalg.norm(
+                0.5 * pair_variance * connectivity[pair_i, pair_j]
+            )
+        ),
+    )
+
+    info = {
+        "converged": bool(converged),
+        "status": status,
+        "message": message,
+        "iterations": (
+            int(history["iteration"][-1]) if history["iteration"].size else 0
+        ),
+        "objective": final_objective,
+        "gradient_norm": final_gradient_norm,
+        "relative_gradient_norm": final_relative_gradient_norm,
+        "stationarity_residual_norm": stationarity_norm,
+        "relative_stationarity_residual": stationarity_norm / stationarity_scale,
+        "maximum_absolute_stationarity_residual": float(
+            np.max(np.abs(stationarity))
+        ),
+        "observed_pair_count": len(target_pairs),
+        "noise_model": noise_model,
+        "noise_parameter": noise_parameter,
+        "noise_variance_minimum": float(np.min(pair_variance)),
+        "noise_variance_median": float(np.median(pair_variance)),
+        "noise_variance_maximum": float(np.max(pair_variance)),
+        "initialization": initialization_info,
+        "backend": "cpu",
+        "dtype": "float64",
+        "preconditioner_pair_block_size": (
+            _COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE
+        ),
+        "preconditioner_setup_seconds": float(preconditioner_setup_seconds),
+        "history": history,
+        "connectivity_matrix_at_steps": connectivity_at_steps,
+        "objective_definition": (
+            "-1.5*logdet(B_internal) + 0.5*sum_unique_pairs("
+            "(D_fit-D_obs)^2/noise_variance)"
+        ),
+        "stationarity_definition": (
+            "D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"
+        ),
+        "logged_metric_timing": "post-update accepted covariance iterate",
+    }
+    if not converged:
+        warnings.warn(
+            "fit_gaussian_noise_covariance stopped without satisfying the "
+            f"first-order optimality tolerance (status={status})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return fitted_squared_distances, gram, connectivity, info
 
 
 def ddmap2cov(ddmap):

@@ -142,16 +142,18 @@ This script will generate several files:
   this work 10.1126/science.aaf8084. Default: 4.0.
 - `-s, --selection`: Specify chromosome or region. This option is required
   when the input file has `cooler` or `.hic` format. For cooler files, the value is passed to the `cooler.Cooler.matrix().fetch()` method. For .hic files, use format "chr1:start1-end1,chr2:start2-end2". For details on cooler selectors, please refer to their [documentation](https://cooler.readthedocs.io/en/latest/concepts.html#matrix-selector).
-- `-m, --method`: Specify the method used for optimization. Options: IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion). When using Direct Inversion, no iterations are performed. The connectivity matrix is obtained by direct Moore–Penrose inverse of the covariance matrix. Note that the resulting connectivity matrix using Direct Inversion can be very different from the results obtained by GD or IS method.
+- `-m, --method`: Select IS (Iterative Scaling, default), GD (Gradient Descent), DI (Direct Inversion), or COV (calibrated Gaussian covariance-cone optimization).
 - `-l, --lamd`: Specify the weight for L1 or L2 regularization. Default value is 0.0, meaning no regularization. Regularization is typically used to avoid over-fitting.
 - `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
-- `--gaussian-noise-variance`: Noise variance for independent Gaussian noise on constraints (IS/GD only). This enables denoising when Gaussian noise with known variance is assumed. Cannot be combined with `--lamd`.
-- `-i, --iteration`: The method relies on iterative scaling to find the optimal parameters. This option specifies the number of iterations. Generally, the more iterations the model runs, the better results are. However, the convergence of the model slows down when iteration increases. For larger size of contact map and the mean distance map, the number of iterations needed for good convergence is larger. Default: 10000.
+- `--gaussian-noise-variance`: Positive scalar absolute variance on squared-distance constraints. COV only.
+- `--gaussian-noise-relative-std`: Positive scalar relative standard deviation `sigma_ij / Dobs_ij`. COV converts it to pair variance `(value * Dobs_ij)^2` after preprocessing. Mutually exclusive with `--gaussian-noise-variance`.
+- `--covariance-initialization`: COV start, either `rouse` (default) or `nearest-edm`. A supplied connectivity matrix remains the explicit restart initialization.
+- `-i, --iteration`: Maximum optimizer iterations. Default: 10000.
 - `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
 - `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
 - `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
 - `--use-gpu`: Enable GPU acceleration via CuPy. Provides 2-4x speedup for large matrices (n ≥ 200). Requires CuPy to be installed.
-- `--gpu-float32`: When using `--use-gpu`, run GPU math and eigendecomposition in float32 (often faster; slightly different numerics). Default: false.
+- `--gpu-float32`: Use float32 for legacy GPU IS/GD. COV is float64-only.
 - `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`. When used as a library (without `output_prefix`), connectivity matrices at these steps are still returned in `results['connectivity_matrix_at_steps']`.
 - `--eigh-threads`: Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, the backend default is used. Set to 1 for single-threaded runs.
 - `--input-type`: The type of the input file. To use the script, the type must be specified. Options: `cmap` (contact map) or `dmap` (distance map). This option is required.
@@ -167,6 +169,32 @@ This script will generate several files:
 - `--not-normalize`: Turn off the auto normalization of the contact map. Only effective when `input_type == cmap`.
 - `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
 - `-q, --quiet`: Quiet mode: disable fancy tables display, keep only the progress bar.
+
+#### Calibrated Gaussian COV method
+
+COV fits noisy mean-squared-distance constraints by minimizing
+
+```text
+-3/2 logdet(B) + 1/2 sum_{i<j} (Dfit_ij-Dobs_ij)^2 / variance_ij
+```
+
+over internal Gram matrices `B` that remain strictly positive definite. The
+default start is the target-scaled Rouse chain used by older HIPPS-DIMES code;
+`--covariance-initialization nearest-edm` selects the weighted nearest-EDM
+alternative. Initialization changes only the starting point, not the objective.
+
+```bash
+python -m hipps_dimes observed_ddmap.npy cov_fit \
+  --input-type ddmap --input-format npy \
+  --method COV --gaussian-noise-relative-std 0.1 \
+  --iteration 100 --no-xyzs --save-pickle
+```
+
+Gaussian-noise options are rejected with IS, GD, and DI because their legacy
+noise-aware update did not converge to this calibrated dual objective. COV also
+rejects additional `--lamd` regularization and nonnegative-connectivity
+projection. Inspect `results['covariance_optimization']` for the convergence,
+stationarity, initialization, variance, and preconditioner diagnostics.
 
 ### Examples
 

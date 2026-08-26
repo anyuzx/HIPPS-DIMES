@@ -348,8 +348,8 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
 
 
-def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefix():
-    """Noisy optimization should return save-step snapshots even in library mode."""
+def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix():
+    """COV should return save-step snapshots and calibrated diagnostics."""
     n = 6
     A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
     dmap_target = HippsDimes.a2dmap_theory(A_true)
@@ -358,9 +358,8 @@ def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefi
         input_matrix=dmap_target,
         input_type="dmap",
         input_format="text",
-        method="IS",
-        iteration=3,
-        learning_rate=5.0,
+        method="COV",
+        iteration=30,
         gaussian_noise_variance=0.1,
         save_steps=[1, 3],
         no_xyzs=True,
@@ -372,6 +371,126 @@ def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefi
     assert sorted(results["connectivity_matrix_at_steps"]) == [1, 3]
     assert results["connectivity_matrix_at_steps"][1].shape == (n, n)
     assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
+    assert results["covariance_optimization"]["converged"]
+    assert results["covariance_optimization"]["initialization"]["kind"] == "rouse"
+    assert results["gram_matrix"].shape == (n, n)
+
+
+def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    relative_std = 0.08
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        gaussian_noise_relative_std=relative_std,
+        iteration=30,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+    expected_variance = np.square(
+        relative_std * ddmap_target[np.triu_indices(n, k=1)]
+    )
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    assert info["noise_model"] == "heteroskedastic_relative_std"
+    assert info["noise_variance_minimum"] == pytest.approx(
+        np.min(expected_variance)
+    )
+    assert info["noise_variance_median"] == pytest.approx(
+        np.median(expected_variance)
+    )
+    assert info["noise_variance_maximum"] == pytest.approx(
+        np.max(expected_variance)
+    )
+    assert parameters["gaussian_noise_relative_std"] == relative_std
+    assert parameters["covariance_initialization_resolved"] == "rouse"
+
+
+@pytest.mark.parametrize("method", ["IS", "GD", "DI"])
+def test_run_optimization_rejects_gaussian_noise_outside_cov(method):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="only with method='COV'"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.1,
+            no_xyzs=True,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({}, "requires exactly one"),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "gaussian_noise_relative_std": 0.1,
+            },
+            "requires exactly one",
+        ),
+        ({"gaussian_noise_variance": 0.1, "lamd": 0.2}, "lamd"),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "enforce_nonnegative_connectivity_matrix": True,
+            },
+            "nonnegative-connectivity",
+        ),
+        (
+            {"gaussian_noise_variance": 0.1, "gpu_float32": True},
+            "float64 only",
+        ),
+    ],
+)
+def test_run_optimization_rejects_invalid_cov_combinations(options, message):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match=message):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method="COV",
+            no_xyzs=True,
+            verbose=False,
+            **options,
+        )
+
+
+def test_legacy_optimize_no_longer_exposes_noisy_solver():
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    model = HippsDimes.Optimize(target)
+
+    assert not hasattr(model, "run_noisy")
+
+
+def test_cli_help_exposes_cov_noise_and_initialization_contract():
+    result = CliRunner().invoke(cli_main, ["--help"])
+    parameter_names = {parameter.name for parameter in cli_main.params}
+
+    assert result.exit_code == 0
+    assert "COV" in result.output
+    assert "gaussian_noise_relative_std" in parameter_names
+    assert "covariance_initialization" in parameter_names
 
 
 def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):

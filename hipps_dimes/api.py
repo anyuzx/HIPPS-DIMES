@@ -231,6 +231,8 @@ def run_optimization(input_path=None,
                      lamd=0.0,
                      reg='L2',
                      gaussian_noise_variance=0.0,
+                     gaussian_noise_relative_std=None,
+                     covariance_initialization='rouse',
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -277,13 +279,19 @@ def run_optimization(input_path=None,
     selection : str, optional
         Region selection for cooler/hic files
     method : str, default='IS'
-        Optimization method: 'IS' (Iterative Scaling), 'GD' (Gradient Descent), or 'DI' (Direct Inversion)
+        Optimization method: 'IS', 'GD', 'DI', or calibrated Gaussian 'COV'
     lamd : float, default=0.0
         Regularization weight
     reg : str, default='L2'
         Regularization type: 'L1' or 'L2'
     gaussian_noise_variance : float, default=0.0
-        Noise variance for independent Gaussian noise on constraints.
+        Positive homoskedastic variance on squared-distance constraints. COV only.
+    gaussian_noise_relative_std : float, optional
+        Positive shared relative standard deviation ``sigma_ij / Dobs_ij``.
+        COV converts it to ``variance_ij = (value * Dobs_ij)**2`` after input
+        conversion and missing-data handling.
+    covariance_initialization : {'rouse', 'nearest_edm'}, default='rouse'
+        Initialization used by COV when no connectivity matrix is supplied.
     iteration : int, default=10000
         Number of optimization iterations
     learning_rate : float, default=10.0
@@ -432,12 +440,78 @@ def run_optimization(input_path=None,
         raise ValueError(
             f"Invalid input_format '{input_format}'. Must be one of {sorted(valid_input_formats)}"
         )
-    if gaussian_noise_variance < 0.0:
-        raise ValueError("gaussian_noise_variance must be non-negative")
-    if gaussian_noise_variance > 0.0 and method == 'DI':
-        raise ValueError("gaussian_noise_variance is only supported for optimization methods (IS/GD), not DI")
-    if gaussian_noise_variance > 0.0 and lamd > 0.0:
-        raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
+    valid_methods = {'IS', 'GD', 'DI', 'COV'}
+    if method not in valid_methods:
+        raise ValueError(
+            f"Invalid method '{method}'. Must be one of {sorted(valid_methods)}"
+        )
+    if isinstance(gaussian_noise_variance, (bool, np.bool_)) or not np.isscalar(
+        gaussian_noise_variance
+    ):
+        raise ValueError("gaussian_noise_variance must be a nonnegative finite scalar")
+    try:
+        gaussian_noise_variance = float(gaussian_noise_variance)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "gaussian_noise_variance must be a nonnegative finite scalar"
+        ) from error
+    if not np.isfinite(gaussian_noise_variance) or gaussian_noise_variance < 0.0:
+        raise ValueError("gaussian_noise_variance must be a nonnegative finite scalar")
+    if gaussian_noise_relative_std is not None:
+        if isinstance(gaussian_noise_relative_std, (bool, np.bool_)) or not np.isscalar(
+            gaussian_noise_relative_std
+        ):
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            )
+        try:
+            gaussian_noise_relative_std = float(gaussian_noise_relative_std)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            ) from error
+        if (
+            not np.isfinite(gaussian_noise_relative_std)
+            or gaussian_noise_relative_std <= 0.0
+        ):
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            )
+    if covariance_initialization not in {'rouse', 'nearest_edm'}:
+        raise ValueError(
+            "covariance_initialization must be 'rouse' or 'nearest_edm'"
+        )
+
+    has_absolute_noise = gaussian_noise_variance > 0.0
+    has_relative_noise = gaussian_noise_relative_std is not None
+    if method == 'COV':
+        if has_absolute_noise == has_relative_noise:
+            raise ValueError(
+                "COV requires exactly one of gaussian_noise_variance or "
+                "gaussian_noise_relative_std"
+            )
+        if lamd > 0.0:
+            raise ValueError("COV cannot be combined with lamd regularization")
+        if enforce_nonnegative_connectivity_matrix:
+            raise ValueError(
+                "COV cannot be combined with nonnegative-connectivity enforcement"
+            )
+        if gpu_float32:
+            raise ValueError("COV supports float64 only; gpu_float32 is not allowed")
+        if connectivity_matrix is not None and covariance_initialization == 'nearest_edm':
+            raise ValueError(
+                "connectivity_matrix cannot be combined with nearest_edm initialization"
+            )
+    else:
+        if has_absolute_noise or has_relative_noise:
+            raise ValueError(
+                "Gaussian-noise options are supported only with method='COV'; "
+                "legacy noisy IS/GD does not optimize the calibrated Gaussian objective"
+            )
+        if covariance_initialization != 'rouse':
+            raise ValueError(
+                "covariance_initialization is supported only with method='COV'"
+            )
     if log is not None:
         no_log = not log
     if save_pickle and output_prefix is None:
@@ -819,12 +893,19 @@ def run_optimization(input_path=None,
         opt_table.add_column("Parameter", style="dim", width=20)
         opt_table.add_column("Value", style="green")
         
-        method_str = "Iterative Scaling (IS)" if method == 'IS' else "Gradient Descent (GD)" if method == 'GD' else "Direct Inversion (DI)" if method == 'DI' else "Unknown"
+        method_str = (
+            "Iterative Scaling (IS)" if method == 'IS'
+            else "Gradient Descent (GD)" if method == 'GD'
+            else "Direct Inversion (DI)" if method == 'DI'
+            else "Covariance-cone Gaussian fit (COV)" if method == 'COV'
+            else "Unknown"
+        )
         opt_table.add_row("Method", method_str)
         
         if method != 'DI':
             opt_table.add_row("Iterations", f"{iteration:,}")
-            opt_table.add_row("Learning Rate", f"{learning_rate}")
+            if method in {'IS', 'GD'}:
+                opt_table.add_row("Learning Rate", f"{learning_rate}")
             
             # Momentum and Nesterov (only for IS)
             if method == 'IS':
@@ -841,8 +922,22 @@ def run_optimization(input_path=None,
                 opt_table.add_row("Regularization", f"{reg} (λ = {lamd})")
             else:
                 opt_table.add_row("Regularization", "None")
-            if gaussian_noise_variance > 0.0:
-                opt_table.add_row("Noise Variance", f"{gaussian_noise_variance}")
+            if method == 'COV':
+                opt_table.add_row(
+                    "Initialization",
+                    "provided connectivity"
+                    if connectivity_matrix is not None
+                    else covariance_initialization,
+                )
+                if has_absolute_noise:
+                    opt_table.add_row(
+                        "Noise Model", f"absolute variance {gaussian_noise_variance}"
+                    )
+                else:
+                    opt_table.add_row(
+                        "Noise Model",
+                        f"relative std {gaussian_noise_relative_std}",
+                    )
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -891,43 +986,98 @@ def run_optimization(input_path=None,
             console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
-    model = Optimize(ddmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
-    
-    if use_gpu and model.use_gpu and verbose:
-        dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
-        console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
-
     solver_output_prefix = None if save_pickle else output_prefix
-    
-    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
-                         'momentum': momentum, 'nesterov': nesterov}
+    covariance_optimization_info = None
+    fitted_gram_matrix = None
+    iteration_extra_series = None
+    use_gpu_enabled = False
 
-    if method == 'IS' or method == 'GD':
-        general_method = 'optimization'
-    elif method == 'DI':
-        general_method = 'direct'
-
-    if gaussian_noise_variance > 0.0:
-        keyword_arguments_noisy = {
-            'learning_rate': learning_rate,
-            'method': method,
-            'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
-            'momentum': momentum,
-            'nesterov': nesterov
+    if method == 'COV':
+        (
+            fitted_ddmap,
+            fitted_gram_matrix,
+            final_connectivity_matrix,
+            covariance_optimization_info,
+        ) = fit_gaussian_noise_covariance(
+            ddmap_target,
+            gaussian_noise_variance if has_absolute_noise else None,
+            relative_noise_std=gaussian_noise_relative_std,
+            initialization=covariance_initialization,
+            initial_connectivity=connectivity_matrix,
+            use_gpu=use_gpu,
+            max_iterations=iteration,
+            save_steps=save_steps,
+            progress_callback=progress_callback,
+        )
+        dmap_maxent = a2dmap_theory(
+            final_connectivity_matrix, force_positive_definite=True
+        )
+        reconstructed_ddmap = (3.0 * np.pi / 8.0) * np.square(dmap_maxent)
+        consistency_scale = max(float(np.max(np.abs(fitted_ddmap))), 1.0)
+        if not np.allclose(
+            reconstructed_ddmap,
+            fitted_ddmap,
+            rtol=1e-8,
+            atol=1e-10 * consistency_scale,
+        ):
+            raise RuntimeError(
+                "COV connectivity does not reproduce its fitted squared-distance map"
+            )
+        history = covariance_optimization_info['history']
+        loss = history['loss'].tolist()
+        entropy = history['entropy'].tolist()
+        iteration_extra_series = {
+            key: values
+            for key, values in history.items()
+            if key not in {'iteration', 'loss', 'entropy'}
         }
-        loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run_noisy(
-            iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
-            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
-            **keyword_arguments_noisy)
+        connectivity_at_steps = covariance_optimization_info[
+            'connectivity_matrix_at_steps'
+        ]
+        use_gpu_enabled = covariance_optimization_info['backend'] == 'gpu'
+        if solver_output_prefix is not None:
+            for step, matrix in connectivity_at_steps.items():
+                np.savetxt(
+                    f'{solver_output_prefix}_connectivity_matrix_iter{step}.txt',
+                    matrix,
+                )
     else:
+        model = Optimize(
+            ddmap_target,
+            connectivity_matrix=connectivity_matrix,
+            use_gpu=use_gpu,
+            gpu_float32=gpu_float32,
+        )
+        use_gpu_enabled = model.use_gpu
+        if use_gpu and model.use_gpu and verbose:
+            dtype_str = (
+                "float32" if getattr(model, "gpu_float32", False) else "float64"
+            )
+            console.print(
+                f"[green]GPU acceleration enabled ({get_gpu_name()}), "
+                f"dtype={dtype_str}[/green]"
+            )
+        keyword_arguments = {
+            'learning_rate': learning_rate,
+            'lamd': lamd,
+            'reg': reg,
+            'method': method,
+            'enforce_nonnegative_connectivity_matrix': (
+                enforce_nonnegative_connectivity_matrix
+            ),
+            'momentum': momentum,
+            'nesterov': nesterov,
+        }
+        general_method = 'optimization' if method in {'IS', 'GD'} else 'direct'
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
             iteration, general_method=general_method, save_steps=save_steps,
             output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
             **keyword_arguments)
     
     # Format per-iteration scalar outputs.
-    iteration_series_df = _build_iteration_series_frame(loss, entropy)
+    iteration_series_df = _build_iteration_series_frame(
+        loss, entropy, iteration_extra_series
+    )
 
     # Print regularization norms if requested
     if verbose:
@@ -959,12 +1109,41 @@ def run_optimization(input_path=None,
         'lamd': lamd,
         'reg': reg,
         'gaussian_noise_variance': gaussian_noise_variance,
+        'gaussian_noise_relative_std': gaussian_noise_relative_std,
+        'gaussian_noise_model': (
+            covariance_optimization_info['noise_model']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_minimum': (
+            covariance_optimization_info['noise_variance_minimum']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_median': (
+            covariance_optimization_info['noise_variance_median']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_maximum': (
+            covariance_optimization_info['noise_variance_maximum']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_requested': (
+            covariance_initialization if method == 'COV' else None
+        ),
+        'covariance_initialization_resolved': (
+            covariance_optimization_info['initialization']['kind']
+            if covariance_optimization_info is not None
+            else None
+        ),
         'iteration': iteration,
         'learning_rate': learning_rate,
         'momentum': momentum,
         'nesterov': nesterov,
         'use_gpu_requested': use_gpu,
-        'use_gpu_enabled': model.use_gpu,
+        'use_gpu_enabled': use_gpu_enabled,
         'gpu_float32': gpu_float32,
         'binsize': binsize,
         'hic_norm': hic_norm,
@@ -1004,6 +1183,9 @@ def run_optimization(input_path=None,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }
+    if covariance_optimization_info is not None:
+        results['gram_matrix'] = fitted_gram_matrix
+        results['covariance_optimization'] = covariance_optimization_info
     if connectivity_at_steps:
         results['connectivity_matrix_at_steps'] = connectivity_at_steps
     if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:

@@ -3,7 +3,7 @@
 import time
 
 from .numerics import *  # noqa: F401,F403
-from .numerics import _a2dmap_theory_gpu
+from .numerics import _a2dmap_theory_gpu, _rouse_initial_connectivity
 
 _PBAR_FORMAT_NO_RATE = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]"
 
@@ -136,13 +136,7 @@ class Optimize:
         self.n = ddmap_target.shape[0]
 
         if connectivity_matrix is None:
-            # initialize the connectivity matrix
-            # here the connectivity matrix is initialized as a simple rouse chain whose spring constant is determined such\
-            # that its radius of gyration is close to the target
-            # we need to filter out both NaN and inf entries
-            rg2 = .5 * np.nanmean(self.ddmap_target[~np.isinf(self.ddmap_target)])
-            k = self.n / (4. * rg2)
-            self.A = construct_connectivity_matrix_rouse(self.n, k)
+            self.A, _, _ = _rouse_initial_connectivity(self.ddmap_target)
         else:
             self.A = connectivity_matrix
 
@@ -562,86 +556,6 @@ class Optimize:
         eigvals_K = -eigvals_A
         self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
 
-    def __update_parameter_noisy(self, t, learning_rate, gaussian_noise_variance, method='IS', enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
-        """
-        Update parameters with Gaussian-noise regularization on constraints.
-
-        Uses a proximal L2 shrink step after the standard IS/GD update:
-        A <- (A + lr * grad) / (1 + lr * gaussian_noise_variance)
-        """
-        if self.use_gpu and method == 'IS':
-            return self.__update_parameter_noisy_gpu(t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix, momentum, nesterov)
-        elif self.use_gpu and method == 'GD':
-            return self.__update_parameter_noisy_gpu_gd(t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix)
-
-        dmap_t, eigvals_A = a2dmap_theory(self.A, force_positive_definite=True, return_eigenvalues=True)
-        ddmap_t = ((3. * np.pi) / 8.) * np.power(dmap_t, 2.)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            compare_ratio = ddmap_t / self.ddmap_target
-        if self.has_constraint_mask:
-            fhash = np.nansum(ddmap_t[self.constraint_mask]) / 2.
-        else:
-            fhash = np.nansum(ddmap_t) / 2.
-        if not np.isfinite(fhash) or fhash <= 0.0:
-            fhash = 1.0
-
-        if method == 'IS':
-            if self.has_constraint_mask:
-                gradient_t = np.zeros_like(ddmap_t)
-                log_ratio = np.nan_to_num(
-                    np.log(compare_ratio[self.constraint_mask]), posinf=0., neginf=0.
-                )
-                gradient_t[self.constraint_mask] = log_ratio / fhash
-            else:
-                gradient_t = np.nan_to_num(np.log(compare_ratio), posinf=0., neginf=0.) / fhash
-            gradient_t = 0.5 * (gradient_t + gradient_t.T)
-            if self.edge_mask is not None:
-                gradient_t *= self.edge_mask
-
-            if momentum > 0.0:
-                if t == 0:
-                    self.velocity = np.zeros_like(self.A)
-                self.velocity = momentum * self.velocity + gradient_t
-                if nesterov:
-                    self.A = self.A + learning_rate * (gradient_t + momentum * self.velocity)
-                else:
-                    self.A = self.A + learning_rate * self.velocity
-            else:
-                self.A = self.A + learning_rate * gradient_t
-        elif method == 'GD':
-            if t == 0:
-                self.theta = np.copy(self.A)
-
-            if self.has_constraint_mask:
-                gradient_t = np.zeros_like(ddmap_t)
-                gradient_t[self.constraint_mask] = (
-                    ddmap_t[self.constraint_mask] - self.ddmap_target[self.constraint_mask]
-                )
-            else:
-                gradient_t = (ddmap_t - self.ddmap_target)
-            gradient_t = 0.5 * (gradient_t + gradient_t.T)
-            if self.edge_mask is not None:
-                gradient_t *= self.edge_mask
-
-            theta_previous = np.copy(self.theta)
-            self.theta = self.A + learning_rate * gradient_t
-            self.A = self.theta + (t / (t + 3)) * (self.theta - theta_previous)
-
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self.A = self.A * shrink
-            if method == 'GD' and self.theta is not None:
-                self.theta = self.theta * shrink
-
-        self.A = np.nan_to_num(self.A)
-        self.A = 0.5 * (self.A + self.A.T)
-        self._freeze_masked_edges()
-        self.A = a2a(self.A, fill_negative=enforce_nonnegative_connectivity_matrix)
-
-        self.loss = self.__compute_loss(ddmap_t)
-        eigvals_K = -eigvals_A
-        self.entropy = compute_entropy_from_A(self.A, eigvals=eigvals_K)
-
     def __update_parameter_gpu(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
         """GPU-accelerated version of __update_parameter for IS method using CuPy."""
         # Compute mean squared distance matrix on GPU
@@ -737,72 +651,6 @@ class Optimize:
         # Syncing an (n,n) matrix every iteration can dominate runtime for n~1000.
         # We sync only when needed (save_steps) and once at the end of run().
 
-    def __update_parameter_noisy_gpu(self, t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix=False, momentum=0.0, nesterov=False):
-        """GPU-accelerated version of noisy update for IS method using CuPy."""
-        dmap_t_gpu, eigvals_A_gpu = _a2dmap_theory_gpu(self._A_gpu, force_positive_definite=True, return_eigenvalues=True)
-        dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
-        ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
-
-        compare_ratio_gpu = ddmap_t_gpu / self._ddmap_target_gpu
-        if self.has_constraint_mask:
-            fhash = cp.nansum(ddmap_t_gpu[self._constraint_mask_gpu]) / 2.
-        else:
-            fhash = cp.nansum(ddmap_t_gpu) / 2.
-        fhash = cp.where(cp.isfinite(fhash) & (fhash > 0.0), fhash, cp.asarray(1.0, dtype=self._A_gpu.dtype))
-
-        if self.has_constraint_mask:
-            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
-            log_ratio_gpu = cp.nan_to_num(
-                cp.log(compare_ratio_gpu[self._constraint_mask_gpu]), posinf=0., neginf=0.
-            )
-            gradient_t_gpu[self._constraint_mask_gpu] = log_ratio_gpu / fhash
-        else:
-            gradient_t_gpu = cp.nan_to_num(cp.log(compare_ratio_gpu), posinf=0., neginf=0.) / fhash
-        gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
-        if self.edge_mask is not None:
-            gradient_t_gpu *= self._edge_mask_gpu
-
-        if momentum > 0.0:
-            if t == 0:
-                self._velocity_gpu = cp.zeros_like(self._A_gpu)
-            self._velocity_gpu = momentum * self._velocity_gpu + gradient_t_gpu
-            if nesterov:
-                self._A_gpu = self._A_gpu + learning_rate * (gradient_t_gpu + momentum * self._velocity_gpu)
-            else:
-                self._A_gpu = self._A_gpu + learning_rate * self._velocity_gpu
-        else:
-            self._A_gpu = self._A_gpu + learning_rate * gradient_t_gpu
-
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self._A_gpu = self._A_gpu * shrink
-
-        self._A_gpu = cp.nan_to_num(self._A_gpu)
-        self._A_gpu = 0.5 * (self._A_gpu + self._A_gpu.T)
-        if self.edge_mask is not None:
-            self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
-
-        self._A_gpu = a2a(
-            self._A_gpu,
-            fill_negative=enforce_nonnegative_connectivity_matrix,
-        )
-
-        if self.has_constraint_mask:
-            relative_error_gpu = (
-                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
-                / self._ddmap_target_gpu[self._constraint_mask_gpu]
-            )
-            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
-        else:
-            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
-        self._loss_gpu = loss_gpu
-
-        eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-
-        self._entropy_gpu = cp.sum(log_terms)
-
     def __update_parameter_gpu_gd(self, t, learning_rate, lamd=0.0, reg='l2', enforce_nonnegative_connectivity_matrix=False):
         """GPU-accelerated version of __update_parameter for GD method using CuPy."""
         # Initialize theta on first iteration
@@ -884,61 +732,6 @@ class Optimize:
         
         # NOTE: We intentionally do NOT sync self.A back to CPU here.
         # Sync only when needed (save_steps) and once at the end of run().
-
-    def __update_parameter_noisy_gpu_gd(self, t, learning_rate, gaussian_noise_variance, enforce_nonnegative_connectivity_matrix=False):
-        """GPU-accelerated version of noisy update for GD method using CuPy."""
-        if t == 0:
-            self._theta_gpu = self._A_gpu.copy()
-
-        dmap_t_gpu, eigvals_A_gpu = _a2dmap_theory_gpu(self._A_gpu, force_positive_definite=True, return_eigenvalues=True)
-        dd_const = cp.asarray((3.0 * np.pi) / 8.0, dtype=self._A_gpu.dtype)
-        ddmap_t_gpu = dd_const * cp.square(dmap_t_gpu)
-
-        if self.has_constraint_mask:
-            gradient_t_gpu = cp.zeros_like(ddmap_t_gpu)
-            gradient_t_gpu[self._constraint_mask_gpu] = (
-                ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu]
-            )
-        else:
-            gradient_t_gpu = ddmap_t_gpu - self._ddmap_target_gpu
-        gradient_t_gpu = 0.5 * (gradient_t_gpu + gradient_t_gpu.T)
-        if self.edge_mask is not None:
-            gradient_t_gpu *= self._edge_mask_gpu
-
-        theta_previous_gpu = self._theta_gpu.copy()
-        self._theta_gpu = self._A_gpu + learning_rate * gradient_t_gpu
-        momentum_rate = t / (t + 3)
-        self._A_gpu = self._theta_gpu + momentum_rate * (self._theta_gpu - theta_previous_gpu)
-
-        if gaussian_noise_variance > 0.0:
-            shrink = 1.0 / (1.0 + learning_rate * gaussian_noise_variance)
-            self._A_gpu = self._A_gpu * shrink
-            self._theta_gpu = self._theta_gpu * shrink
-
-        self._A_gpu = cp.nan_to_num(self._A_gpu)
-        self._A_gpu = 0.5 * (self._A_gpu + self._A_gpu.T)
-        if self.edge_mask is not None:
-            self._A_gpu = cp.where(self._freeze_mask_gpu, 0.0, self._A_gpu)
-
-        self._A_gpu = a2a(
-            self._A_gpu,
-            fill_negative=enforce_nonnegative_connectivity_matrix,
-        )
-
-        if self.has_constraint_mask:
-            relative_error_gpu = (
-                (ddmap_t_gpu[self._constraint_mask_gpu] - self._ddmap_target_gpu[self._constraint_mask_gpu])
-                / self._ddmap_target_gpu[self._constraint_mask_gpu]
-            )
-            loss_gpu = cp.nanmean(cp.power(relative_error_gpu, 2.)) ** 0.5
-        else:
-            loss_gpu = cp.nanmean(cp.power((ddmap_t_gpu - self._ddmap_target_gpu) / self._ddmap_target_gpu, 2.)) ** 0.5
-        self._loss_gpu = loss_gpu
-
-        eigvals_K_gpu = -eigvals_A_gpu
-        positive_mask = eigvals_K_gpu > 1e-12
-        log_terms = cp.where(positive_mask, -cp.log(eigvals_K_gpu), 0.0)
-        self._entropy_gpu = cp.sum(log_terms)
 
     def run(self, epoch, general_method='optimization', save_steps=None, output_prefix=None, progress_callback=None, show_progress=True, **kwargs):
         """
@@ -1127,148 +920,6 @@ class Optimize:
 
         # Ensure self.A is up-to-date on CPU before returning / computing dmap
         if self.use_gpu and general_method == 'optimization':
-            self.A = cp.asnumpy(self._A_gpu)
-        dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
-
-        return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
-
-    def run_noisy(self, epoch, gaussian_noise_variance, general_method='optimization', save_steps=None, output_prefix=None, progress_callback=None, show_progress=True, **kwargs):
-        """
-        Run optimization with independent Gaussian noise on constraints.
-
-        Parameters
-        ----------
-        epoch : int
-            Number of iterations
-        gaussian_noise_variance : float
-            Noise variance for constraints (L2 shrink strength).
-        general_method : str
-            Only 'optimization' is supported for the noisy solver.
-        save_steps : list of int, optional
-            Iteration steps at which to save the connectivity matrix.
-        output_prefix : str, optional
-            Prefix for output files when saving connectivity matrix at save_steps
-        progress_callback : callable, optional
-            Callback receiving structured per-iteration progress dictionaries.
-        show_progress : bool, default=True
-            Whether to render tqdm progress bars for iterative solvers.
-        **kwargs
-            Additional arguments passed to __update_parameter_noisy:
-            - learning_rate : float
-                Learning rate for optimization
-            - method : str
-                Optimization method ('IS' or 'GD')
-            - enforce_nonnegative_connectivity_matrix : bool
-                Enforce non-negative spring constants
-            - momentum : float, optional
-                Momentum coefficient for IS method (default: 0.0).
-            - nesterov : bool, optional
-                If True and momentum > 0, use Nesterov Accelerated Gradient (NAG).
-        """
-        if general_method != 'optimization':
-            raise ValueError("run_noisy supports only general_method='optimization'")
-
-        console = Console()
-        method_name = kwargs.get('method')
-
-        if self.use_gpu:
-            loss_hist_gpu = cp.empty(epoch, dtype=self._gpu_dtype)
-            entropy_hist_gpu = cp.empty(epoch, dtype=self._gpu_dtype)
-        else:
-            loss_array = []
-            entropy_array = []
-
-        save_steps_set = None
-        connectivity_at_steps = {}  # step -> matrix (for library use and/or file save)
-        if save_steps is not None:
-            save_steps_list = list(save_steps)
-            valid_steps = [s for s in save_steps_list if 1 <= s <= epoch]
-            if len(valid_steps) < len(save_steps_list):
-                invalid = [s for s in save_steps_list if s < 1 or s > epoch]
-                console.print(f"[yellow]Warning: Some save_steps are out of range and will be ignored: {invalid}[/yellow]")
-            save_steps_set = set(valid_steps)
-            if len(save_steps_set) > 0:
-                console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
-
-        start_time = time.perf_counter()
-        with trange(
-            epoch,
-            desc="Performing noisy optimization",
-            unit="iteration",
-            bar_format=_PBAR_FORMAT_NO_RATE,
-            disable=not show_progress,
-        ) as pbar:
-            for t in pbar:
-                self.__update_parameter_noisy(t, gaussian_noise_variance=gaussian_noise_variance, **kwargs)
-                if self.use_gpu:
-                    loss_hist_gpu[t] = self._loss_gpu
-                    entropy_hist_gpu[t] = self._entropy_gpu
-
-                    should_sync_progress = (
-                        show_progress or progress_callback is not None
-                    ) and ((t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch))
-                    if should_sync_progress:
-                        self.loss = float(self._loss_gpu)
-                        self.entropy = float(self._entropy_gpu)
-                        if show_progress:
-                            pbar.set_postfix({
-                                "loss": self.loss,
-                                "entropy": self.entropy,
-                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                            })
-                        _emit_progress(
-                            progress_callback,
-                            iteration=t + 1,
-                            total=epoch,
-                            loss=self.loss,
-                            entropy=self.entropy,
-                            start_time=start_time,
-                            method=method_name,
-                            general_method=general_method,
-                            use_gpu=self.use_gpu,
-                            noisy=True,
-                        )
-                else:
-                    loss_value = self.loss
-                    entropy_value = self.entropy if self.entropy is not None else np.nan
-                    if show_progress:
-                        pbar.set_postfix({
-                            "loss": loss_value,
-                            "entropy": entropy_value,
-                            "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                        })
-                    loss_array.append(loss_value)
-                    entropy_array.append(entropy_value)
-                    _emit_progress(
-                        progress_callback,
-                        iteration=t + 1,
-                        total=epoch,
-                        loss=loss_value,
-                        entropy=entropy_value,
-                        start_time=start_time,
-                        method=method_name,
-                        general_method=general_method,
-                        use_gpu=self.use_gpu,
-                        noisy=True,
-                    )
-
-                if save_steps_set is not None and (t + 1) in save_steps_set:
-                    if self.use_gpu:
-                        self.A = cp.asnumpy(self._A_gpu)
-                    step = t + 1
-                    connectivity_at_steps[step] = np.copy(self.A)
-                    if output_prefix is not None:
-                        filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, step)
-                        np.savetxt(filename, self.A)
-                        console.print(f"[green]Saved connectivity matrix at iteration {step} to {filename}[/green]")
-
-        if self.use_gpu:
-            loss_array = cp.asnumpy(loss_hist_gpu).tolist()
-            entropy_array = cp.asnumpy(entropy_hist_gpu).tolist()
-            self.loss = float(self._loss_gpu) if self._loss_gpu is not None else None
-            self.entropy = float(self._entropy_gpu) if self._entropy_gpu is not None else None
-
-        if self.use_gpu:
             self.A = cp.asnumpy(self._A_gpu)
         dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 

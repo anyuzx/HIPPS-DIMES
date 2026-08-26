@@ -101,6 +101,286 @@ def test_a2dmap_theory():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
+def test_centered_psd_projection_constraints_and_idempotence():
+    """The EDM Gram projection should be centered, PSD, and idempotent."""
+    source = np.array(
+        [
+            [2.0, -3.0, 1.0],
+            [-3.0, -1.0, 4.0],
+            [1.0, 4.0, 0.5],
+        ]
+    )
+
+    projected = numerics._project_centered_psd(source)
+    projected_twice = numerics._project_centered_psd(projected)
+
+    assert np.allclose(projected, projected.T, atol=1e-12)
+    assert np.allclose(np.sum(projected, axis=1), 0.0, atol=1e-12)
+    assert np.min(np.linalg.eigvalsh(projected)) >= -1e-12
+    assert np.allclose(projected_twice, projected, rtol=1e-11, atol=1e-12)
+
+
+def test_centered_psd_projection_enforces_internal_eigenvalue_floor():
+    """A positive floor should preserve COM while bounding all internal modes."""
+    source = np.array(
+        [
+            [2.0, -3.0, 1.0, 0.5],
+            [-3.0, -1.0, 4.0, -2.0],
+            [1.0, 4.0, 0.5, 1.5],
+            [0.5, -2.0, 1.5, -0.5],
+        ]
+    )
+    floor = 0.25
+    n = len(source)
+    centering = np.eye(n) - np.ones((n, n)) / n
+
+    projected = numerics._project_centered_psd(source, floor)
+    projected_twice = numerics._project_centered_psd(projected, floor)
+    eigenvalues = np.linalg.eigvalsh(projected)
+
+    assert np.allclose(projected, projected.T, atol=1e-12)
+    assert np.allclose(np.sum(projected, axis=1), 0.0, atol=1e-12)
+    assert np.min(np.linalg.eigvalsh(projected - floor * centering)) >= -1e-12
+    assert np.count_nonzero(eigenvalues > 0.5 * floor) == n - 1
+    assert np.allclose(projected_twice, projected, rtol=1e-11, atol=1e-12)
+
+
+def test_nearest_edm_gradient_matches_finite_difference():
+    """The weighted unique-pair objective should have the implemented gradient."""
+    target = np.array(
+        [
+            [0.0, 1.0, 4.0],
+            [1.0, 0.0, 2.0],
+            [4.0, 2.0, 0.0],
+        ]
+    )
+    weights = np.array(
+        [
+            [0.0, 1.0, 0.5],
+            [1.0, 0.0, 2.0],
+            [0.5, 2.0, 0.0],
+        ]
+    )
+    source = np.array(
+        [
+            [1.0, -0.2, 0.3],
+            [-0.2, 0.5, -0.1],
+            [0.3, -0.1, 0.8],
+        ]
+    )
+    gram = numerics._project_centered_psd(source)
+    direction = np.array(
+        [
+            [0.2, -0.5, 0.7],
+            [-0.5, 0.4, 0.1],
+            [0.7, 0.1, -0.3],
+        ]
+    )
+
+    _, gradient, _ = numerics._nearest_edm_objective_gradient(
+        gram, target, weights
+    )
+    epsilon = 1e-6
+    forward, _, _ = numerics._nearest_edm_objective_gradient(
+        gram + epsilon * direction, target, weights
+    )
+    backward, _, _ = numerics._nearest_edm_objective_gradient(
+        gram - epsilon * direction, target, weights
+    )
+
+    finite_difference = (forward - backward) / (2.0 * epsilon)
+    assert finite_difference == pytest.approx(
+        np.sum(gradient * direction), rel=1e-8, abs=1e-9
+    )
+
+
+def test_nearest_edm_matches_analytic_three_point_solution_and_exports():
+    """The closest invalid three-point EDM has a closed-form boundary solution."""
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 9.0],
+            [1.0, 9.0, 0.0],
+        ]
+    )
+    expected = np.array(
+        [
+            [0.0, 19.0 / 9.0, 19.0 / 9.0],
+            [19.0 / 9.0, 0.0, 76.0 / 9.0],
+            [19.0 / 9.0, 76.0 / 9.0, 0.0],
+        ]
+    )
+
+    fitted, gram, info = hipps_dimes.nearest_edm(target)
+
+    assert info["converged"]
+    assert info["status"] == "optimality_tolerance"
+    assert np.allclose(fitted, expected, rtol=1e-8, atol=1e-9)
+    assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
+    assert np.min(np.linalg.eigvalsh(gram)) >= -1e-12
+    assert np.all(np.diff(info["history"]["objective"]) <= 1e-12)
+    assert HippsDimes.nearest_edm is hipps_dimes.nearest_edm
+
+
+def test_nearest_edm_leaves_valid_squared_distances_unchanged():
+    coordinates = np.array(
+        [
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, -1.0],
+        ]
+    )
+    differences = coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
+    target = np.sum(differences * differences, axis=-1)
+
+    fitted, gram, info = hipps_dimes.nearest_edm(target)
+
+    assert info["converged"]
+    assert info["objective"] == pytest.approx(0.0, abs=1e-20)
+    assert np.allclose(fitted, target, rtol=1e-10, atol=1e-11)
+    assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
+
+
+def test_nearest_edm_floor_has_analytic_zero_target_solution():
+    """The smallest feasible Gram matrix should fit an all-zero target best."""
+    n = 4
+    floor = 0.2
+    target = np.zeros((n, n))
+    centering = np.eye(n) - np.ones((n, n)) / n
+    expected_gram = floor * centering
+    expected_fitted = np.full((n, n), 2.0 * floor)
+    np.fill_diagonal(expected_fitted, 0.0)
+
+    fitted, gram, info = hipps_dimes.nearest_edm(
+        target, gram_eigenvalue_floor=floor
+    )
+
+    assert info["converged"]
+    assert info["gram_eigenvalue_floor"] == pytest.approx(floor)
+    assert np.allclose(gram, expected_gram, rtol=1e-11, atol=1e-12)
+    assert np.allclose(fitted, expected_fitted, rtol=1e-11, atol=1e-12)
+    assert np.count_nonzero(np.linalg.eigvalsh(gram) > 0.5 * floor) == n - 1
+
+
+def test_nearest_edm_honors_weights_and_is_invariant_to_weight_scale():
+    """Pair weights should move the optimum without depending on global scale."""
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 9.0],
+            [1.0, 9.0, 0.0],
+        ]
+    )
+    leg_weight = 2.0
+    base_weight = 0.25
+    weights = np.array(
+        [
+            [0.0, leg_weight, leg_weight],
+            [leg_weight, 0.0, base_weight],
+            [leg_weight, base_weight, 0.0],
+        ]
+    )
+    expected_leg = (leg_weight + 18.0 * base_weight) / (
+        leg_weight + 8.0 * base_weight
+    )
+    expected = np.array(
+        [
+            [0.0, expected_leg, expected_leg],
+            [expected_leg, 0.0, 4.0 * expected_leg],
+            [expected_leg, 4.0 * expected_leg, 0.0],
+        ]
+    )
+
+    fitted, _, info = hipps_dimes.nearest_edm(target, weights)
+    scaled_fitted, _, scaled_info = hipps_dimes.nearest_edm(
+        target, 7.0 * weights
+    )
+
+    assert info["converged"]
+    assert scaled_info["converged"]
+    assert np.allclose(fitted, expected, rtol=1e-8, atol=1e-9)
+    assert np.allclose(scaled_fitted, fitted, rtol=1e-10, atol=1e-11)
+
+
+def test_nearest_edm_completes_missing_pairs_without_imputation():
+    """NaNs should remove pairs from the objective while retaining a valid EDM."""
+    coordinates = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ]
+    )
+    differences = coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
+    target = np.sum(differences * differences, axis=-1)
+    target[0, 3] = np.nan
+    target[3, 0] = np.nan
+
+    fitted, gram, info = hipps_dimes.nearest_edm(target)
+    observed = np.isfinite(target) & ~np.eye(len(target), dtype=bool)
+
+    assert info["converged"]
+    assert np.allclose(fitted[observed], target[observed], atol=1e-7)
+    assert np.allclose(np.diag(fitted), 0.0)
+    assert np.min(fitted) >= -1e-12
+    assert np.min(np.linalg.eigvalsh(gram)) >= -1e-12
+
+
+@pytest.mark.parametrize(
+    ("target", "weights", "message"),
+    [
+        (np.ones((2, 3)), None, "square"),
+        (np.array([[0.0, np.inf], [np.inf, 0.0]]), None, "infinite"),
+        (np.array([[0.0, 1.0], [2.0, 0.0]]), None, "symmetric"),
+        (
+            np.array([[0.0, 1.0], [1.0, 0.0]]),
+            np.array([[0.0, -1.0], [-1.0, 0.0]]),
+            "nonnegative",
+        ),
+        (
+            np.array([[0.0, np.nan], [np.nan, 0.0]]),
+            np.array([[0.0, 1.0], [1.0, 0.0]]),
+            "finite distance",
+        ),
+    ],
+)
+def test_nearest_edm_rejects_invalid_inputs(target, weights, message):
+    with pytest.raises(ValueError, match=message):
+        hipps_dimes.nearest_edm(target, weights)
+
+
+def test_nearest_edm_reports_iteration_limit():
+    target = np.array(
+        [
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 9.0],
+            [1.0, 9.0, 0.0],
+        ]
+    )
+
+    with pytest.warns(RuntimeWarning, match="max_iterations"):
+        _, _, info = hipps_dimes.nearest_edm(
+            target,
+            max_iterations=1,
+            relative_tolerance=1e-15,
+            absolute_tolerance=0.0,
+        )
+
+    assert not info["converged"]
+    assert info["status"] == "max_iterations"
+    assert info["iterations"] == 1
+
+
+@pytest.mark.parametrize("floor", [-0.1, np.nan, np.inf, True, [0.1]])
+def test_nearest_edm_rejects_invalid_gram_eigenvalue_floor(floor):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="finite nonnegative scalar"):
+        hipps_dimes.nearest_edm(target, gram_eigenvalue_floor=floor)
+
+
 def test_compute_modulus():
     """Moduli should use tau_p / 2 for stress-mode relaxation."""
     A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)

@@ -361,6 +361,45 @@ The `run_optimization()` function returns a dictionary with:
 - `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
 
+#### Weighted closest Euclidean distance matrix
+
+`nearest_edm()` fits noisy or incomplete squared-distance observations by
+weighted least squares over centered positive-semidefinite Gram matrices. Zero
+weights and `NaN` distances mark unobserved pairs.
+
+```python
+import hipps_dimes as HD
+import numpy as np
+
+ddmap_observed = np.array(
+    [
+        [0.0, 1.0, 1.0],
+        [1.0, 0.0, 9.0],
+        [1.0, 9.0, 0.0],
+    ]
+)
+
+ddmap_fit, gram_fit, diagnostics = HD.nearest_edm(ddmap_observed)
+assert diagnostics["converged"]
+```
+
+Each unordered pair is counted once, and `weights[i, j]` multiplies that
+pair's squared residual. The CPU solver uses a dense eigendecomposition for
+each covariance-cone projection and reports a projected-gradient convergence
+certificate. It imposes no embedding-rank constraint by default.
+
+Set `gram_eigenvalue_floor` to require strictly positive internal Gram modes:
+
+```python
+ddmap_full_rank, gram_full_rank, diagnostics = HD.nearest_edm(
+    ddmap_observed,
+    gram_eigenvalue_floor=1e-4,
+)
+```
+
+The floor has squared-distance units and is a model constraint, not a numerical
+tolerance. It leaves the center-of-mass mode at zero.
+
 #### Additional Utility Functions
 
 The package also provides helper functions for direct use:

@@ -2802,6 +2802,115 @@ def _connectivity_from_reduced_gram(reduced_gram, basis):
     return a2a(connectivity)
 
 
+def _calibrate_gaussian_covariance_initial_scale(
+    reduced_gram,
+    basis,
+    pair_i,
+    pair_j,
+    target_pairs,
+    inverse_variance,
+    *,
+    array_module=np,
+):
+    """Exactly minimize the COV objective over one positive Gram scale."""
+    use_gpu = _CUPY_AVAILABLE and array_module is cp
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
+    start_time = time.perf_counter()
+
+    gram = basis @ reduced_gram @ basis.T
+    fitted_pairs = _squared_distances_from_gram(
+        gram, array_module=array_module
+    )[pair_i, pair_j]
+    distance_square_coefficient = float(
+        array_module.sum(
+            inverse_variance * array_module.square(fitted_pairs)
+        ).item()
+    )
+    distance_target_coefficient = float(
+        array_module.sum(inverse_variance * fitted_pairs * target_pairs).item()
+    )
+    if (
+        not np.isfinite(distance_square_coefficient)
+        or distance_square_coefficient <= 0.0
+        or not np.isfinite(distance_target_coefficient)
+        or distance_target_coefficient <= 0.0
+    ):
+        raise RuntimeError(
+            "initial scalar calibration requires positive finite COV coefficients"
+        )
+
+    n_modes = reduced_gram.shape[0]
+    entropy_scale_coefficient = 1.5 * n_modes
+    square_root_term = 2.0 * np.sqrt(distance_square_coefficient) * np.sqrt(
+        entropy_scale_coefficient
+    )
+    discriminant_root = np.hypot(
+        distance_target_coefficient, square_root_term
+    )
+    scale_factor = 0.5 * (
+        distance_target_coefficient / distance_square_coefficient
+        + discriminant_root / distance_square_coefficient
+    )
+    if not np.isfinite(scale_factor) or scale_factor <= 0.0:
+        raise RuntimeError(
+            "initial scalar calibration produced a nonpositive or nonfinite scale"
+        )
+
+    determinant_sign, logdet = array_module.linalg.slogdet(reduced_gram)
+    determinant_sign = float(determinant_sign.item())
+    logdet = float(logdet.item())
+    if determinant_sign <= 0.0 or not np.isfinite(logdet):
+        raise RuntimeError(
+            "initial scalar calibration requires a positive-definite Gram matrix"
+        )
+    residual_before = fitted_pairs - target_pairs
+    residual_after = scale_factor * fitted_pairs - target_pairs
+    data_objective_before = 0.5 * float(
+        array_module.sum(
+            inverse_variance * array_module.square(residual_before)
+        ).item()
+    )
+    data_objective_after = 0.5 * float(
+        array_module.sum(
+            inverse_variance * array_module.square(residual_after)
+        ).item()
+    )
+    objective_before = -1.5 * logdet + data_objective_before
+    objective_after = (
+        -1.5 * (logdet + n_modes * np.log(scale_factor))
+        + data_objective_after
+    )
+    derivative_residual = (
+        distance_square_coefficient * scale_factor
+        - distance_target_coefficient
+        - entropy_scale_coefficient / scale_factor
+    )
+    derivative_scale = max(
+        abs(distance_square_coefficient * scale_factor),
+        abs(distance_target_coefficient),
+        abs(entropy_scale_coefficient / scale_factor),
+        1.0,
+    )
+    reduced_gram = scale_factor * reduced_gram
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
+
+    return reduced_gram, {
+        "method": "exact_covariance_objective_ray_minimum",
+        "scale_factor": float(scale_factor),
+        "connectivity_scale_factor": float(1.0 / scale_factor),
+        "objective_before": float(objective_before),
+        "objective_after": float(objective_after),
+        "objective_reduction": float(objective_before - objective_after),
+        "relative_derivative_residual": float(
+            abs(derivative_residual) / derivative_scale
+        ),
+        "backend": "gpu" if use_gpu else "cpu",
+        "wall_seconds": time.perf_counter() - start_time,
+    }
+
+
 def _initialize_gaussian_reduced_gram(
     observed,
     pair_mask,
@@ -2950,7 +3059,9 @@ def fit_gaussian_noise_covariance(
     ``v_ij = (relative_noise_std * Dobs_ij)**2``. With ``use_gpu=True``,
     Newton-CG and the once-per-fit exact blockwise data-Hessian setup run in
     float64 on the GPU. The default Rouse initialization remains on the CPU;
-    the optional nearest-EDM initialization uses the requested backend.
+    the optional nearest-EDM initialization uses the requested backend. Every
+    initial Gram shape is exactly rescaled along its positive ray for the COV
+    objective before Newton starts.
     """
     if use_gpu and not is_gpu_available():
         raise RuntimeError(
@@ -3038,17 +3149,6 @@ def fit_gaussian_noise_covariance(
             inverse_variance_matrix, dtype=cp.float64
         )
         reduced_gram = cp.asarray(reduced_gram, dtype=cp.float64)
-        data_hessian_diagonal, preconditioner_setup_seconds = (
-            _gaussian_covariance_data_preconditioner_diagonal(
-                solver_basis,
-                solver_pair_i,
-                solver_pair_j,
-                solver_inverse_variance,
-                progress_callback=progress_callback,
-                array_module=cp,
-                use_gpu=True,
-            )
-        )
         conjugate_gradient_function = (
             _preconditioned_conjugate_gradient_gpu
         )
@@ -3061,17 +3161,39 @@ def fit_gaussian_noise_covariance(
         solver_inverse_variance = inverse_variance
         solver_target_matrix = target_matrix
         solver_inverse_variance_matrix = inverse_variance_matrix
-        data_hessian_diagonal, preconditioner_setup_seconds = (
-            _gaussian_covariance_data_preconditioner_diagonal(
-                solver_basis,
-                solver_pair_i,
-                solver_pair_j,
-                solver_inverse_variance,
-                progress_callback=progress_callback,
-            )
-        )
         conjugate_gradient_function = _preconditioned_conjugate_gradient
         array_module = np
+
+    reduced_gram, scalar_calibration = (
+        _calibrate_gaussian_covariance_initial_scale(
+            reduced_gram,
+            solver_basis,
+            solver_pair_i,
+            solver_pair_j,
+            solver_target_pairs,
+            solver_inverse_variance,
+            array_module=array_module,
+        )
+    )
+    initialization_info["scalar_calibration"] = scalar_calibration
+    initialization_info["wall_seconds"] += scalar_calibration["wall_seconds"]
+    if initialization_info["kind"] == "rouse":
+        initialization_info["effective_spring_constant"] = (
+            initialization_info["spring_constant"]
+            * scalar_calibration["connectivity_scale_factor"]
+        )
+
+    data_hessian_diagonal, preconditioner_setup_seconds = (
+        _gaussian_covariance_data_preconditioner_diagonal(
+            solver_basis,
+            solver_pair_i,
+            solver_pair_j,
+            solver_inverse_variance,
+            progress_callback=progress_callback,
+            array_module=array_module,
+            use_gpu=use_gpu,
+        )
+    )
 
     def solver_scalar(value):
         return float(value.item()) if hasattr(value, "item") else float(value)

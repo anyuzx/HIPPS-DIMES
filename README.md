@@ -189,6 +189,12 @@ pairs. `--covariance-initialization nearest-edm` selects the weighted
 nearest-EDM alternative. Initialization changes only the starting point, not
 the objective. The Rouse initializer is inexpensive and remains on the CPU.
 With `--use-gpu`, the optional nearest-EDM solver uses the GPU before COV starts.
+Before Newton, every initial internal Gram matrix `B0` is rescaled to `s*B0`
+using the exact positive minimizer of the COV objective along that ray. This
+second calibration includes the entropy term, the selected pair variances, and
+only the observed pairs. Its scale, objective reduction, derivative residual,
+backend, and wall time are recorded under
+`results['covariance_optimization']['initialization']['scalar_calibration']`.
 
 ```bash
 python -m hipps_dimes observed_ddmap.npy cov_fit \

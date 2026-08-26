@@ -92,6 +92,37 @@ imputing missing pairs. A weighted nearest-EDM initialization is optional.
 Initialization changes only the starting point; it does not add a Rouse prior
 or change the COV objective.
 
+Every resulting initial shape is then optimally rescaled for the actual COV
+objective. Let $B_0$ be its positive-definite internal Gram matrix,
+$d_{ij}^{(0)}=D_{ij}(B_0)$, $w_{ij}=1/v_{ij}$, and $m=n-1$. Along the ray
+$B=sB_0$,
+
+\[
+F(sB_0)=\frac12\sum_{i<j}w_{ij}
+\left(sd_{ij}^{(0)}-D_{ij}^{\mathrm{obs}}\right)^2
+-\frac32m\log s+\mathrm{constant}.
+\]
+
+For sums over observed pairs, define
+
+\[
+a=\sum_{i<j}w_{ij}\left(d_{ij}^{(0)}\right)^2,
+\qquad
+c=\sum_{i<j}w_{ij}d_{ij}^{(0)}D_{ij}^{\mathrm{obs}}.
+\]
+
+The unique positive minimizer is
+
+\[
+s^*=\frac{c+\sqrt{c^2+6ma}}{2a}.
+\]
+
+This exact scalar step is applied to Rouse, weighted nearest-EDM, and supplied
+connectivity initializations before Newton. It preserves feasibility, supports
+both noise models without imputing missing pairs, and changes a Rouse spring
+constant from $k_0$ to $k_0/s^*$. The initialization metadata records the
+scale and the COV objective before and after calibration.
+
 ## CPU and GPU backends
 
 The CPU and GPU backends optimize the same objective with the same Newton-CG

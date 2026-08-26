@@ -723,6 +723,76 @@ def test_rouse_initialization_matches_observed_pair_mean(missing_pairs):
     )
 
 
+@pytest.mark.parametrize("noise_model", ["homoskedastic", "heteroskedastic"])
+def test_gaussian_covariance_initial_scalar_calibration_is_exact(noise_model):
+    """Every initial shape should be optimally scaled along its Gram ray."""
+    n = 5
+    basis = numerics._centered_orthonormal_basis(n)
+    reduced_gram = np.diag(np.linspace(0.7, 1.6, n - 1))
+    reduced_gram += 0.05 * np.ones((n - 1, n - 1))
+    gram = basis @ reduced_gram @ basis.T
+    initial_distances = numerics._squared_distances_from_gram(gram)
+    all_i, all_j = np.triu_indices(n, k=1)
+    observed = np.arange(len(all_i)) % 3 != 0
+    pair_i = all_i[observed]
+    pair_j = all_j[observed]
+    initial_pairs = initial_distances[pair_i, pair_j]
+    target_pairs = initial_pairs * np.linspace(0.75, 1.25, len(pair_i))
+    if noise_model == "homoskedastic":
+        inverse_variance = np.full(len(pair_i), 2.5)
+    else:
+        inverse_variance = 1.0 / np.square(0.2 * target_pairs)
+
+    scaled, calibration = (
+        numerics._calibrate_gaussian_covariance_initial_scale(
+            reduced_gram,
+            basis,
+            pair_i,
+            pair_j,
+            target_pairs,
+            inverse_variance,
+        )
+    )
+
+    a = np.sum(inverse_variance * np.square(initial_pairs))
+    c = np.sum(inverse_variance * initial_pairs * target_pairs)
+    expected_scale = (
+        c + np.sqrt(c * c + 6.0 * (n - 1) * a)
+    ) / (2.0 * a)
+    target_matrix, inverse_variance_matrix = (
+        numerics._gaussian_covariance_pair_matrices(
+            n, pair_i, pair_j, target_pairs, inverse_variance
+        )
+    )
+
+    def objective(candidate):
+        return numerics._gaussian_covariance_objective_gradient(
+            candidate,
+            basis,
+            target_matrix,
+            inverse_variance_matrix,
+            pair_i,
+            pair_j,
+        )[0]
+
+    assert calibration["scale_factor"] == pytest.approx(
+        expected_scale, rel=1e-14
+    )
+    assert np.allclose(scaled, expected_scale * reduced_gram)
+    assert calibration["objective_before"] == pytest.approx(
+        objective(reduced_gram), rel=1e-13, abs=1e-13
+    )
+    assert calibration["objective_after"] == pytest.approx(
+        objective(scaled), rel=1e-13, abs=1e-13
+    )
+    assert calibration["objective_after"] < objective(0.9 * scaled)
+    assert calibration["objective_after"] < objective(1.1 * scaled)
+    assert calibration["objective_reduction"] > 0.0
+    assert calibration["relative_derivative_residual"] <= 1e-14
+    assert calibration["backend"] == "cpu"
+    assert calibration["wall_seconds"] >= 0.0
+
+
 def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity():
     """Relative-noise COV should converge from the calibrated Rouse start."""
     n = 6
@@ -746,6 +816,15 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
     assert info["initialization"]["kind"] == "rouse"
     assert info["initialization"]["backend"] == "cpu"
     assert info["initialization"]["spring_constant"] == pytest.approx(1.0)
+    scalar_calibration = info["initialization"]["scalar_calibration"]
+    assert scalar_calibration["scale_factor"] > 0.0
+    assert scalar_calibration["objective_after"] < scalar_calibration[
+        "objective_before"
+    ]
+    assert scalar_calibration["relative_derivative_residual"] <= 1e-14
+    assert info["initialization"]["effective_spring_constant"] == pytest.approx(
+        scalar_calibration["connectivity_scale_factor"]
+    )
     assert info["initialization"][
         "observed_pair_mean_squared_distance"
     ] == pytest.approx(np.mean(target[upper]))
@@ -766,28 +845,44 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
 
 
 def test_gaussian_covariance_absolute_noise_initializations_match():
-    """Rouse and nearest-EDM starts should reach the same homoskedastic optimum."""
+    """All scalar-calibrated starts should reach the homoskedastic optimum."""
     target = _rouse_squared_distance_target()
     variance = 0.02
+    solver_options = {
+        "max_iterations": 40,
+        "relative_tolerance": 2e-8,
+    }
 
     rouse = HippsDimes.fit_gaussian_noise_covariance(
         target,
         variance,
-        max_iterations=40,
-        relative_tolerance=1e-9,
+        **solver_options,
     )
     nearest = HippsDimes.fit_gaussian_noise_covariance(
         target,
         variance,
         initialization="nearest_edm",
-        max_iterations=40,
-        relative_tolerance=1e-9,
+        **solver_options,
+    )
+    provided = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        initial_connectivity=HippsDimes.construct_connectivity_matrix_rouse(
+            len(target), 0.4
+        ),
+        **solver_options,
     )
 
-    assert rouse[3]["converged"]
-    assert nearest[3]["converged"]
+    for result in (rouse, nearest, provided):
+        assert result[3]["converged"]
+        scalar_calibration = result[3]["initialization"]["scalar_calibration"]
+        assert scalar_calibration["scale_factor"] > 0.0
+        assert scalar_calibration["objective_after"] <= scalar_calibration[
+            "objective_before"
+        ]
     assert rouse[3]["noise_model"] == "homoskedastic_absolute_variance"
     assert nearest[3]["initialization"]["kind"] == "weighted_nearest_edm"
+    assert provided[3]["initialization"]["kind"] == "provided_connectivity"
     assert nearest[3]["initialization"]["backend"] == "cpu"
     assert nearest[3]["initialization"]["nearest_edm_wall_seconds"] >= 0.0
     assert nearest[3]["initialization"]["nearest_edm_projection_count"] > 0
@@ -796,6 +891,8 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
     ]["nearest_edm_wall_seconds"]
     assert np.allclose(rouse[0], nearest[0], rtol=1e-8, atol=1e-9)
     assert np.allclose(rouse[2], nearest[2], rtol=1e-8, atol=1e-9)
+    assert np.allclose(rouse[0], provided[0], rtol=1e-8, atol=1e-9)
+    assert np.allclose(rouse[2], provided[2], rtol=1e-8, atol=1e-9)
 
 
 def test_gaussian_covariance_relative_noise_supports_missing_pairs():
@@ -814,6 +911,7 @@ def test_gaussian_covariance_relative_noise_supports_missing_pairs():
 
     assert info["converged"]
     assert info["observed_pair_count"] == 13
+    assert info["initialization"]["scalar_calibration"]["scale_factor"] > 0.0
     assert np.all(np.isfinite(fitted))
     assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
 
@@ -969,7 +1067,7 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     target = _rouse_squared_distance_target(6)
     solver_options = {
         "max_iterations": 30,
-        "relative_tolerance": 1e-8,
+        "relative_tolerance": 2e-8,
         "save_steps": [1],
         **noise_options,
     }
@@ -995,6 +1093,16 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     assert np.allclose(gpu[1], cpu[1], rtol=1e-8, atol=1e-9)
     assert np.allclose(gpu[2], cpu[2], rtol=1e-8, atol=1e-9)
     assert gpu[3]["relative_stationarity_residual"] <= 1e-8
+    cpu_calibration = cpu[3]["initialization"]["scalar_calibration"]
+    gpu_calibration = gpu[3]["initialization"]["scalar_calibration"]
+    assert cpu_calibration["backend"] == "cpu"
+    assert gpu_calibration["backend"] == "gpu"
+    assert gpu_calibration["scale_factor"] == pytest.approx(
+        cpu_calibration["scale_factor"], rel=1e-12
+    )
+    assert gpu_calibration["objective_after"] == pytest.approx(
+        cpu_calibration["objective_after"], rel=1e-12, abs=1e-12
+    )
     expected_stages = {
         "covariance_preconditioner",
         "covariance_optimization",

@@ -2744,25 +2744,29 @@ def _preconditioned_conjugate_gradient_gpu(
     return solution, iteration_count[0], residual_norm, converged
 
 
-def _rouse_initial_connectivity(squared_distances):
-    """Return the legacy HIPPS-DIMES target-scaled Rouse initialization."""
+def _rouse_initial_connectivity(squared_distances, pair_i, pair_j):
+    """Return a Rouse chain matched to the observed-pair distance mean."""
     squared_distances = np.asarray(squared_distances, dtype=np.float64)
-    finite_or_nan = squared_distances[~np.isinf(squared_distances)]
-    radius_of_gyration_squared = 0.5 * float(np.nanmean(finite_or_nan))
-    if (
-        not np.isfinite(radius_of_gyration_squared)
-        or radius_of_gyration_squared <= 0.0
-    ):
-        raise ValueError(
-            "squared-distance target must define a positive finite Rouse scale"
-        )
-    spring_constant = squared_distances.shape[0] / (
-        4.0 * radius_of_gyration_squared
+    observed_pair_mean_squared_distance = _positive_finite_scalar(
+        np.mean(squared_distances[pair_i, pair_j]),
+        "observed-pair mean squared distance",
+    )
+    unit_spring_rouse_pair_mean_squared_distance = 3.0 * float(
+        np.mean(pair_j - pair_i)
+    )
+    spring_constant = (
+        unit_spring_rouse_pair_mean_squared_distance
+        / observed_pair_mean_squared_distance
     )
     connectivity = construct_connectivity_matrix_rouse(
         squared_distances.shape[0], spring_constant
     )
-    return connectivity, radius_of_gyration_squared, spring_constant
+    return (
+        connectivity,
+        observed_pair_mean_squared_distance,
+        unit_spring_rouse_pair_mean_squared_distance,
+        spring_constant,
+    )
 
 
 def _reduced_gram_from_connectivity(connectivity, basis):
@@ -2832,13 +2836,23 @@ def _initialize_gaussian_reduced_gram(
             "maximum_internal_stiffness": float(eigenvalues[-1]),
         }
     elif initialization == "rouse":
-        connectivity, rg2, spring_constant = _rouse_initial_connectivity(observed)
+        (
+            connectivity,
+            observed_pair_mean_squared_distance,
+            unit_spring_rouse_pair_mean_squared_distance,
+            spring_constant,
+        ) = _rouse_initial_connectivity(observed, pair_i, pair_j)
         reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
             connectivity, basis
         )
         initialization_info = {
             "kind": "rouse",
-            "radius_of_gyration_squared": rg2,
+            "observed_pair_mean_squared_distance": (
+                observed_pair_mean_squared_distance
+            ),
+            "unit_spring_rouse_pair_mean_squared_distance": (
+                unit_spring_rouse_pair_mean_squared_distance
+            ),
             "spring_constant": spring_constant,
             "minimum_internal_stiffness": float(eigenvalues[0]),
             "maximum_internal_stiffness": float(eigenvalues[-1]),

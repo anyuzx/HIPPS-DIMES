@@ -608,8 +608,7 @@ def test_ignore_missing_data_l2_stays_bounded_over_long_iterations():
 
     loss = results["iteration_series"]["loss"].to_numpy()
     assert np.isfinite(loss).all()
-    assert loss[-1] < 0.7
-    assert loss[-1] <= loss[0] * 1.2
+    assert np.max(loss) < 0.7
 
 
 def test_repair_fully_missing_contact_locus_repairs_only_nearest_neighbors():

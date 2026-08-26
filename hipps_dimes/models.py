@@ -136,7 +136,10 @@ class Optimize:
         self.n = ddmap_target.shape[0]
 
         if connectivity_matrix is None:
-            self.A, _, _ = _rouse_initial_connectivity(self.ddmap_target)
+            pair_i, pair_j = np.nonzero(np.triu(self.constraint_mask, k=1))
+            self.A, _, _, _ = _rouse_initial_connectivity(
+                self.ddmap_target, pair_i, pair_j
+            )
         else:
             self.A = connectivity_matrix
 

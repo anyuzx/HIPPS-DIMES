@@ -85,9 +85,12 @@ IS, GD, and DI remain available for their noiseless contracts.
 
 ## Initialization
 
-COV uses the legacy target-scaled Rouse chain by default. A weighted
-nearest-EDM initialization is optional. Initialization changes only the starting
-point; it does not add a Rouse prior or change the COV objective.
+COV uses a Rouse chain calibrated over exactly the observed pairs by default:
+`k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Its unweighted
+observed-pair mean squared distance therefore matches the target without
+imputing missing pairs. A weighted nearest-EDM initialization is optional.
+Initialization changes only the starting point; it does not add a Rouse prior
+or change the COV objective.
 
 ## CPU and GPU backends
 
@@ -95,9 +98,10 @@ The CPU and GPU backends optimize the same objective with the same Newton-CG
 control logic. The GPU path uses float64 for the Gram matrix, objective,
 gradient, Hessian actions, preconditioner, and conjugate-gradient solve. It
 requires CuPy and an accessible CUDA GPU and does not silently fall back to the
-CPU. Rouse and weighted nearest-EDM initialization are computed on the CPU;
-the initialized Gram matrix is then transferred once to the selected solver
-backend. Final fitted matrices and saved checkpoints are NumPy arrays.
+CPU. Rouse initialization is computed on the CPU. Weighted nearest-EDM
+initialization uses the selected backend; its initialized Gram matrix is then
+passed to the COV solver. Final fitted matrices and saved checkpoints are NumPy
+arrays.
 
 Both backends construct the exact diagonal of the Gaussian data Hessian as the
 Newton-CG preconditioner. For pair vector

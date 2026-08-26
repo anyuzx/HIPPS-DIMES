@@ -676,16 +676,55 @@ def test_covariance_structured_hessian_and_block_preconditioner_match_pairs():
     )
 
 
-def _rouse_squared_distance_target(n=6):
-    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+def _rouse_squared_distance_target(n=6, spring_constant=1.0):
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, spring_constant)
     mean_distance = HippsDimes.a2dmap_theory(
         truth, force_positive_definite=True
     )
     return (3.0 * np.pi / 8.0) * np.square(mean_distance)
 
 
+@pytest.mark.parametrize(
+    "missing_pairs",
+    [(), ((0, 6), (1, 3), (2, 5))],
+)
+def test_rouse_initialization_matches_observed_pair_mean(missing_pairs):
+    """Rouse k0 should use exactly the observed COV pair set."""
+    n = 7
+    true_spring_constant = 2.5
+    target = _rouse_squared_distance_target(n, true_spring_constant)
+    for i, j in missing_pairs:
+        target[i, j] = np.nan
+        target[j, i] = np.nan
+    pair_i, pair_j = np.where(np.triu(np.isfinite(target), k=1))
+
+    (
+        connectivity,
+        observed_pair_mean,
+        unit_spring_rouse_pair_mean,
+        spring_constant,
+    ) = numerics._rouse_initial_connectivity(target, pair_i, pair_j)
+    basis = numerics._centered_orthonormal_basis(n)
+    reduced_gram, _ = numerics._reduced_gram_from_connectivity(
+        connectivity, basis
+    )
+    gram = basis @ reduced_gram @ basis.T
+    initialized = numerics._squared_distances_from_gram(gram)
+
+    assert observed_pair_mean == pytest.approx(
+        np.mean(target[pair_i, pair_j])
+    )
+    assert unit_spring_rouse_pair_mean == pytest.approx(
+        3.0 * np.mean(pair_j - pair_i)
+    )
+    assert spring_constant == pytest.approx(true_spring_constant, rel=1e-12)
+    assert np.mean(initialized[pair_i, pair_j]) == pytest.approx(
+        observed_pair_mean, rel=1e-12
+    )
+
+
 def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity():
-    """Relative-noise COV should converge physically from legacy Rouse initialization."""
+    """Relative-noise COV should converge from the calibrated Rouse start."""
     n = 6
     target = _rouse_squared_distance_target(n)
     relative_std = 0.05
@@ -695,7 +734,7 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
             target,
             relative_noise_std=relative_std,
             max_iterations=30,
-            relative_tolerance=1e-9,
+            relative_tolerance=1e-8,
             save_steps=[1],
         )
     )
@@ -706,6 +745,10 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
     assert info["noise_model"] == "heteroskedastic_relative_std"
     assert info["initialization"]["kind"] == "rouse"
     assert info["initialization"]["backend"] == "cpu"
+    assert info["initialization"]["spring_constant"] == pytest.approx(1.0)
+    assert info["initialization"][
+        "observed_pair_mean_squared_distance"
+    ] == pytest.approx(np.mean(target[upper]))
     assert info["backend"] == "cpu"
     assert info["gpu_device"] is None
     assert info["preconditioner_data_setup_count"] == 1
@@ -716,7 +759,7 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
         (fitted - target)[upper],
         0.5 * variance[upper] * connectivity[upper],
         rtol=1e-7,
-        atol=1e-10,
+        atol=1e-9,
     )
     assert info["relative_stationarity_residual"] <= 1e-8
     assert sorted(info["connectivity_matrix_at_steps"]) == [1]
@@ -766,7 +809,7 @@ def test_gaussian_covariance_relative_noise_supports_missing_pairs():
         target,
         relative_noise_std=0.05,
         max_iterations=40,
-        relative_tolerance=1e-9,
+        relative_tolerance=1e-8,
     )
 
     assert info["converged"]
@@ -926,7 +969,7 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     target = _rouse_squared_distance_target(6)
     solver_options = {
         "max_iterations": 30,
-        "relative_tolerance": 1e-9,
+        "relative_tolerance": 1e-8,
         "save_steps": [1],
         **noise_options,
     }

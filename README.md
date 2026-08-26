@@ -182,11 +182,13 @@ COV fits noisy mean-squared-distance constraints by minimizing
 ```
 
 over internal Gram matrices `B` that remain strictly positive definite. The
-default start is the target-scaled Rouse chain used by older HIPPS-DIMES code;
-`--covariance-initialization nearest-edm` selects the weighted nearest-EDM
-alternative. Initialization changes only the starting point, not the objective.
-The Rouse initializer is inexpensive and remains on the CPU. With `--use-gpu`,
-the optional nearest-EDM solver uses the GPU before COV starts.
+default start is a Rouse chain calibrated over exactly the observed pairs:
+`k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Thus its unweighted
+observed-pair mean squared distance matches the target without imputing missing
+pairs. `--covariance-initialization nearest-edm` selects the weighted
+nearest-EDM alternative. Initialization changes only the starting point, not
+the objective. The Rouse initializer is inexpensive and remains on the CPU.
+With `--use-gpu`, the optional nearest-EDM solver uses the GPU before COV starts.
 
 ```bash
 python -m hipps_dimes observed_ddmap.npy cov_fit \

@@ -839,31 +839,143 @@ def test_gaussian_covariance_objective_gradient_matches_finite_difference():
     )
     target *= np.linspace(0.95, 1.05, len(target))
     inverse_variance = np.linspace(2.0, 5.0, len(target))
+    target_matrix, inverse_variance_matrix = (
+        numerics._gaussian_covariance_pair_matrices(
+            n, upper[0], upper[1], target, inverse_variance
+        )
+    )
     direction = np.arange((n - 1) ** 2, dtype=float).reshape(n - 1, n - 1)
     direction = 0.5 * (direction + direction.T)
     direction /= np.linalg.norm(direction)
 
     objective, gradient, *_ = numerics._gaussian_covariance_objective_gradient(
-        reduced_gram, pair_vectors, target, inverse_variance
+        reduced_gram,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        upper[0],
+        upper[1],
     )
     step = 1e-6
     forward = numerics._gaussian_covariance_objective_gradient(
         reduced_gram + step * direction,
-        pair_vectors,
-        target,
-        inverse_variance,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        upper[0],
+        upper[1],
     )[0]
     backward = numerics._gaussian_covariance_objective_gradient(
         reduced_gram - step * direction,
-        pair_vectors,
-        target,
-        inverse_variance,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        upper[0],
+        upper[1],
     )[0]
 
     assert np.isfinite(objective)
     assert (forward - backward) / (2.0 * step) == pytest.approx(
         np.sum(gradient * direction), rel=1e-7, abs=1e-8
     )
+
+
+def test_structured_gaussian_covariance_operators_match_pair_vectors():
+    """Structured EDM kernels should equal the explicit pair-vector formulas."""
+    rng = np.random.default_rng(20260826)
+    n = 7
+    basis = numerics._centered_orthonormal_basis(n)
+    upper = np.triu_indices(n, k=1)
+    reduced_gram = np.diag(np.linspace(0.7, 1.9, n - 1))
+    reduced_gram += 0.03 * np.ones_like(reduced_gram)
+    direction = rng.normal(size=(n - 1, n - 1))
+    direction = 0.5 * (direction + direction.T)
+
+    cases = (
+        (np.ones(len(upper[0]), dtype=bool), 0.0, False),
+        (np.arange(len(upper[0])) % 4 != 0, 0.0, True),
+        (np.ones(len(upper[0]), dtype=bool), 0.04, True),
+    )
+    for selector, connectivity_l1, heteroscedastic in cases:
+        pair_i = upper[0][selector]
+        pair_j = upper[1][selector]
+        pair_vectors = basis[pair_i] - basis[pair_j]
+        fitted_reference = np.einsum(
+            "ij,ij->i",
+            pair_vectors @ reduced_gram,
+            pair_vectors,
+            optimize=True,
+        )
+        target_pairs = fitted_reference * np.linspace(
+            0.94, 1.06, len(fitted_reference)
+        )
+        inverse_variance = (
+            np.linspace(1.5, 4.5, len(target_pairs))
+            if heteroscedastic
+            else np.full(len(target_pairs), 2.5)
+        )
+        target_matrix, inverse_variance_matrix = (
+            numerics._gaussian_covariance_pair_matrices(
+                n,
+                pair_i,
+                pair_j,
+                target_pairs,
+                inverse_variance,
+            )
+        )
+
+        residual_reference = fitted_reference - target_pairs
+        effective_reference = (
+            residual_reference
+            if connectivity_l1 == 0.0
+            else numerics._soft_threshold(
+                residual_reference, 2.0 * connectivity_l1
+            )
+        )
+        weighted_reference = inverse_variance * effective_reference
+        objective_reference = 0.5 * np.dot(
+            weighted_reference, effective_reference
+        )
+        gradient_reference = pair_vectors.T @ (
+            weighted_reference[:, np.newaxis] * pair_vectors
+        )
+        gradient_reference = 0.5 * (
+            gradient_reference + gradient_reference.T
+        )
+
+        objective, gradient, fitted, residual = (
+            numerics._gaussian_covariance_data_objective_gradient(
+                reduced_gram,
+                basis,
+                target_matrix,
+                inverse_variance_matrix,
+                pair_i,
+                pair_j,
+                connectivity_l1,
+            )
+        )
+        assert objective == pytest.approx(
+            objective_reference, rel=1e-12, abs=1e-13
+        )
+        assert np.allclose(gradient, gradient_reference, rtol=1e-12, atol=1e-12)
+        assert np.allclose(fitted, fitted_reference, rtol=1e-12, atol=1e-12)
+        assert np.allclose(residual, residual_reference, rtol=1e-12, atol=1e-12)
+
+        pair_quadratic = np.einsum(
+            "ij,ij->i", pair_vectors @ direction, pair_vectors, optimize=True
+        )
+        hessian_reference = pair_vectors.T @ (
+            (inverse_variance * pair_quadratic)[:, np.newaxis] * pair_vectors
+        )
+        hessian_reference = 0.5 * (
+            hessian_reference + hessian_reference.T
+        )
+        hessian_action = numerics._gaussian_covariance_data_hessian_action(
+            direction, basis, inverse_variance_matrix
+        )
+        assert np.allclose(
+            hessian_action, hessian_reference, rtol=1e-12, atol=1e-12
+        )
 
 
 def test_gaussian_negative_entropy_proximal_map_is_positive_and_exact():
@@ -926,6 +1038,41 @@ def test_gaussian_covariance_fit_stays_physical_and_satisfies_stationarity():
         atol=1e-10,
     )
     assert sorted(info["connectivity_matrix_at_steps"]) == [1]
+
+
+def test_gaussian_covariance_fit_supports_missing_heteroscedastic_pairs():
+    """The structured COV operator should ignore unobserved pair entries."""
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    mean_distance = HippsDimes.a2dmap_theory(
+        truth, force_positive_definite=True
+    )
+    target = (3.0 * np.pi / 8.0) * np.square(mean_distance)
+    variance = np.square(0.05 * np.maximum(target, 1e-8))
+    np.fill_diagonal(variance, 0.0)
+    missing_pairs = ((0, 3), (1, 4))
+    for i, j in missing_pairs:
+        target[i, j] = np.nan
+        target[j, i] = np.nan
+
+    fitted, _, connectivity, info = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        max_iterations=40,
+        relative_tolerance=1e-9,
+    )
+
+    observed = np.isfinite(target) & ~np.eye(n, dtype=bool)
+    assert info["converged"]
+    assert info["observed_pair_count"] == n * (n - 1) // 2 - len(missing_pairs)
+    assert np.all(np.isfinite(fitted))
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+    assert np.allclose(
+        (fitted - target)[observed],
+        (0.5 * variance * connectivity)[observed],
+        rtol=1e-7,
+        atol=1e-10,
+    )
 
 
 def test_covariance_fista_matches_covariance_solver_with_signed_couplings():

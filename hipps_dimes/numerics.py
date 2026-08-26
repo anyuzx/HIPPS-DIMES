@@ -2649,59 +2649,101 @@ def _soft_threshold(values, threshold):
     return np.sign(values) * np.maximum(np.abs(values) - threshold, 0.0)
 
 
+def _gaussian_covariance_pair_matrices(
+    n, pair_i, pair_j, target_pairs, inverse_variance
+):
+    """Expand validated unique-pair Gaussian data into symmetric matrices."""
+    target_matrix = np.zeros((n, n), dtype=np.float64)
+    target_matrix[pair_i, pair_j] = target_pairs
+    target_matrix[pair_j, pair_i] = target_pairs
+
+    inverse_variance_matrix = np.zeros((n, n), dtype=np.float64)
+    inverse_variance_matrix[pair_i, pair_j] = inverse_variance
+    inverse_variance_matrix[pair_j, pair_i] = inverse_variance
+    return target_matrix, inverse_variance_matrix
+
+
 def _gaussian_covariance_data_objective_gradient(
     reduced_gram,
-    pair_vectors,
-    target_pairs,
-    inverse_variance,
+    basis,
+    target_matrix,
+    inverse_variance_matrix,
+    pair_i,
+    pair_j,
     connectivity_l1=0.0,
 ):
-    """Evaluate the Gaussian/L1 dual-equivalent covariance data term."""
+    """Evaluate the Gaussian/L1 data term through the structured EDM operator."""
     reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
-    pair_times_gram = pair_vectors @ reduced_gram
-    fitted_pairs = np.einsum(
-        "ij,ij->i", pair_times_gram, pair_vectors, optimize=True
-    )
-    residual = fitted_pairs - target_pairs
+    gram = basis @ reduced_gram @ basis.T
+    fitted_matrix = _squared_distances_from_gram(gram)
+    residual_matrix = fitted_matrix - target_matrix
     if connectivity_l1 == 0.0:
-        effective_residual = residual
+        effective_residual = residual_matrix
     else:
         effective_residual = _soft_threshold(
-            residual, 2.0 * connectivity_l1
+            residual_matrix, 2.0 * connectivity_l1
         )
-    weighted_residual = inverse_variance * effective_residual
-    data_objective = 0.5 * float(
-        np.dot(weighted_residual, effective_residual)
+    weighted_residual = inverse_variance_matrix * effective_residual
+    # Each observed unordered pair appears twice in the symmetric matrices.
+    data_objective = 0.25 * float(
+        np.sum(weighted_residual * effective_residual)
     )
-    data_gradient = pair_vectors.T @ (
-        weighted_residual[:, np.newaxis] * pair_vectors
-    )
+    full_gradient = np.diag(np.sum(weighted_residual, axis=1)) - weighted_residual
+    data_gradient = basis.T @ full_gradient @ basis
     data_gradient = 0.5 * (data_gradient + data_gradient.T)
-    return data_objective, data_gradient, fitted_pairs, residual
+    return (
+        data_objective,
+        data_gradient,
+        fitted_matrix[pair_i, pair_j],
+        residual_matrix[pair_i, pair_j],
+    )
+
+
+def _gaussian_covariance_data_hessian_action(
+    direction, basis, inverse_variance_matrix
+):
+    """Apply the Gaussian data Hessian without materializing pair vectors."""
+    direction = np.asarray(direction, dtype=np.float64)
+    direction = 0.5 * (direction + direction.T)
+    full_direction = basis @ direction @ basis.T
+    distance_direction = _squared_distances_from_gram(full_direction)
+    weighted_direction = inverse_variance_matrix * distance_direction
+    full_action = np.diag(np.sum(weighted_direction, axis=1)) - weighted_direction
+    reduced_action = basis.T @ full_action @ basis
+    return 0.5 * (reduced_action + reduced_action.T)
 
 
 def _gaussian_covariance_objective_gradient(
     reduced_gram,
-    pair_vectors,
-    target_pairs,
-    inverse_variance,
+    basis,
+    target_matrix,
+    inverse_variance_matrix,
+    pair_i,
+    pair_j,
     connectivity_l1=0.0,
 ):
     """Evaluate the Gaussian soft-constraint objective in the covariance cone."""
     reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
-    sign, logdet = np.linalg.slogdet(reduced_gram)
-    if sign <= 0.0:
+    try:
+        cholesky_factor = np.linalg.cholesky(reduced_gram)
+    except np.linalg.LinAlgError:
         return np.inf, None, None, None, None
 
-    inverse_gram = np.linalg.solve(
-        reduced_gram, np.eye(reduced_gram.shape[0], dtype=np.float64)
+    logdet = 2.0 * float(np.sum(np.log(np.diag(cholesky_factor))))
+    inverse_gram = scipy.linalg.cho_solve(
+        (cholesky_factor, True),
+        np.eye(reduced_gram.shape[0], dtype=np.float64),
+        check_finite=False,
     )
+    inverse_gram = 0.5 * (inverse_gram + inverse_gram.T)
     data_objective, data_gradient, fitted_pairs, _ = (
         _gaussian_covariance_data_objective_gradient(
             reduced_gram,
-            pair_vectors,
-            target_pairs,
-            inverse_variance,
+            basis,
+            target_matrix,
+            inverse_variance_matrix,
+            pair_i,
+            pair_j,
             connectivity_l1,
         )
     )
@@ -2988,10 +3030,16 @@ def fit_gaussian_noise_covariance(
     pair_vectors = basis[pair_i] - basis[pair_j]
     target_pairs = observed[pair_i, pair_j]
     inverse_variance = 1.0 / pair_variance
+    target_matrix, inverse_variance_matrix = (
+        _gaussian_covariance_pair_matrices(
+            n, pair_i, pair_j, target_pairs, inverse_variance
+        )
+    )
     pair_vectors_squared = np.square(pair_vectors)
     data_hessian_diagonal = pair_vectors_squared.T @ (
         inverse_variance[:, np.newaxis] * pair_vectors_squared
     )
+    del pair_vectors, pair_vectors_squared
 
     reduced_gram, initialization = _initialize_gaussian_reduced_gram(
         observed,
@@ -3029,6 +3077,14 @@ def fit_gaussian_noise_covariance(
     status = "max_iterations"
     message = "maximum number of iterations reached"
     pair_count = len(target_pairs)
+    current_state = _gaussian_covariance_objective_gradient(
+        reduced_gram,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )
 
     for iteration in range(1, max_iterations + 1):
         (
@@ -3037,9 +3093,7 @@ def fit_gaussian_noise_covariance(
             fitted_pairs,
             inverse_gram,
             components,
-        ) = _gaussian_covariance_objective_gradient(
-            reduced_gram, pair_vectors, target_pairs, inverse_variance
-        )
+        ) = current_state
         (
             negative_entropy,
             data_objective,
@@ -3061,11 +3115,8 @@ def fit_gaussian_noise_covariance(
 
         def hessian_operator(direction):
             direction = 0.5 * (direction + direction.T)
-            pair_quadratic = np.einsum(
-                "ij,ij->i", pair_vectors @ direction, pair_vectors, optimize=True
-            )
-            data_term = pair_vectors.T @ (
-                (inverse_variance * pair_quadratic)[:, np.newaxis] * pair_vectors
+            data_term = _gaussian_covariance_data_hessian_action(
+                direction, basis, inverse_variance_matrix
             )
             entropy_term = 1.5 * inverse_gram @ direction @ inverse_gram
             result = data_term + entropy_term
@@ -3103,15 +3154,18 @@ def fit_gaussian_noise_covariance(
         for _ in range(60):
             trial = reduced_gram + step_size * direction
             trial = 0.5 * (trial + trial.T)
-            try:
-                np.linalg.cholesky(trial)
-            except np.linalg.LinAlgError:
-                step_size *= 0.5
-                continue
             trial_state = _gaussian_covariance_objective_gradient(
-                trial, pair_vectors, target_pairs, inverse_variance
+                trial,
+                basis,
+                target_matrix,
+                inverse_variance_matrix,
+                pair_i,
+                pair_j,
             )
             trial_objective = trial_state[0]
+            if not np.isfinite(trial_objective):
+                step_size *= 0.5
+                continue
             if trial_objective <= objective + 1e-4 * step_size * directional_derivative:
                 candidate = trial
                 candidate_state = trial_state
@@ -3140,6 +3194,7 @@ def fit_gaussian_noise_covariance(
             candidate_entropy_gradient,
             candidate_data_gradient,
         ) = candidate_components
+        current_state = candidate_state
         candidate_gradient_norm = float(np.linalg.norm(candidate_gradient, ord="fro"))
         candidate_gradient_scale = max(
             1.0,
@@ -3232,9 +3287,7 @@ def fit_gaussian_noise_covariance(
     fitted_squared_distances = _squared_distances_from_gram(gram)
     connectivity = _connectivity_from_reduced_gram(reduced_gram, basis)
     if history["iteration"].size == 0:
-        final_state = _gaussian_covariance_objective_gradient(
-            reduced_gram, pair_vectors, target_pairs, inverse_variance
-        )
+        final_state = current_state
         final_objective = float(final_state[0])
         final_gradient_norm = float(np.linalg.norm(final_state[1], ord="fro"))
         final_relative_gradient_norm = final_gradient_norm / max(
@@ -3385,9 +3438,13 @@ def fit_gaussian_noise_covariance_fista(
             save_steps_set.add(int(step))
 
     basis = _centered_orthonormal_basis(n)
-    pair_vectors = basis[pair_i] - basis[pair_j]
     target_pairs = observed[pair_i, pair_j]
     inverse_variance = 1.0 / pair_variance
+    target_matrix, inverse_variance_matrix = (
+        _gaussian_covariance_pair_matrices(
+            n, pair_i, pair_j, target_pairs, inverse_variance
+        )
+    )
     reduced_gram, initialization = _initialize_gaussian_reduced_gram(
         observed,
         pair_mask,
@@ -3403,9 +3460,11 @@ def fit_gaussian_noise_covariance_fista(
         if state is None:
             state = _gaussian_covariance_objective_gradient(
                 gram,
-                pair_vectors,
-                target_pairs,
-                inverse_variance,
+                basis,
+                target_matrix,
+                inverse_variance_matrix,
+                pair_i,
+                pair_j,
                 connectivity_l1,
             )
         objective, gradient, fitted_pairs, inverse_gram, components = state
@@ -3566,9 +3625,11 @@ def fit_gaussian_noise_covariance_fista(
             search_data_objective, search_data_gradient, _, _ = (
                 _gaussian_covariance_data_objective_gradient(
                     search_gram,
-                    pair_vectors,
-                    target_pairs,
-                    inverse_variance,
+                    basis,
+                    target_matrix,
+                    inverse_variance_matrix,
+                    pair_i,
+                    pair_j,
                     connectivity_l1,
                 )
             )
@@ -3581,9 +3642,11 @@ def fit_gaussian_noise_covariance_fista(
                 candidate_data_objective = (
                     _gaussian_covariance_data_objective_gradient(
                         candidate,
-                        pair_vectors,
-                        target_pairs,
-                        inverse_variance,
+                        basis,
+                        target_matrix,
+                        inverse_variance_matrix,
+                        pair_i,
+                        pair_j,
                         connectivity_l1,
                     )[0]
                 )
@@ -3610,9 +3673,11 @@ def fit_gaussian_noise_covariance_fista(
 
                 candidate_state = _gaussian_covariance_objective_gradient(
                     candidate,
-                    pair_vectors,
-                    target_pairs,
-                    inverse_variance,
+                    basis,
+                    target_matrix,
+                    inverse_variance_matrix,
+                    pair_i,
+                    pair_j,
                     connectivity_l1,
                 )
                 candidate_objective = float(candidate_state[0])

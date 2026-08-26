@@ -231,7 +231,6 @@ def _proximal_warmup(
                 "line_search_method": "logdet_proximal_backtracking",
             }
         )
-        # Permit cautious growth after a successful majorization test.
         lipschitz = max(0.8 * lipschitz, np.finfo(np.float64).tiny)
     return reduced_gram, state, records, lipschitz
 
@@ -246,14 +245,8 @@ def _feasible_exact_scalar_step(
     array_module,
     maximum_step=1.0,
 ):
-    """Minimize the objective exactly along a feasible Newton direction.
-
-    The data term is quadratic along the line and the log-determinant derivative
-    is evaluated from the eigenvalues of the whitened direction. The returned
-    value minimizes the objective on ``[0, maximum_step]`` intersected with the
-    positive-definite feasibility interval.
-    """
-    del reduced_gram  # Feasibility is encoded by the whitened direction.
+    """Minimize the objective exactly along a feasible Newton direction."""
+    del reduced_gram
     if array_module is np:
         mode_eigenvalues = np.linalg.eigvalsh(
             _symmetrize(whitened_direction)
@@ -272,9 +265,7 @@ def _feasible_exact_scalar_step(
     minimum_mode = float(np.min(mode_eigenvalues))
     if minimum_mode < 0.0:
         feasible_limit = -1.0 / minimum_mode
-        upper = min(
-            float(maximum_step), np.nextafter(feasible_limit, 0.0)
-        )
+        upper = min(float(maximum_step), np.nextafter(feasible_limit, 0.0))
     else:
         feasible_limit = np.inf
         upper = float(maximum_step)
@@ -282,9 +273,7 @@ def _feasible_exact_scalar_step(
         return 0.0, feasible_limit
 
     q1 = _scalar(array_module.sum(data_gradient * direction))
-    q2 = _scalar(
-        array_module.sum(direction * data_hessian_direction)
-    )
+    q2 = _scalar(array_module.sum(direction * data_hessian_direction))
     q2 = max(q2, 0.0)
 
     def derivative(alpha: float) -> float:
@@ -402,7 +391,7 @@ def fit_gaussian_noise_covariance(
     continuation_intermediate_newton_iterations=5,
     proximal_warmup_iterations=8,
     proximal_switch_relative_gradient=0.25,
-    continuation_activation_relative_gradient=0.5,
+    continuation_activation_relative_gradient=1.0,
     cg_forcing_max=0.5,
     exact_line_search=True,
     line_search_max_step=1.0,
@@ -537,9 +526,7 @@ def fit_gaussian_noise_covariance(
         solver_inverse_variance = xp.asarray(
             inverse_variance, dtype=xp.float64
         )
-        solver_target_matrix = xp.asarray(
-            target_matrix, dtype=xp.float64
-        )
+        solver_target_matrix = xp.asarray(target_matrix, dtype=xp.float64)
         solver_inverse_variance_matrix = xp.asarray(
             inverse_variance_matrix, dtype=xp.float64
         )
@@ -556,7 +543,6 @@ def fit_gaussian_noise_covariance(
         solver_inverse_variance_matrix = inverse_variance_matrix
         cg_solver = _num._preconditioned_conjugate_gradient
 
-    # Exact final-objective scale calibration is retained from the parent branch.
     reduced_gram, scalar_calibration = (
         _num._calibrate_gaussian_covariance_initial_scale(
             reduced_gram,
@@ -593,9 +579,7 @@ def fit_gaussian_noise_covariance(
     base_lipschitz = 4.0 * _scalar(
         xp.max(xp.sum(solver_inverse_variance_matrix, axis=1))
     )
-    base_lipschitz = max(
-        base_lipschitz, np.finfo(np.float64).tiny
-    )
+    base_lipschitz = max(base_lipschitz, np.finfo(np.float64).tiny)
 
     initial_final_state = _stage_objective_gradient(
         reduced_gram,
@@ -653,8 +637,8 @@ def fit_gaussian_noise_covariance(
             entropy_gradient,
             data_gradient,
         ) = components
-        gradient_norm, gradient_scale, relative_gradient = (
-            _relative_gradient_from_state(state, xp)
+        gradient_norm, _, relative_gradient = _relative_gradient_from_state(
+            state, xp
         )
         residual = fitted_pairs - solver_target_pairs
         residual_squared = xp.square(residual)
@@ -662,9 +646,7 @@ def fit_gaussian_noise_covariance(
             xp.sqrt(xp.mean(xp.square(residual / solver_target_pairs)))
         )
         weighted_rmse = _scalar(
-            xp.sqrt(
-                xp.mean(residual_squared * solver_inverse_variance)
-            )
+            xp.sqrt(xp.mean(residual_squared * solver_inverse_variance))
         )
         distance_rmse = _scalar(xp.sqrt(xp.mean(residual_squared)))
         if use_gpu:
@@ -688,7 +670,6 @@ def fit_gaussian_noise_covariance(
         cg_relative_residual = float(cg_residual) / max(
             gradient_norm, np.finfo(np.float64).tiny
         )
-        # Report the final objective at every stage for cross-stage comparability.
         final_state = _stage_objective_gradient(
             reduced_gram,
             solver_basis,
@@ -702,9 +683,7 @@ def fit_gaussian_noise_covariance(
         history["iteration"].append(global_iteration)
         history["objective"].append(float(final_state[0]))
         history["stage_objective"].append(float(objective))
-        history["negative_entropy_objective"].append(
-            float(negative_entropy)
-        )
+        history["negative_entropy_objective"].append(float(negative_entropy))
         history["data_objective"].append(float(data_objective))
         history["loss"].append(relative_loss)
         history["entropy"].append(entropy)
@@ -727,28 +706,18 @@ def fit_gaussian_noise_covariance(
         history["maximum_internal_gram_eigenvalue"].append(
             _scalar(gram_eigenvalues[-1])
         )
-        history["connectivity_offdiagonal_l2"].append(
-            connectivity_norm
-        )
+        history["connectivity_offdiagonal_l2"].append(connectivity_norm)
         history["continuation_factor"].append(float(factor))
         history["phase"].append(str(phase))
         history["line_search_backtracks"].append(int(backtracks))
         history["full_step_accepted"].append(bool(full_step))
         history["line_search_method"].append(str(line_search_method))
-        history["feasible_step_bound"].append(
-            float(feasible_step_bound)
-        )
+        history["feasible_step_bound"].append(float(feasible_step_bound))
         history["fallback_direction"].append(bool(fallback_direction))
         if global_iteration in save_steps_set:
-            checkpoint = (
-                _num.cp.asnumpy(reduced_gram)
-                if use_gpu
-                else reduced_gram
-            )
+            checkpoint = _num.cp.asnumpy(reduced_gram) if use_gpu else reduced_gram
             connectivity_at_steps[global_iteration] = (
-                _num._connectivity_from_reduced_gram(
-                    checkpoint, basis
-                )
+                _num._connectivity_from_reduced_gram(checkpoint, basis)
             )
         if progress_callback is not None:
             progress_callback(
@@ -784,7 +753,6 @@ def fit_gaussian_noise_covariance(
         final_stage_reached = final_stage_reached or final_stage
         stage_start_iteration = global_iteration
         stage_inverse_variance = factor * solver_inverse_variance
-        # Recalibrate the ray for the current continuation objective.
         reduced_gram, stage_calibration = (
             _num._calibrate_gaussian_covariance_initial_scale(
                 reduced_gram,
@@ -809,19 +777,12 @@ def fit_gaussian_noise_covariance(
         stage_tolerance = (
             relative_tolerance
             if final_stage
-            else max(
-                relative_tolerance,
-                continuation_intermediate_tolerance,
-            )
+            else max(relative_tolerance, continuation_intermediate_tolerance)
         )
         if final_stage:
             stage_budget = max_iterations - global_iteration
         else:
-            available = (
-                max_iterations
-                - global_iteration
-                - minimum_final_budget
-            )
+            available = max_iterations - global_iteration - minimum_final_budget
             stage_budget = max(
                 0,
                 min(
@@ -842,15 +803,8 @@ def fit_gaussian_noise_covariance(
             continuation_info.append(stage_record)
             continue
 
-        warmup_limit = min(
-            int(proximal_warmup_iterations), stage_budget
-        )
-        (
-            reduced_gram,
-            current_state,
-            warmup_records,
-            _,
-        ) = _proximal_warmup(
+        warmup_limit = min(int(proximal_warmup_iterations), stage_budget)
+        reduced_gram, current_state, warmup_records, _ = _proximal_warmup(
             reduced_gram,
             current_state,
             solver_basis,
@@ -875,29 +829,20 @@ def fit_gaussian_noise_covariance(
                 factor,
                 warmup_record["relative_step"],
                 warmup_record["step_size"],
-                backtracks=warmup_record[
-                    "line_search_backtracks"
-                ],
+                backtracks=warmup_record["line_search_backtracks"],
                 full_step=warmup_record["full_step_accepted"],
-                line_search_method=warmup_record[
-                    "line_search_method"
-                ],
+                line_search_method=warmup_record["line_search_method"],
             )
             stage_record["warmup_steps"] += 1
         stage_budget -= stage_record["warmup_steps"]
 
         while stage_budget > 0 and global_iteration < max_iterations:
-            objective, gradient, _, inverse_gram, components = (
-                current_state
+            objective, gradient, _, inverse_gram, components = current_state
+            gradient_norm, gradient_scale, relative_gradient = (
+                _relative_gradient_from_state(current_state, xp)
             )
-            (
-                gradient_norm,
-                gradient_scale,
-                relative_gradient,
-            ) = _relative_gradient_from_state(current_state, xp)
             if gradient_norm <= (
-                absolute_tolerance
-                + stage_tolerance * gradient_scale
+                absolute_tolerance + stage_tolerance * gradient_scale
             ):
                 stage_record["converged"] = True
                 break
@@ -910,13 +855,9 @@ def fit_gaussian_noise_covariance(
             if use_whitened_newton:
                 if use_gpu:
                     with _num.cupyx.errstate(linalg="raise"):
-                        cholesky_factor = xp.linalg.cholesky(
-                            reduced_gram
-                        )
+                        cholesky_factor = xp.linalg.cholesky(reduced_gram)
                 else:
-                    cholesky_factor = np.linalg.cholesky(
-                        reduced_gram
-                    )
+                    cholesky_factor = np.linalg.cholesky(reduced_gram)
                 transformed_gradient = (
                     cholesky_factor.T @ gradient @ cholesky_factor
                 )
@@ -943,9 +884,7 @@ def fit_gaussian_noise_covariance(
                     )
                     return _symmetrize(result)
 
-                diagonal_scale = xp.square(
-                    xp.diag(cholesky_factor)
-                )
+                diagonal_scale = xp.square(xp.diag(cholesky_factor))
                 approximate_data_diagonal = (
                     factor
                     * base_data_hessian_diagonal
@@ -967,29 +906,22 @@ def fit_gaussian_noise_covariance(
                     forcing_tolerance,
                     int(cg_max_iterations),
                 )
-                whitened_direction = _symmetrize(
-                    whitened_direction
-                )
+                whitened_direction = _symmetrize(whitened_direction)
                 direction = _symmetrize(
                     cholesky_factor
                     @ whitened_direction
                     @ cholesky_factor.T
                 )
-                directional_derivative = _scalar(
-                    xp.sum(gradient * direction)
-                )
+                directional_derivative = _scalar(xp.sum(gradient * direction))
                 if (
                     not np.isfinite(directional_derivative)
                     or directional_derivative >= 0.0
                 ):
                     fallback_direction = True
                     whitened_direction = (
-                        -transformed_gradient
-                        / preconditioner_diagonal
+                        -transformed_gradient / preconditioner_diagonal
                     )
-                    whitened_direction = _symmetrize(
-                        whitened_direction
-                    )
+                    whitened_direction = _symmetrize(whitened_direction)
                     direction = _symmetrize(
                         cholesky_factor
                         @ whitened_direction
@@ -1016,25 +948,15 @@ def fit_gaussian_noise_covariance(
                         @ matrix_direction
                         @ inverse_gram
                     )
-                    return _symmetrize(
-                        data_action + entropy_action
-                    )
+                    return _symmetrize(data_action + entropy_action)
 
                 inverse_diagonal = xp.diag(inverse_gram)
                 preconditioner_diagonal = xp.maximum(
                     factor * base_data_hessian_diagonal
-                    + 1.5
-                    * xp.outer(
-                        inverse_diagonal, inverse_diagonal
-                    ),
+                    + 1.5 * xp.outer(inverse_diagonal, inverse_diagonal),
                     np.finfo(np.float64).tiny,
                 )
-                (
-                    direction,
-                    cg_iterations,
-                    cg_residual,
-                    cg_converged,
-                ) = cg_solver(
+                direction, cg_iterations, cg_residual, cg_converged = cg_solver(
                     hessian_operator,
                     -gradient,
                     preconditioner_diagonal,
@@ -1042,17 +964,13 @@ def fit_gaussian_noise_covariance(
                     int(cg_max_iterations),
                 )
                 direction = _symmetrize(direction)
-                directional_derivative = _scalar(
-                    xp.sum(gradient * direction)
-                )
+                directional_derivative = _scalar(xp.sum(gradient * direction))
                 if (
                     not np.isfinite(directional_derivative)
                     or directional_derivative >= 0.0
                 ):
                     fallback_direction = True
-                    direction = _symmetrize(
-                        -gradient / preconditioner_diagonal
-                    )
+                    direction = _symmetrize(-gradient / preconditioner_diagonal)
                     directional_derivative = _scalar(
                         xp.sum(gradient * direction)
                     )
@@ -1073,18 +991,12 @@ def fit_gaussian_noise_covariance(
                         @ inverse_cholesky.T
                     )
                 else:
-                    cholesky_factor = np.linalg.cholesky(
-                        reduced_gram
-                    )
+                    cholesky_factor = np.linalg.cholesky(reduced_gram)
                     whitened_direction = np.linalg.solve(
                         cholesky_factor,
-                        np.linalg.solve(
-                            cholesky_factor, direction
-                        ).T,
+                        np.linalg.solve(cholesky_factor, direction).T,
                     ).T
-                    whitened_direction = _symmetrize(
-                        whitened_direction
-                    )
+                    whitened_direction = _symmetrize(whitened_direction)
 
             def evaluate_stage(trial):
                 return _stage_objective_gradient(
@@ -1109,16 +1021,14 @@ def fit_gaussian_noise_covariance(
                     factor,
                     array_module=xp,
                 )
-                step_size, feasible_bound = (
-                    _feasible_exact_scalar_step(
-                        reduced_gram,
-                        direction,
-                        whitened_direction,
-                        components[3],
-                        data_hessian_direction,
-                        array_module=xp,
-                        maximum_step=line_search_max_step,
-                    )
+                step_size, feasible_bound = _feasible_exact_scalar_step(
+                    reduced_gram,
+                    direction,
+                    whitened_direction,
+                    components[3],
+                    data_hessian_direction,
+                    array_module=xp,
+                    maximum_step=line_search_max_step,
                 )
                 candidate = None
                 candidate_state = None
@@ -1162,18 +1072,15 @@ def fit_gaussian_noise_covariance(
                     )
             else:
                 line_search_method = "armijo"
-                (
-                    candidate,
-                    candidate_state,
-                    step_size,
-                    backtracks,
-                ) = _armijo_fallback(
-                    reduced_gram,
-                    direction,
-                    float(objective),
-                    directional_derivative,
-                    evaluate_stage,
-                    1.0,
+                candidate, candidate_state, step_size, backtracks = (
+                    _armijo_fallback(
+                        reduced_gram,
+                        direction,
+                        float(objective),
+                        directional_derivative,
+                        evaluate_stage,
+                        1.0,
+                    )
                 )
             if candidate is None:
                 status = "line_search_failed"
@@ -1207,17 +1114,12 @@ def fit_gaussian_noise_covariance(
             stage_budget -= 1
 
         if current_state is not None:
-            (
-                gradient_norm,
-                gradient_scale,
-                relative_gradient,
-            ) = _relative_gradient_from_state(current_state, xp)
-            stage_record[
-                "final_relative_gradient_norm"
-            ] = relative_gradient
+            gradient_norm, gradient_scale, relative_gradient = (
+                _relative_gradient_from_state(current_state, xp)
+            )
+            stage_record["final_relative_gradient_norm"] = relative_gradient
             if gradient_norm <= (
-                absolute_tolerance
-                + stage_tolerance * gradient_scale
+                absolute_tolerance + stage_tolerance * gradient_scale
             ):
                 stage_record["converged"] = True
         stage_record["end_iteration"] = global_iteration
@@ -1233,7 +1135,6 @@ def fit_gaussian_noise_covariance(
         if status == "line_search_failed":
             break
 
-    # Ensure the reported final state corresponds to the actual final objective.
     current_state = _stage_objective_gradient(
         reduced_gram,
         solver_basis,
@@ -1244,11 +1145,9 @@ def fit_gaussian_noise_covariance(
         1.0,
         array_module=xp,
     )
-    (
-        final_gradient_norm,
-        final_gradient_scale,
-        final_relative_gradient_norm,
-    ) = _relative_gradient_from_state(current_state, xp)
+    final_gradient_norm, final_gradient_scale, final_relative_gradient_norm = (
+        _relative_gradient_from_state(current_state, xp)
+    )
     if final_stage_reached and final_gradient_norm <= (
         absolute_tolerance + relative_tolerance * final_gradient_scale
     ):
@@ -1257,17 +1156,9 @@ def fit_gaussian_noise_covariance(
         message = "first-order optimality tolerance reached"
 
     for key, values in history.items():
-        if key in {
-            "iteration",
-            "cg_iterations",
-            "line_search_backtracks",
-        }:
+        if key in {"iteration", "cg_iterations", "line_search_backtracks"}:
             history[key] = np.asarray(values, dtype=np.int64)
-        elif key in {
-            "cg_converged",
-            "full_step_accepted",
-            "fallback_direction",
-        }:
+        elif key in {"cg_converged", "full_step_accepted", "fallback_direction"}:
             history[key] = np.asarray(values, dtype=bool)
         elif key in {"phase", "line_search_method"}:
             history[key] = np.asarray(values, dtype=object)
@@ -1278,12 +1169,8 @@ def fit_gaussian_noise_covariance(
         reduced_gram = _num.cp.asnumpy(reduced_gram)
     gram = basis @ reduced_gram @ basis.T
     gram = _symmetrize(gram)
-    fitted_squared_distances = _num._squared_distances_from_gram(
-        gram
-    )
-    connectivity = _num._connectivity_from_reduced_gram(
-        reduced_gram, basis
-    )
+    fitted_squared_distances = _num._squared_distances_from_gram(gram)
+    connectivity = _num._connectivity_from_reduced_gram(reduced_gram, basis)
     fitted_pairs = fitted_squared_distances[pair_i, pair_j]
     stationarity = (
         fitted_pairs
@@ -1296,26 +1183,21 @@ def fit_gaussian_noise_covariance(
         float(np.linalg.norm(fitted_pairs - target_pairs)),
         float(
             np.linalg.norm(
-                0.5
-                * pair_variance
-                * connectivity[pair_i, pair_j]
+                0.5 * pair_variance * connectivity[pair_i, pair_j]
             )
         ),
     )
-    objective_value = float(current_state[0])
 
     info = {
         "converged": bool(converged),
         "status": status,
         "message": message,
         "iterations": int(global_iteration),
-        "objective": objective_value,
+        "objective": float(current_state[0]),
         "gradient_norm": final_gradient_norm,
         "relative_gradient_norm": final_relative_gradient_norm,
         "stationarity_residual_norm": stationarity_norm,
-        "relative_stationarity_residual": (
-            stationarity_norm / stationarity_scale
-        ),
+        "relative_stationarity_residual": stationarity_norm / stationarity_scale,
         "maximum_absolute_stationarity_residual": float(
             np.max(np.abs(stationarity))
         ),
@@ -1333,9 +1215,7 @@ def fit_gaussian_noise_covariance(
         "preconditioner_pair_block_size": (
             _num._COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE
         ),
-        "preconditioner_setup_seconds": float(
-            preconditioner_setup_seconds
-        ),
+        "preconditioner_setup_seconds": float(preconditioner_setup_seconds),
         "preconditioner_data_setup_count": 1,
         "preconditioner_entropy_diagonal_updated_each_iteration": True,
         "history": history,
@@ -1346,9 +1226,7 @@ def fit_gaussian_noise_covariance(
             "final_stage_reached": bool(final_stage_reached),
         },
         "globalization": {
-            "proximal_warmup_iterations": int(
-                proximal_warmup_iterations
-            ),
+            "proximal_warmup_iterations": int(proximal_warmup_iterations),
             "proximal_switch_relative_gradient": float(
                 proximal_switch_relative_gradient
             ),
@@ -1372,9 +1250,7 @@ def fit_gaussian_noise_covariance(
         "stationarity_definition": (
             "D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"
         ),
-        "logged_metric_timing": (
-            "post-update accepted covariance iterate"
-        ),
+        "logged_metric_timing": "post-update accepted covariance iterate",
     }
     if not converged:
         warnings.warn(

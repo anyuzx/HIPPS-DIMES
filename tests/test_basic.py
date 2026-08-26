@@ -9,6 +9,23 @@ import hipps_dimes
 import hipps_dimes.numerics as numerics
 
 
+@pytest.fixture
+def working_cupy():
+    """Require a CuPy runtime that can execute kernels and dense eigensolvers."""
+    if not numerics.is_gpu_available():
+        pytest.skip("requires CuPy and an accessible CUDA GPU")
+    cp = numerics.cp
+    try:
+        values = cp.arange(4, dtype=cp.float64)
+        assert float(cp.sum(values * values).item()) == pytest.approx(14.0)
+        with numerics.cupyx.errstate(linalg="raise"):
+            cp.linalg.eigh(cp.eye(2, dtype=cp.float64))
+        cp.cuda.get_current_stream().synchronize()
+    except Exception as error:
+        pytest.skip(f"CuPy kernel or eigensolver execution is unavailable: {error}")
+    return cp
+
+
 def test_import():
     """Test that the package can be imported."""
     assert HippsDimes is not None
@@ -60,7 +77,7 @@ def test_a2a_enforces_nonnegative_spring_constants():
     not HippsDimes.is_gpu_available(),
     reason="CuPy GPU is not available",
 )
-def test_a2a_enforces_nonnegative_spring_constants_on_gpu():
+def test_a2a_enforces_nonnegative_spring_constants_on_gpu(working_cupy):
     """GPU normalization should preserve the backend and match the CPU result."""
     source_cpu = np.array(
         [
@@ -69,18 +86,14 @@ def test_a2a_enforces_nonnegative_spring_constants_on_gpu():
             [-3.0, 4.0, -9.0],
         ]
     )
-    source_gpu = numerics.cp.asarray(source_cpu)
-    try:
-        source_gpu.copy()
-    except RuntimeError as error:
-        pytest.skip(f"CuPy kernel execution is unavailable: {error}")
+    source_gpu = working_cupy.asarray(source_cpu)
 
     result_gpu = HippsDimes.a2a(source_gpu, fill_negative=True)
 
     expected = HippsDimes.a2a(source_cpu, fill_negative=True)
-    assert isinstance(result_gpu, numerics.cp.ndarray)
-    assert np.array_equal(numerics.cp.asnumpy(source_gpu), source_cpu)
-    assert np.array_equal(numerics.cp.asnumpy(result_gpu), expected)
+    assert isinstance(result_gpu, working_cupy.ndarray)
+    assert np.array_equal(working_cupy.asnumpy(source_gpu), source_cpu)
+    assert np.array_equal(working_cupy.asnumpy(result_gpu), expected)
 
 
 def test_a2dmap_theory():
@@ -211,7 +224,10 @@ def test_nearest_edm_matches_analytic_three_point_solution_and_exports():
         ]
     )
 
-    fitted, gram, info = hipps_dimes.nearest_edm(target)
+    progress_events = []
+    fitted, gram, info = hipps_dimes.nearest_edm(
+        target, progress_callback=progress_events.append
+    )
 
     assert info["converged"]
     assert info["status"] == "optimality_tolerance"
@@ -219,6 +235,27 @@ def test_nearest_edm_matches_analytic_three_point_solution_and_exports():
     assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
     assert np.min(np.linalg.eigvalsh(gram)) >= -1e-12
     assert np.all(np.diff(info["history"]["objective"]) <= 1e-12)
+    assert info["backend"] == "cpu"
+    assert info["dtype"] == "float64"
+    assert info["gpu_device"] is None
+    assert info["cupy_version"] is None
+    assert info["wall_seconds"] >= 0.0
+    assert info["projection_count"] == (
+        1
+        + info["line_search_projection_count"]
+        + info["certificate_projection_count"]
+    )
+    assert info["certificate_projection_count"] == info["iterations"]
+    assert info["gpu_memory_pool_baseline_used_bytes"] is None
+    assert info["gpu_memory_pool_maximum_used_bytes"] is None
+    assert info["gpu_memory_pool_baseline_total_bytes"] is None
+    assert info["gpu_memory_pool_maximum_total_bytes"] is None
+    assert len(progress_events) == info["iterations"]
+    assert all(
+        event["stage"] == "nearest_edm_initialization"
+        and event["use_gpu"] is False
+        for event in progress_events
+    )
     assert HippsDimes.nearest_edm is hipps_dimes.nearest_edm
 
 
@@ -379,6 +416,160 @@ def test_nearest_edm_rejects_invalid_gram_eigenvalue_floor(floor):
 
     with pytest.raises(ValueError, match="finite nonnegative scalar"):
         hipps_dimes.nearest_edm(target, gram_eigenvalue_floor=floor)
+
+
+def test_nearest_edm_gpu_request_fails_without_available_gpu(monkeypatch):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+    monkeypatch.setattr(numerics, "_CUPY_AVAILABLE", False)
+
+    with pytest.raises(RuntimeError, match="CuPy.*accessible CUDA GPU"):
+        hipps_dimes.nearest_edm(target, use_gpu=True)
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+def test_nearest_edm_gpu_helpers_match_cpu(working_cupy):
+    """The shared float64 projection and objective helpers should match."""
+    source = np.array(
+        [
+            [1.0, -0.4, 0.3, 0.2],
+            [-0.4, 0.8, -0.1, 0.4],
+            [0.3, -0.1, 0.5, -0.2],
+            [0.2, 0.4, -0.2, 1.2],
+        ]
+    )
+    target = np.array(
+        [
+            [0.0, 1.0, 4.0, 2.0],
+            [1.0, 0.0, 2.5, 3.0],
+            [4.0, 2.5, 0.0, 1.5],
+            [2.0, 3.0, 1.5, 0.0],
+        ]
+    )
+    weights = np.array(
+        [
+            [0.0, 1.0, 0.5, 0.0],
+            [1.0, 0.0, 2.0, 0.75],
+            [0.5, 2.0, 0.0, 1.25],
+            [0.0, 0.75, 1.25, 0.0],
+        ]
+    )
+    floor = 0.05
+
+    cpu_projection = numerics._project_centered_psd(source, floor)
+    gpu_projection = numerics._project_centered_psd(
+        working_cupy.asarray(source),
+        floor,
+        array_module=working_cupy,
+    )
+    cpu_objective, cpu_gradient, cpu_fitted = (
+        numerics._nearest_edm_objective_gradient(
+            cpu_projection, target, weights
+        )
+    )
+    gpu_objective, gpu_gradient, gpu_fitted = (
+        numerics._nearest_edm_objective_gradient(
+            gpu_projection,
+            working_cupy.asarray(target),
+            working_cupy.asarray(weights),
+            array_module=working_cupy,
+        )
+    )
+
+    assert np.allclose(
+        working_cupy.asnumpy(gpu_projection),
+        cpu_projection,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert gpu_objective == pytest.approx(cpu_objective, rel=1e-12, abs=1e-12)
+    assert np.allclose(
+        working_cupy.asnumpy(gpu_gradient), cpu_gradient, rtol=1e-12, atol=1e-12
+    )
+    assert np.allclose(
+        working_cupy.asnumpy(gpu_fitted), cpu_fitted, rtol=1e-12, atol=1e-12
+    )
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+@pytest.mark.parametrize("case", ["weighted_floor", "missing_pair"])
+def test_nearest_edm_gpu_matches_cpu_end_to_end(case, working_cupy):
+    """GPU nearest EDM should preserve weights, floors, and missing-pair logic."""
+    if case == "weighted_floor":
+        target = np.array(
+            [
+                [0.0, 1.0, 1.0],
+                [1.0, 0.0, 9.0],
+                [1.0, 9.0, 0.0],
+            ]
+        )
+        weights = np.array(
+            [
+                [0.0, 2.0, 2.0],
+                [2.0, 0.0, 0.25],
+                [2.0, 0.25, 0.0],
+            ]
+        )
+        floor = 1e-3
+    else:
+        coordinates = np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+            ]
+        )
+        differences = (
+            coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
+        )
+        target = np.sum(differences * differences, axis=-1)
+        target[0, 3] = np.nan
+        target[3, 0] = np.nan
+        weights = None
+        floor = 0.0
+
+    options = {
+        "gram_eigenvalue_floor": floor,
+        "max_iterations": 1000,
+        "relative_tolerance": 1e-8,
+        "absolute_tolerance": 1e-10,
+    }
+    cpu = hipps_dimes.nearest_edm(target, weights, **options)
+    progress_events = []
+    gpu = hipps_dimes.nearest_edm(
+        target,
+        weights,
+        use_gpu=True,
+        progress_callback=progress_events.append,
+        **options,
+    )
+
+    assert cpu[2]["converged"]
+    assert gpu[2]["converged"]
+    assert isinstance(gpu[0], np.ndarray)
+    assert isinstance(gpu[1], np.ndarray)
+    assert gpu[2]["backend"] == "gpu"
+    assert gpu[2]["dtype"] == "float64"
+    assert gpu[2]["gpu_device"] == numerics.get_gpu_name()
+    assert gpu[2]["cupy_version"] == working_cupy.__version__
+    assert gpu[2]["wall_seconds"] >= 0.0
+    assert gpu[2]["gpu_memory_pool_maximum_used_bytes"] >= gpu[2][
+        "gpu_memory_pool_baseline_used_bytes"
+    ]
+    assert gpu[2]["gpu_memory_pool_maximum_total_bytes"] >= gpu[2][
+        "gpu_memory_pool_baseline_total_bytes"
+    ]
+    assert gpu[2]["certificate_projection_count"] == gpu[2]["iterations"]
+    assert len(progress_events) == gpu[2]["iterations"]
+    assert all(event["use_gpu"] for event in progress_events)
+    assert np.allclose(gpu[0], cpu[0], rtol=1e-7, atol=1e-8)
+    assert np.allclose(gpu[1], cpu[1], rtol=1e-7, atol=1e-8)
 
 
 def test_gaussian_covariance_objective_gradient_matches_finite_difference():
@@ -554,6 +745,12 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
     assert nearest[3]["converged"]
     assert rouse[3]["noise_model"] == "homoskedastic_absolute_variance"
     assert nearest[3]["initialization"]["kind"] == "weighted_nearest_edm"
+    assert nearest[3]["initialization"]["backend"] == "cpu"
+    assert nearest[3]["initialization"]["nearest_edm_wall_seconds"] >= 0.0
+    assert nearest[3]["initialization"]["nearest_edm_projection_count"] > 0
+    assert nearest[3]["initialization"]["wall_seconds"] >= nearest[3][
+        "initialization"
+    ]["nearest_edm_wall_seconds"]
     assert np.allclose(rouse[0], nearest[0], rtol=1e-8, atol=1e-9)
     assert np.allclose(rouse[2], nearest[2], rtol=1e-8, atol=1e-9)
 
@@ -631,9 +828,9 @@ def test_gaussian_covariance_gpu_request_fails_without_available_gpu(monkeypatch
     not numerics.is_gpu_available(),
     reason="requires CuPy and an accessible CUDA GPU",
 )
-def test_gaussian_covariance_gpu_kernels_match_cpu():
+def test_gaussian_covariance_gpu_kernels_match_cpu(working_cupy):
     """Float64 GPU COV kernels and block preconditioner should match CPU."""
-    cp = numerics.cp
+    cp = working_cupy
     rng = np.random.default_rng(20260827)
     n = 7
     basis = numerics._centered_orthonormal_basis(n)
@@ -722,7 +919,9 @@ def test_gaussian_covariance_gpu_kernels_match_cpu():
         {"noise_variance": 0.02, "initialization": "nearest_edm"},
     ],
 )
-def test_gaussian_covariance_gpu_matches_cpu_end_to_end(noise_options):
+def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
+    noise_options, working_cupy
+):
     """GPU COV should match CPU for both noise models and both initializers."""
     target = _rouse_squared_distance_target(6)
     solver_options = {
@@ -753,10 +952,19 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(noise_options):
     assert np.allclose(gpu[1], cpu[1], rtol=1e-8, atol=1e-9)
     assert np.allclose(gpu[2], cpu[2], rtol=1e-8, atol=1e-9)
     assert gpu[3]["relative_stationarity_residual"] <= 1e-8
-    assert {event["stage"] for event in progress_events} == {
+    expected_stages = {
         "covariance_preconditioner",
         "covariance_optimization",
     }
+    if noise_options.get("initialization") == "nearest_edm":
+        expected_stages.add("nearest_edm_initialization")
+        assert gpu[3]["initialization"]["backend"] == "gpu"
+        assert gpu[3]["initialization"]["gpu_device"] == numerics.get_gpu_name()
+        assert gpu[3]["initialization"]["nearest_edm_wall_seconds"] >= 0.0
+        assert gpu[3]["initialization"]["nearest_edm_projection_count"] > 0
+    else:
+        assert gpu[3]["initialization"]["backend"] == "cpu"
+    assert {event["stage"] for event in progress_events} == expected_stages
     assert all(event["use_gpu"] for event in progress_events)
 
 

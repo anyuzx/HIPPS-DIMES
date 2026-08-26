@@ -307,8 +307,9 @@ def run_optimization(input_path=None,
     use_gpu : bool, default=False
         If True, use CuPy GPU acceleration. COV uses float64 throughout, builds
         its exact data-Hessian diagonal preconditioner once in bounded pair
-        blocks, and fails clearly if no CUDA GPU is accessible. Legacy IS/GD
-        retain their existing GPU behavior.
+        blocks, and runs a requested nearest-EDM initializer on the same GPU.
+        It fails clearly if no CUDA GPU is accessible. Legacy IS/GD retain
+        their existing GPU behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -1137,6 +1138,23 @@ def run_optimization(input_path=None,
         ),
         'covariance_initialization_resolved': (
             covariance_optimization_info['initialization']['kind']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_backend': (
+            covariance_optimization_info['initialization']['backend']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_wall_seconds': (
+            covariance_optimization_info['initialization']['wall_seconds']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_nearest_edm_projection_count': (
+            covariance_optimization_info['initialization'].get(
+                'nearest_edm_projection_count'
+            )
             if covariance_optimization_info is not None
             else None
         ),

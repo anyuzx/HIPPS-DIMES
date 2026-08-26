@@ -454,6 +454,12 @@ def test_run_optimization_cov_uses_gpu_backend():
     assert results["covariance_optimization"]["backend"] == "gpu"
     assert parameters["use_gpu_requested"] is True
     assert parameters["use_gpu_enabled"] is True
+    assert parameters["covariance_initialization_backend"] == "cpu"
+    assert parameters["covariance_initialization_wall_seconds"] >= 0.0
+    assert (
+        parameters["covariance_initialization_nearest_edm_projection_count"]
+        is None
+    )
     assert parameters["covariance_backend"] == "gpu"
     assert parameters["covariance_dtype"] == "float64"
     assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()

@@ -49,8 +49,9 @@ def _parse_save_steps(save_steps_str):
     show_default=True,
     help=(
         'Use GPU acceleration via CuPy. COV runs in float64 and builds its '
-        'exact blockwise data-Hessian diagonal once per fit. Requires an '
-        'accessible CUDA GPU; there is no silent CPU fallback.'
+        'exact blockwise data-Hessian diagonal once per fit; a requested '
+        'nearest-EDM initializer also runs on the GPU. Requires an accessible '
+        'CUDA GPU; there is no silent CPU fallback.'
     ),
 )
 @click.option(

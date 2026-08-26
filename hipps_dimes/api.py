@@ -305,9 +305,10 @@ def run_optimization(input_path=None,
         NAG's look-ahead correction enables higher momentum (0.95) without divergence.
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
-        If True and CuPy is installed, use GPU acceleration for eigendecomposition.
-        Provides 2-4x speedup for matrices with n >= 200.
-        Requires: conda install -c conda-forge cupy
+        If True, use CuPy GPU acceleration. COV uses float64 throughout, builds
+        its exact data-Hessian diagonal preconditioner once in bounded pair
+        blocks, and fails clearly if no CUDA GPU is accessible. Legacy IS/GD
+        retain their existing GPU behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -393,8 +394,9 @@ def run_optimization(input_path=None,
     
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
-    - In practice, this provides 2-4x speedup for matrices with n >= 200
-    - For n < 200, CPU may be faster due to GPU transfer overhead
+    - COV keeps Newton-CG matrix operations on the GPU in float64
+    - COV builds the exact blockwise data-Hessian diagonal once per fit
+    - For small matrices, CPU may be faster due to GPU setup overhead
     - Install CuPy: conda install -c conda-forge cupy
     
     Examples
@@ -1135,6 +1137,41 @@ def run_optimization(input_path=None,
         ),
         'covariance_initialization_resolved': (
             covariance_optimization_info['initialization']['kind']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_backend': (
+            covariance_optimization_info['backend']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_dtype': (
+            covariance_optimization_info['dtype']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_gpu_device': (
+            covariance_optimization_info['gpu_device']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_cupy_version': (
+            covariance_optimization_info['cupy_version']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_preconditioner_pair_block_size': (
+            covariance_optimization_info['preconditioner_pair_block_size']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_preconditioner_setup_seconds': (
+            covariance_optimization_info['preconditioner_setup_seconds']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_preconditioner_data_setup_count': (
+            covariance_optimization_info['preconditioner_data_setup_count']
             if covariance_optimization_info is not None
             else None
         ),

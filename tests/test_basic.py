@@ -514,6 +514,10 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
     assert info["converged"]
     assert info["noise_model"] == "heteroskedastic_relative_std"
     assert info["initialization"]["kind"] == "rouse"
+    assert info["initialization"]["backend"] == "cpu"
+    assert info["backend"] == "cpu"
+    assert info["gpu_device"] is None
+    assert info["preconditioner_data_setup_count"] == 1
     assert np.all(np.diff(info["history"]["objective"]) <= 1e-10)
     assert np.count_nonzero(np.linalg.eigvalsh(gram) > 1e-12) == n - 1
     assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
@@ -582,6 +586,7 @@ def test_gaussian_covariance_relative_noise_supports_missing_pairs():
         (0.0, None, "positive finite scalar"),
         (None, -0.1, "positive finite scalar"),
         (np.ones((2, 2)), None, "positive finite scalar"),
+        (None, 1e-300, "produce positive finite pair variances"),
     ],
 )
 def test_gaussian_covariance_rejects_invalid_noise_contract(
@@ -608,6 +613,151 @@ def test_gaussian_covariance_rejects_nearest_edm_with_connectivity():
             initialization="nearest_edm",
             initial_connectivity=connectivity,
         )
+
+
+def test_gaussian_covariance_gpu_request_fails_without_available_gpu(monkeypatch):
+    target = _rouse_squared_distance_target(4)
+    monkeypatch.setattr(numerics, "_CUPY_AVAILABLE", False)
+
+    with pytest.raises(RuntimeError, match="CuPy.*accessible CUDA GPU"):
+        HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            0.1,
+            use_gpu=True,
+        )
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+def test_gaussian_covariance_gpu_kernels_match_cpu():
+    """Float64 GPU COV kernels and block preconditioner should match CPU."""
+    cp = numerics.cp
+    rng = np.random.default_rng(20260827)
+    n = 7
+    basis = numerics._centered_orthonormal_basis(n)
+    all_i, all_j = np.triu_indices(n, k=1)
+    selector = np.arange(len(all_i)) % 4 != 0
+    pair_i = all_i[selector]
+    pair_j = all_j[selector]
+    reduced_gram = np.diag(np.linspace(0.8, 2.0, n - 1))
+    pair_vectors = basis[pair_i] - basis[pair_j]
+    target_pairs = np.einsum(
+        "ij,ij->i", pair_vectors @ reduced_gram, pair_vectors, optimize=True
+    )
+    target_pairs *= np.linspace(0.95, 1.05, len(target_pairs))
+    inverse_variance = np.linspace(1.5, 4.5, len(pair_i))
+    target_matrix, inverse_variance_matrix = (
+        numerics._gaussian_covariance_pair_matrices(
+            n, pair_i, pair_j, target_pairs, inverse_variance
+        )
+    )
+    direction = rng.normal(size=(n - 1, n - 1))
+    direction = 0.5 * (direction + direction.T)
+
+    cpu_state = numerics._gaussian_covariance_objective_gradient(
+        reduced_gram,
+        basis,
+        target_matrix,
+        inverse_variance_matrix,
+        pair_i,
+        pair_j,
+    )
+    gpu_state = numerics._gaussian_covariance_objective_gradient(
+        cp.asarray(reduced_gram),
+        cp.asarray(basis),
+        cp.asarray(target_matrix),
+        cp.asarray(inverse_variance_matrix),
+        cp.asarray(pair_i, dtype=cp.int32),
+        cp.asarray(pair_j, dtype=cp.int32),
+        array_module=cp,
+    )
+    cpu_hessian = numerics._gaussian_covariance_data_hessian_action(
+        direction, basis, inverse_variance_matrix
+    )
+    gpu_hessian = numerics._gaussian_covariance_data_hessian_action(
+        cp.asarray(direction),
+        cp.asarray(basis),
+        cp.asarray(inverse_variance_matrix),
+        array_module=cp,
+    )
+    cpu_diagonal, _ = (
+        numerics._gaussian_covariance_data_preconditioner_diagonal(
+            basis,
+            pair_i,
+            pair_j,
+            inverse_variance,
+            block_size=3,
+        )
+    )
+    gpu_diagonal, _ = (
+        numerics._gaussian_covariance_data_preconditioner_diagonal(
+            cp.asarray(basis),
+            cp.asarray(pair_i, dtype=cp.int32),
+            cp.asarray(pair_j, dtype=cp.int32),
+            cp.asarray(inverse_variance),
+            block_size=3,
+            array_module=cp,
+            use_gpu=True,
+        )
+    )
+
+    assert gpu_state[0] == pytest.approx(cpu_state[0], rel=1e-13, abs=1e-13)
+    assert np.allclose(cp.asnumpy(gpu_state[1]), cpu_state[1], rtol=1e-12, atol=1e-12)
+    assert np.allclose(cp.asnumpy(gpu_state[2]), cpu_state[2], rtol=1e-12, atol=1e-12)
+    assert np.allclose(cp.asnumpy(gpu_state[3]), cpu_state[3], rtol=1e-12, atol=1e-12)
+    assert np.allclose(cp.asnumpy(gpu_hessian), cpu_hessian, rtol=1e-12, atol=1e-12)
+    assert np.allclose(cp.asnumpy(gpu_diagonal), cpu_diagonal, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+@pytest.mark.parametrize(
+    "noise_options",
+    [
+        {"relative_noise_std": 0.05},
+        {"noise_variance": 0.02, "initialization": "nearest_edm"},
+    ],
+)
+def test_gaussian_covariance_gpu_matches_cpu_end_to_end(noise_options):
+    """GPU COV should match CPU for both noise models and both initializers."""
+    target = _rouse_squared_distance_target(6)
+    solver_options = {
+        "max_iterations": 30,
+        "relative_tolerance": 1e-9,
+        "save_steps": [1],
+        **noise_options,
+    }
+
+    cpu = HippsDimes.fit_gaussian_noise_covariance(target, **solver_options)
+    progress_events = []
+    gpu = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        use_gpu=True,
+        progress_callback=progress_events.append,
+        **solver_options,
+    )
+
+    assert cpu[3]["converged"]
+    assert gpu[3]["converged"]
+    assert gpu[3]["backend"] == "gpu"
+    assert gpu[3]["dtype"] == "float64"
+    assert gpu[3]["gpu_device"] == numerics.get_gpu_name()
+    assert gpu[3]["cupy_version"] == numerics.cp.__version__
+    assert gpu[3]["preconditioner_setup_seconds"] >= 0.0
+    assert sorted(gpu[3]["connectivity_matrix_at_steps"]) == [1]
+    assert np.allclose(gpu[0], cpu[0], rtol=1e-8, atol=1e-9)
+    assert np.allclose(gpu[1], cpu[1], rtol=1e-8, atol=1e-9)
+    assert np.allclose(gpu[2], cpu[2], rtol=1e-8, atol=1e-9)
+    assert gpu[3]["relative_stationarity_residual"] <= 1e-8
+    assert {event["stage"] for event in progress_events} == {
+        "covariance_preconditioner",
+        "covariance_optimization",
+    }
+    assert all(event["use_gpu"] for event in progress_events)
 
 
 def test_compute_modulus():

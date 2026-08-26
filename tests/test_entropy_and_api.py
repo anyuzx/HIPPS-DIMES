@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 import HippsDimes
+import hipps_dimes.numerics as numerics
 from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
 from hipps_dimes.cli import main as cli_main
 
@@ -419,6 +420,46 @@ def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
     )
     assert parameters["gaussian_noise_relative_std"] == relative_std
     assert parameters["covariance_initialization_resolved"] == "rouse"
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+def test_run_optimization_cov_uses_gpu_backend():
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        gaussian_noise_variance=0.05,
+        iteration=30,
+        use_gpu=True,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert results["covariance_optimization"]["converged"]
+    assert results["covariance_optimization"]["backend"] == "gpu"
+    assert parameters["use_gpu_requested"] is True
+    assert parameters["use_gpu_enabled"] is True
+    assert parameters["covariance_backend"] == "gpu"
+    assert parameters["covariance_dtype"] == "float64"
+    assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()
+    assert parameters["covariance_cupy_version"] == numerics.cp.__version__
+    assert parameters["covariance_preconditioner_setup_seconds"] >= 0.0
+    assert parameters["covariance_preconditioner_data_setup_count"] == 1
 
 
 @pytest.mark.parametrize("method", ["IS", "GD", "DI"])

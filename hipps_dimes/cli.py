@@ -42,8 +42,27 @@ def _parse_save_steps(save_steps_str):
 @click.option('--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization')
 @click.option('--momentum', type=click.FloatRange(0, 1), default=0.0, show_default=True, help='Momentum coefficient for IS method. RECOMMENDED: Use 0.95 with --nesterov for fastest convergence (~50%% faster). Use 0.9 for conservative settings. Only applies when method=IS.')
 @click.option('--nesterov', is_flag=True, default=False, show_default=True, help='Use Nesterov Accelerated Gradient (NAG). Enables higher momentum (0.95) without divergence. RECOMMENDED: Use with --momentum 0.95 for fastest convergence.')
-@click.option('--use-gpu', is_flag=True, default=False, show_default=True, help='Use GPU acceleration via CuPy. Provides 2-4x speedup for large matrices (n >= 200). Requires CuPy: conda install -c conda-forge cupy')
-@click.option('--gpu-float32', is_flag=True, default=False, show_default=True, help='When using --use-gpu, run GPU math/eigendecomposition in float32 (often faster, slightly different numerics).')
+@click.option(
+    '--use-gpu',
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help=(
+        'Use GPU acceleration via CuPy. COV runs in float64 and builds its '
+        'exact blockwise data-Hessian diagonal once per fit. Requires an '
+        'accessible CUDA GPU; there is no silent CPU fallback.'
+    ),
+)
+@click.option(
+    '--gpu-float32',
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help=(
+        'Run legacy GPU IS/GD math in float32. COV is float64-only and rejects '
+        'this option.'
+    ),
+)
 @click.option('--binsize', type=int, default=25000, show_default=True, help='Bin size (resolution) for .hic format in bp')
 @click.option('--norm', 'hic_norm', type=str, default='KR', show_default=True, help='Normalization for .hic: KR, VC, NONE')
 @click.option('--unit', 'hic_unit', type=click.Choice(['BP', 'FRAG'], case_sensitive=False), default='BP', show_default=True, help='Unit for .hic: BP or FRAG')

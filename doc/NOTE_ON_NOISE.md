@@ -88,3 +88,32 @@ IS, GD, and DI remain available for their noiseless contracts.
 COV uses the legacy target-scaled Rouse chain by default. A weighted
 nearest-EDM initialization is optional. Initialization changes only the starting
 point; it does not add a Rouse prior or change the COV objective.
+
+## CPU and GPU backends
+
+The CPU and GPU backends optimize the same objective with the same Newton-CG
+control logic. The GPU path uses float64 for the Gram matrix, objective,
+gradient, Hessian actions, preconditioner, and conjugate-gradient solve. It
+requires CuPy and an accessible CUDA GPU and does not silently fall back to the
+CPU. Rouse and weighted nearest-EDM initialization are computed on the CPU;
+the initialized Gram matrix is then transferred once to the selected solver
+backend. Final fitted matrices and saved checkpoints are NumPy arrays.
+
+Both backends construct the exact diagonal of the Gaussian data Hessian as the
+Newton-CG preconditioner. For pair vector
+$z_{ij}=Q_i-Q_j$ in the internal basis $Q$, this diagonal is
+
+\[
+P_{ab}^{\mathrm{data}}
+=\sum_{i<j}\frac{z_{ij,a}^2z_{ij,b}^2}{v_{ij}}.
+\]
+
+The pair sum is accumulated in blocks of 4096, which bounds the temporary
+pair-vector storage. This expensive data-Hessian setup is performed once per
+fit and reused at every Newton iteration; a separate fit rebuilds it. The
+diagonal contribution from the entropy Hessian is inexpensive and is updated
+at each Newton step. Blocking avoids materializing all pair vectors at once, but
+the exact construction still has $O(N^4)$ total arithmetic for a dense set of
+pairs. Its measured wall time is reported as
+`preconditioner_setup_seconds`; systems substantially beyond the intended
+$N\lesssim3000$ range may eventually require an approximate preconditioner.

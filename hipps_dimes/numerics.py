@@ -57,6 +57,9 @@ _CUPY_AVAILABLE = False
 _CUPY_GPU_NAME = None
 try:
     import cupy as cp
+    import cupyx
+    import cupyx.scipy.linalg as cupyx_scipy_linalg
+    import cupyx.scipy.sparse.linalg as cupyx_sparse_linalg
 
     # Test if GPU is actually accessible
     cp.cuda.runtime.getDeviceCount()
@@ -1889,12 +1892,12 @@ def nearestNSD(X, delta):
     return w @ np.diag(v_new) @ w.T
 
 
-def _squared_distances_from_gram(B):
+def _squared_distances_from_gram(B, array_module=np):
     """Return the squared Euclidean distance matrix induced by Gram matrix ``B``."""
-    diagonal = np.diag(B)
-    ddmap = diagonal[:, np.newaxis] + diagonal - 2.0 * B
+    diagonal = array_module.diag(B)
+    ddmap = diagonal[:, array_module.newaxis] + diagonal - 2.0 * B
     ddmap = 0.5 * (ddmap + ddmap.T)
-    np.fill_diagonal(ddmap, 0.0)
+    array_module.fill_diagonal(ddmap, 0.0)
     return ddmap
 
 
@@ -2289,6 +2292,16 @@ def _validate_gaussian_covariance_inputs(
         pair_variance = np.square(noise_parameter * target_pairs)
         noise_model = "heteroskedastic_relative_std"
 
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        inverse_variance = 1.0 / pair_variance
+    if not np.all(np.isfinite(pair_variance)) or not np.all(
+        np.isfinite(inverse_variance)
+    ):
+        raise ValueError(
+            "the noise specification must produce positive finite pair variances "
+            "and inverse variances"
+        )
+
     return (
         observed,
         pair_mask,
@@ -2322,30 +2335,42 @@ def _gaussian_covariance_data_objective_gradient(
     inverse_variance_matrix,
     pair_i,
     pair_j,
+    *,
+    array_module=np,
 ):
     """Evaluate the Gaussian data term through the structured EDM operator."""
-    reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
+    reduced_gram = array_module.asarray(reduced_gram, dtype=array_module.float64)
     gram = basis @ reduced_gram @ basis.T
-    fitted_matrix = _squared_distances_from_gram(gram)
+    fitted_matrix = _squared_distances_from_gram(gram, array_module)
     residual_matrix = fitted_matrix - target_matrix
     weighted_residual = inverse_variance_matrix * residual_matrix
-    data_objective = 0.25 * float(np.sum(weighted_residual * residual_matrix))
-    full_gradient = np.diag(np.sum(weighted_residual, axis=1)) - weighted_residual
+    data_objective = 0.25 * array_module.sum(
+        weighted_residual * residual_matrix
+    )
+    full_gradient = (
+        array_module.diag(array_module.sum(weighted_residual, axis=1))
+        - weighted_residual
+    )
     data_gradient = basis.T @ full_gradient @ basis
     data_gradient = 0.5 * (data_gradient + data_gradient.T)
     return data_objective, data_gradient, fitted_matrix[pair_i, pair_j]
 
 
 def _gaussian_covariance_data_hessian_action(
-    direction, basis, inverse_variance_matrix
+    direction, basis, inverse_variance_matrix, *, array_module=np
 ):
     """Apply the Gaussian data Hessian without materializing pair tensors."""
-    direction = np.asarray(direction, dtype=np.float64)
+    direction = array_module.asarray(direction, dtype=array_module.float64)
     direction = 0.5 * (direction + direction.T)
     full_direction = basis @ direction @ basis.T
-    distance_direction = _squared_distances_from_gram(full_direction)
+    distance_direction = _squared_distances_from_gram(
+        full_direction, array_module
+    )
     weighted_direction = inverse_variance_matrix * distance_direction
-    full_action = np.diag(np.sum(weighted_direction, axis=1)) - weighted_direction
+    full_action = (
+        array_module.diag(array_module.sum(weighted_direction, axis=1))
+        - weighted_direction
+    )
     reduced_action = basis.T @ full_action @ basis
     return 0.5 * (reduced_action + reduced_action.T)
 
@@ -2357,19 +2382,43 @@ def _gaussian_covariance_objective_gradient(
     inverse_variance_matrix,
     pair_i,
     pair_j,
+    *,
+    array_module=np,
 ):
     """Evaluate the Gaussian soft-constraint objective in the covariance cone."""
-    reduced_gram = np.asarray(reduced_gram, dtype=np.float64)
-    try:
-        cholesky_factor = np.linalg.cholesky(reduced_gram)
-    except np.linalg.LinAlgError:
-        return np.inf, None, None, None, None
+    reduced_gram = array_module.asarray(reduced_gram, dtype=array_module.float64)
+    if _CUPY_AVAILABLE and array_module is cp:
+        try:
+            with cupyx.errstate(linalg="raise"):
+                cholesky_factor = cp.linalg.cholesky(reduced_gram)
+        except np.linalg.LinAlgError:
+            return np.inf, None, None, None, None
+        identity = cp.eye(reduced_gram.shape[0], dtype=cp.float64)
+        inverse_gram = cupyx_scipy_linalg.solve_triangular(
+            cholesky_factor,
+            identity,
+            lower=True,
+            check_finite=False,
+        )
+        inverse_gram = cupyx_scipy_linalg.solve_triangular(
+            cholesky_factor.T,
+            inverse_gram,
+            lower=False,
+            check_finite=False,
+        )
+    else:
+        try:
+            cholesky_factor = np.linalg.cholesky(reduced_gram)
+        except np.linalg.LinAlgError:
+            return np.inf, None, None, None, None
+        inverse_gram = scipy.linalg.cho_solve(
+            (cholesky_factor, True),
+            np.eye(reduced_gram.shape[0], dtype=np.float64),
+            check_finite=False,
+        )
 
-    logdet = 2.0 * float(np.sum(np.log(np.diag(cholesky_factor))))
-    inverse_gram = scipy.linalg.cho_solve(
-        (cholesky_factor, True),
-        np.eye(reduced_gram.shape[0], dtype=np.float64),
-        check_finite=False,
+    logdet = 2.0 * array_module.sum(
+        array_module.log(array_module.diag(cholesky_factor))
     )
     inverse_gram = 0.5 * (inverse_gram + inverse_gram.T)
     data_objective, data_gradient, fitted_pairs = (
@@ -2380,6 +2429,7 @@ def _gaussian_covariance_objective_gradient(
             inverse_variance_matrix,
             pair_i,
             pair_j,
+            array_module=array_module,
         )
     )
     negative_entropy = -1.5 * logdet
@@ -2387,11 +2437,16 @@ def _gaussian_covariance_objective_gradient(
     gradient = data_gradient + entropy_gradient
     gradient = 0.5 * (gradient + gradient.T)
     return (
-        negative_entropy + data_objective,
+        float((negative_entropy + data_objective).item()),
         gradient,
         fitted_pairs,
         inverse_gram,
-        (negative_entropy, data_objective, entropy_gradient, data_gradient),
+        (
+            float(negative_entropy.item()),
+            float(data_objective.item()),
+            entropy_gradient,
+            data_gradient,
+        ),
     )
 
 
@@ -2403,21 +2458,30 @@ def _gaussian_covariance_data_preconditioner_diagonal(
     *,
     block_size=_COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE,
     progress_callback=None,
+    array_module=np,
+    use_gpu=False,
 ):
     """Build the exact data-Hessian diagonal with bounded pair-block memory."""
     n_modes = basis.shape[1]
-    diagonal = np.zeros((n_modes, n_modes), dtype=np.float64)
-    pair_count = len(pair_i)
+    diagonal = array_module.zeros(
+        (n_modes, n_modes), dtype=array_module.float64
+    )
+    pair_count = int(pair_i.size)
     block_count = (pair_count + block_size - 1) // block_size
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
     start_time = time.perf_counter()
     for block_index, start in enumerate(range(0, pair_count, block_size), start=1):
         stop = min(start + block_size, pair_count)
         pair_vectors = basis[pair_i[start:stop]] - basis[pair_j[start:stop]]
-        pair_vectors_squared = np.square(pair_vectors)
+        pair_vectors_squared = array_module.square(pair_vectors)
         diagonal += pair_vectors_squared.T @ (
-            inverse_variance[start:stop, np.newaxis] * pair_vectors_squared
+            inverse_variance[start:stop, array_module.newaxis]
+            * pair_vectors_squared
         )
         if progress_callback is not None:
+            if use_gpu:
+                cp.cuda.get_current_stream().synchronize()
             progress_callback(
                 {
                     "stage": "covariance_preconditioner",
@@ -2427,10 +2491,12 @@ def _gaussian_covariance_data_preconditioner_diagonal(
                     "pair_count": pair_count,
                     "method": "COV",
                     "general_method": "covariance_optimization",
-                    "use_gpu": False,
+                    "use_gpu": bool(use_gpu),
                     "noisy": True,
                 }
             )
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
     return diagonal, time.perf_counter() - start_time
 
 
@@ -2478,6 +2544,57 @@ def _preconditioned_conjugate_gradient(
     solution = 0.5 * (solution + solution.T)
     residual_norm = float(np.linalg.norm(residual, ord="fro"))
     return solution, iteration, residual_norm, converged
+
+
+def _preconditioned_conjugate_gradient_gpu(
+    operator,
+    right_hand_side,
+    preconditioner_diagonal,
+    relative_tolerance,
+    max_iterations,
+):
+    """Solve the COV Newton equation with CuPy's matrix-free CG."""
+    matrix_shape = right_hand_side.shape
+    vector_size = int(right_hand_side.size)
+    right_hand_side_vector = right_hand_side.reshape(vector_size)
+    diagonal_vector = preconditioner_diagonal.reshape(vector_size)
+    scale = float(cp.linalg.norm(right_hand_side_vector).item())
+    if scale == 0.0:
+        return cp.zeros_like(right_hand_side), 0, 0.0, True
+
+    def matrix_vector_product(vector):
+        return operator(vector.reshape(matrix_shape)).reshape(vector_size)
+
+    linear_operator = cupyx_sparse_linalg.LinearOperator(
+        (vector_size, vector_size),
+        matvec=matrix_vector_product,
+        dtype=cp.float64,
+    )
+    preconditioner = cupyx_sparse_linalg.LinearOperator(
+        (vector_size, vector_size),
+        matvec=lambda vector: vector / diagonal_vector,
+        dtype=cp.float64,
+    )
+    iteration_count = [0]
+
+    def count_iteration(_):
+        iteration_count[0] += 1
+
+    solution_vector, solver_status = cupyx_sparse_linalg.cg(
+        linear_operator,
+        right_hand_side_vector,
+        tol=float(relative_tolerance),
+        atol=0.0,
+        maxiter=int(max_iterations),
+        M=preconditioner,
+        callback=count_iteration,
+    )
+    solution = solution_vector.reshape(matrix_shape)
+    solution = 0.5 * (solution + solution.T)
+    residual = right_hand_side - operator(solution)
+    residual_norm = float(cp.linalg.norm(residual).item())
+    converged = int(solver_status) == 0
+    return solution, iteration_count[0], residual_norm, converged
 
 
 def _rouse_initial_connectivity(squared_distances):
@@ -2616,6 +2733,7 @@ def _initialize_gaussian_reduced_gram(
         raise RuntimeError(
             "initial covariance is not strictly positive definite"
         ) from error
+    initialization_info["backend"] = "cpu"
     return reduced_gram, initialization_info
 
 
@@ -2644,10 +2762,15 @@ def fit_gaussian_noise_covariance(
 
     Supply either one absolute variance or one relative standard deviation
     ``sigma_ij / Dobs_ij`` shared by all observed pairs. The latter produces
-    ``v_ij = (relative_noise_std * Dobs_ij)**2``.
+    ``v_ij = (relative_noise_std * Dobs_ij)**2``. With ``use_gpu=True``,
+    Newton-CG and the once-per-fit exact blockwise data-Hessian setup run in
+    float64 on the GPU; initialization remains on the CPU.
     """
-    if use_gpu:
-        raise RuntimeError("the COV GPU backend is not available in this CPU solver")
+    if use_gpu and not is_gpu_available():
+        raise RuntimeError(
+            "COV GPU optimization was requested, but CuPy and an accessible "
+            "CUDA GPU are not available"
+        )
     (
         observed,
         pair_mask,
@@ -2704,15 +2827,6 @@ def fit_gaussian_noise_covariance(
     target_matrix, inverse_variance_matrix = _gaussian_covariance_pair_matrices(
         n, pair_i, pair_j, target_pairs, inverse_variance
     )
-    data_hessian_diagonal, preconditioner_setup_seconds = (
-        _gaussian_covariance_data_preconditioner_diagonal(
-            basis,
-            pair_i,
-            pair_j,
-            inverse_variance,
-            progress_callback=progress_callback,
-        )
-    )
     reduced_gram, initialization_info = _initialize_gaussian_reduced_gram(
         observed,
         pair_mask,
@@ -2724,6 +2838,58 @@ def fit_gaussian_noise_covariance(
         initial_connectivity,
         initial_gram_floor_relative,
     )
+
+    if use_gpu:
+        solver_basis = cp.asarray(basis, dtype=cp.float64)
+        solver_pair_i = cp.asarray(pair_i, dtype=cp.int32)
+        solver_pair_j = cp.asarray(pair_j, dtype=cp.int32)
+        solver_target_pairs = cp.asarray(target_pairs, dtype=cp.float64)
+        solver_inverse_variance = cp.asarray(inverse_variance, dtype=cp.float64)
+        solver_target_matrix = cp.asarray(target_matrix, dtype=cp.float64)
+        solver_inverse_variance_matrix = cp.asarray(
+            inverse_variance_matrix, dtype=cp.float64
+        )
+        reduced_gram = cp.asarray(reduced_gram, dtype=cp.float64)
+        data_hessian_diagonal, preconditioner_setup_seconds = (
+            _gaussian_covariance_data_preconditioner_diagonal(
+                solver_basis,
+                solver_pair_i,
+                solver_pair_j,
+                solver_inverse_variance,
+                progress_callback=progress_callback,
+                array_module=cp,
+                use_gpu=True,
+            )
+        )
+        conjugate_gradient_function = (
+            _preconditioned_conjugate_gradient_gpu
+        )
+        array_module = cp
+    else:
+        solver_basis = basis
+        solver_pair_i = pair_i
+        solver_pair_j = pair_j
+        solver_target_pairs = target_pairs
+        solver_inverse_variance = inverse_variance
+        solver_target_matrix = target_matrix
+        solver_inverse_variance_matrix = inverse_variance_matrix
+        data_hessian_diagonal, preconditioner_setup_seconds = (
+            _gaussian_covariance_data_preconditioner_diagonal(
+                solver_basis,
+                solver_pair_i,
+                solver_pair_j,
+                solver_inverse_variance,
+                progress_callback=progress_callback,
+            )
+        )
+        conjugate_gradient_function = _preconditioned_conjugate_gradient
+        array_module = np
+
+    def solver_scalar(value):
+        return float(value.item()) if hasattr(value, "item") else float(value)
+
+    def solver_norm(value):
+        return solver_scalar(array_module.sqrt(array_module.sum(value * value)))
 
     history = {
         "iteration": [],
@@ -2751,21 +2917,22 @@ def fit_gaussian_noise_covariance(
     message = "maximum number of iterations reached"
     current_state = _gaussian_covariance_objective_gradient(
         reduced_gram,
-        basis,
-        target_matrix,
-        inverse_variance_matrix,
-        pair_i,
-        pair_j,
+        solver_basis,
+        solver_target_matrix,
+        solver_inverse_variance_matrix,
+        solver_pair_i,
+        solver_pair_j,
+        array_module=array_module,
     )
 
     for iteration in range(1, max_iterations + 1):
         objective, gradient, _, inverse_gram, components = current_state
         negative_entropy, data_objective, entropy_gradient, data_gradient = components
-        gradient_norm = float(np.linalg.norm(gradient, ord="fro"))
+        gradient_norm = solver_norm(gradient)
         gradient_scale = max(
             1.0,
-            float(np.linalg.norm(entropy_gradient, ord="fro")),
-            float(np.linalg.norm(data_gradient, ord="fro")),
+            solver_norm(entropy_gradient),
+            solver_norm(data_gradient),
         )
         relative_gradient_norm = gradient_norm / gradient_scale
         if gradient_norm <= absolute_tolerance + relative_tolerance * gradient_scale:
@@ -2777,16 +2944,20 @@ def fit_gaussian_noise_covariance(
         def hessian_operator(direction):
             direction = 0.5 * (direction + direction.T)
             data_term = _gaussian_covariance_data_hessian_action(
-                direction, basis, inverse_variance_matrix
+                direction,
+                solver_basis,
+                solver_inverse_variance_matrix,
+                array_module=array_module,
             )
             entropy_term = 1.5 * inverse_gram @ direction @ inverse_gram
             result = data_term + entropy_term
             return 0.5 * (result + result.T)
 
-        preconditioner_diagonal = data_hessian_diagonal + 1.5 * np.outer(
-            np.diag(inverse_gram), np.diag(inverse_gram)
+        inverse_diagonal = array_module.diag(inverse_gram)
+        preconditioner_diagonal = data_hessian_diagonal + 1.5 * array_module.outer(
+            inverse_diagonal, inverse_diagonal
         )
-        preconditioner_diagonal = np.maximum(
+        preconditioner_diagonal = array_module.maximum(
             preconditioner_diagonal, np.finfo(np.float64).tiny
         )
         forcing_tolerance = min(
@@ -2794,7 +2965,7 @@ def fit_gaussian_noise_covariance(
             max(1e-8, 0.1 * np.sqrt(max(relative_gradient_norm, 0.0))),
         )
         direction, cg_iterations, cg_residual, cg_converged = (
-            _preconditioned_conjugate_gradient(
+            conjugate_gradient_function(
                 hessian_operator,
                 -gradient,
                 preconditioner_diagonal,
@@ -2802,14 +2973,18 @@ def fit_gaussian_noise_covariance(
                 int(cg_max_iterations),
             )
         )
-        directional_derivative = float(np.sum(gradient * direction))
+        directional_derivative = solver_scalar(
+            array_module.sum(gradient * direction)
+        )
         if (
             not np.isfinite(directional_derivative)
             or directional_derivative >= 0.0
         ):
             direction = -gradient / preconditioner_diagonal
             direction = 0.5 * (direction + direction.T)
-            directional_derivative = float(np.sum(gradient * direction))
+            directional_derivative = solver_scalar(
+                array_module.sum(gradient * direction)
+            )
             cg_converged = False
 
         step_size = 1.0
@@ -2820,11 +2995,12 @@ def fit_gaussian_noise_covariance(
             trial = 0.5 * (trial + trial.T)
             trial_state = _gaussian_covariance_objective_gradient(
                 trial,
-                basis,
-                target_matrix,
-                inverse_variance_matrix,
-                pair_i,
-                pair_j,
+                solver_basis,
+                solver_target_matrix,
+                solver_inverse_variance_matrix,
+                solver_pair_i,
+                solver_pair_j,
+                array_module=array_module,
             )
             trial_objective = trial_state[0]
             if not np.isfinite(trial_objective):
@@ -2843,8 +3019,8 @@ def fit_gaussian_noise_covariance(
             break
 
         accepted_delta = candidate - reduced_gram
-        relative_step = float(np.linalg.norm(accepted_delta, ord="fro")) / max(
-            float(np.linalg.norm(reduced_gram, ord="fro")), 1.0
+        relative_step = solver_norm(accepted_delta) / max(
+            solver_norm(reduced_gram), 1.0
         )
         reduced_gram = candidate
         (
@@ -2861,30 +3037,50 @@ def fit_gaussian_noise_covariance(
             candidate_data_gradient,
         ) = candidate_components
         current_state = candidate_state
-        candidate_gradient_norm = float(
-            np.linalg.norm(candidate_gradient, ord="fro")
-        )
+        candidate_gradient_norm = solver_norm(candidate_gradient)
         candidate_gradient_scale = max(
             1.0,
-            float(np.linalg.norm(candidate_entropy_gradient, ord="fro")),
-            float(np.linalg.norm(candidate_data_gradient, ord="fro")),
+            solver_norm(candidate_entropy_gradient),
+            solver_norm(candidate_data_gradient),
         )
         candidate_relative_gradient = (
             candidate_gradient_norm / candidate_gradient_scale
         )
-        residual = candidate_pairs - target_pairs
-        relative_loss = float(np.sqrt(np.mean(np.square(residual / target_pairs))))
-        weighted_rmse = float(
-            np.sqrt(np.mean(np.square(residual) * inverse_variance))
+        residual = candidate_pairs - solver_target_pairs
+        residual_squared = array_module.square(residual)
+        relative_loss = solver_scalar(
+            array_module.sqrt(
+                array_module.mean(
+                    array_module.square(residual / solver_target_pairs)
+                )
+            )
         )
-        distance_rmse = float(np.sqrt(np.mean(np.square(residual))))
-        gram_eigenvalues = np.linalg.eigvalsh(reduced_gram)
-        logdet = float(np.sum(np.log(gram_eigenvalues)))
+        weighted_rmse = solver_scalar(
+            array_module.sqrt(
+                array_module.mean(residual_squared * solver_inverse_variance)
+            )
+        )
+        distance_rmse = solver_scalar(
+            array_module.sqrt(array_module.mean(residual_squared))
+        )
+        if use_gpu:
+            with cupyx.errstate(linalg="raise"):
+                gram_eigenvalues = cp.linalg.eigvalsh(reduced_gram)
+        else:
+            gram_eigenvalues = np.linalg.eigvalsh(reduced_gram)
+        logdet = solver_scalar(array_module.sum(array_module.log(gram_eigenvalues)))
         entropy = logdet - n_modes * np.log(3.0)
         reduced_connectivity = 3.0 * candidate_inverse
-        full_connectivity = -(basis @ reduced_connectivity @ basis.T)
-        offdiagonal = full_connectivity[np.triu_indices(n, k=1)]
-        connectivity_norm = float(np.linalg.norm(offdiagonal))
+        basis_times_connectivity = solver_basis @ reduced_connectivity
+        connectivity_diagonal = -array_module.sum(
+            basis_times_connectivity * solver_basis, axis=1
+        )
+        offdiagonal_norm_squared = 0.5 * max(
+            solver_scalar(array_module.sum(reduced_connectivity**2))
+            - solver_scalar(array_module.sum(connectivity_diagonal**2)),
+            0.0,
+        )
+        connectivity_norm = float(np.sqrt(offdiagonal_norm_squared))
         cg_relative_residual = cg_residual / max(
             gradient_norm, np.finfo(np.float64).tiny
         )
@@ -2907,16 +3103,19 @@ def fit_gaussian_noise_covariance(
         history["cg_iterations"].append(cg_iterations)
         history["cg_relative_residual"].append(cg_relative_residual)
         history["minimum_internal_gram_eigenvalue"].append(
-            float(gram_eigenvalues[0])
+            solver_scalar(gram_eigenvalues[0])
         )
         history["maximum_internal_gram_eigenvalue"].append(
-            float(gram_eigenvalues[-1])
+            solver_scalar(gram_eigenvalues[-1])
         )
         history["connectivity_offdiagonal_l2"].append(connectivity_norm)
 
         if iteration in save_steps_set:
+            checkpoint_reduced_gram = (
+                cp.asnumpy(reduced_gram) if use_gpu else reduced_gram
+            )
             connectivity_at_steps[iteration] = _connectivity_from_reduced_gram(
-                reduced_gram, basis
+                checkpoint_reduced_gram, basis
             )
         if progress_callback is not None:
             progress_callback(
@@ -2932,7 +3131,7 @@ def fit_gaussian_noise_covariance(
                     "cg_iterations": cg_iterations,
                     "cg_converged": bool(cg_converged),
                     "noisy": True,
-                    "use_gpu": False,
+                    "use_gpu": bool(use_gpu),
                     "method": "COV",
                     "general_method": "covariance_optimization",
                 }
@@ -2950,6 +3149,8 @@ def fit_gaussian_noise_covariance(
         dtype = np.int64 if key in {"iteration", "cg_iterations"} else np.float64
         history[key] = np.asarray(values, dtype=dtype)
 
+    if use_gpu:
+        reduced_gram = cp.asnumpy(reduced_gram)
     gram = basis @ reduced_gram @ basis.T
     gram = 0.5 * (gram + gram.T)
     fitted_squared_distances = _squared_distances_from_gram(gram)
@@ -2957,11 +3158,11 @@ def fit_gaussian_noise_covariance(
     if history["iteration"].size == 0:
         final_state = current_state
         final_objective = float(final_state[0])
-        final_gradient_norm = float(np.linalg.norm(final_state[1], ord="fro"))
+        final_gradient_norm = solver_norm(final_state[1])
         final_relative_gradient_norm = final_gradient_norm / max(
             1.0,
-            float(np.linalg.norm(final_state[4][2], ord="fro")),
-            float(np.linalg.norm(final_state[4][3], ord="fro")),
+            solver_norm(final_state[4][2]),
+            solver_norm(final_state[4][3]),
         )
     else:
         final_objective = float(history["objective"][-1])
@@ -3007,12 +3208,16 @@ def fit_gaussian_noise_covariance(
         "noise_variance_median": float(np.median(pair_variance)),
         "noise_variance_maximum": float(np.max(pair_variance)),
         "initialization": initialization_info,
-        "backend": "cpu",
+        "backend": "gpu" if use_gpu else "cpu",
         "dtype": "float64",
+        "gpu_device": get_gpu_name() if use_gpu else None,
+        "cupy_version": cp.__version__ if use_gpu else None,
         "preconditioner_pair_block_size": (
             _COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE
         ),
         "preconditioner_setup_seconds": float(preconditioner_setup_seconds),
+        "preconditioner_data_setup_count": 1,
+        "preconditioner_entropy_diagonal_updated_each_iteration": True,
         "history": history,
         "connectivity_matrix_at_steps": connectivity_at_steps,
         "objective_definition": (

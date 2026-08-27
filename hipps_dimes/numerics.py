@@ -1901,466 +1901,6 @@ def _squared_distances_from_gram(B, array_module=np):
     return ddmap
 
 
-def _project_centered_psd(X, gram_eigenvalue_floor=0.0, array_module=np):
-    """Project onto ``B @ 1 = 0`` and ``B >= floor * J``."""
-    X = 0.5 * (X + X.T)
-    row_mean = array_module.mean(X, axis=1, keepdims=True)
-    centered = X - row_mean - row_mean.T + array_module.mean(X)
-
-    # The floored feasible set is a translation of the centered PSD cone:
-    # {B : B >= floor * J, B @ 1 = 0} = floor * J + {C : C >= 0, C @ 1 = 0}.
-    # Express J without matrix multiplication so the translational mode remains
-    # exactly excluded from the positive spectral floor.
-    n = centered.shape[0]
-    shifted = centered.copy()
-    if gram_eigenvalue_floor != 0.0:
-        shifted += gram_eigenvalue_floor / n
-        shifted[array_module.diag_indices(n)] -= gram_eigenvalue_floor
-
-    if array_module is np:
-        eigenvalues, eigenvectors = np.linalg.eigh(shifted)
-    else:
-        with cupyx.errstate(linalg="raise"):
-            eigenvalues, eigenvectors = array_module.linalg.eigh(shifted)
-    projected = (
-        eigenvectors * array_module.maximum(eigenvalues, 0.0)
-    ) @ eigenvectors.T
-
-    # Re-center by the congruence J @ projected @ J, expressed with means to
-    # avoid two dense matrix multiplications. This preserves PSD analytically.
-    row_mean = array_module.mean(projected, axis=1, keepdims=True)
-    projected = projected - row_mean - row_mean.T + array_module.mean(projected)
-    if gram_eigenvalue_floor != 0.0:
-        projected -= gram_eigenvalue_floor / n
-        projected[array_module.diag_indices(n)] += gram_eigenvalue_floor
-    return 0.5 * (projected + projected.T)
-
-
-def _nearest_edm_objective_gradient(
-    B, squared_distances, weights, array_module=np
-):
-    """Evaluate the unique-pair weighted EDM objective and its gradient."""
-    fitted = _squared_distances_from_gram(B, array_module=array_module)
-    residual = fitted - squared_distances
-    weighted_residual = weights * residual
-
-    # weights and residual are symmetric. Multiplication by 1/4 therefore
-    # evaluates 1/2 * sum_{i < j} w_ij * residual_ij**2.
-    objective = 0.25 * array_module.sum(weighted_residual * residual)
-    gradient = (
-        array_module.diag(array_module.sum(weighted_residual, axis=1))
-        - weighted_residual
-    )
-    gradient = 0.5 * (gradient + gradient.T)
-    objective = (
-        float(objective.item()) if hasattr(objective, "item") else float(objective)
-    )
-    return objective, gradient, fitted
-
-
-def nearest_edm(
-    squared_distances,
-    weights=None,
-    *,
-    gram_eigenvalue_floor=0.0,
-    max_iterations=1000,
-    relative_tolerance=1e-8,
-    absolute_tolerance=1e-10,
-    use_gpu=False,
-    progress_callback=None,
-):
-    """Find a weighted least-squares Euclidean distance matrix.
-
-    This function solves
-
-    ``min_B 0.5 * sum_{i < j} w_ij * (D(B)_ij - D_obs_ij)**2``
-
-    subject to ``B @ 1 = 0`` and ``B >= gram_eigenvalue_floor * J``, where
-    ``J = I - 11.T / N`` and
-    ``D(B)_ij = B_ii + B_jj - 2 * B_ij``. The input and returned distance
-    matrices contain *squared* distances. A positive floor gives exactly
-    ``N - 1`` positive internal Gram modes while preserving the translational
-    zero mode. The default zero floor imposes no embedding-rank constraint.
-
-    Parameters
-    ----------
-    squared_distances : (N, N) array_like
-        Symmetric observed squared distances. NaNs may mark unobserved pairs.
-        Infinite values are rejected.
-    weights : (N, N) array_like, optional
-        Symmetric, finite, nonnegative pair weights. A zero weight excludes a
-        pair. When omitted, every finite off-diagonal pair has unit weight.
-    gram_eigenvalue_floor : float, optional
-        Nonnegative lower bound for every Gram eigenvalue in the centered
-        subspace. It has the same units as the squared distances. The
-        translational eigenvalue remains zero. Default is 0.
-    max_iterations : int, optional
-        Maximum number of projected-gradient iterations.
-    relative_tolerance, absolute_tolerance : float, optional
-        Stop when the projected-gradient norm is no larger than
-        ``absolute_tolerance + relative_tolerance * ||gradient||_F``.
-    use_gpu : bool, optional
-        If True, run the float64 projected-gradient solver and dense PSD
-        projections with CuPy. An accessible CUDA GPU is required; there is no
-        silent CPU fallback. Returned matrices remain NumPy arrays.
-    progress_callback : callable, optional
-        Called after each accepted iteration with scalar diagnostics.
-
-    Returns
-    -------
-    fitted_squared_distances : (N, N) ndarray
-        The fitted symmetric, hollow Euclidean distance matrix.
-    gram_matrix : (N, N) ndarray
-        The fitted centered positive-semidefinite Gram matrix.
-    info : dict
-        Convergence status and scalar iteration history.
-
-    Notes
-    -----
-    The monotone accelerated projected-gradient iteration uses a dense
-    eigendecomposition for each PSD projection, so the runtime is O(N^3) per
-    iteration and memory use is O(N^2) on either backend.
-    """
-    if use_gpu and not is_gpu_available():
-        raise RuntimeError(
-            "nearest EDM GPU optimization was requested, but CuPy and an "
-            "accessible CUDA GPU are not available"
-        )
-
-    observed = np.asarray(squared_distances, dtype=np.float64)
-    if observed.ndim != 2 or observed.shape[0] != observed.shape[1]:
-        raise ValueError("squared_distances must be a square matrix")
-    if observed.shape[0] < 2:
-        raise ValueError("squared_distances must contain at least two loci")
-    if np.any(np.isinf(observed)):
-        raise ValueError("squared_distances must not contain infinite values")
-
-    n = observed.shape[0]
-    off_diagonal = ~np.eye(n, dtype=bool)
-
-    if weights is None:
-        finite = np.isfinite(observed)
-        if not np.array_equal(finite, finite.T):
-            raise ValueError("the observed-pair pattern must be symmetric")
-        pair_mask = finite & off_diagonal
-        pair_weights = np.zeros_like(observed)
-        pair_weights[pair_mask] = 1.0
-    else:
-        pair_weights = np.asarray(weights, dtype=np.float64)
-        if pair_weights.shape != observed.shape:
-            raise ValueError("weights must have the same shape as squared_distances")
-        if not np.all(np.isfinite(pair_weights)):
-            raise ValueError("weights must be finite")
-        if np.any(pair_weights < 0.0):
-            raise ValueError("weights must be nonnegative")
-        if not np.allclose(pair_weights, pair_weights.T, rtol=1e-12, atol=1e-14):
-            raise ValueError("weights must be symmetric")
-        pair_weights = 0.5 * (pair_weights + pair_weights.T)
-        np.fill_diagonal(pair_weights, 0.0)
-        pair_mask = (pair_weights > 0.0) & off_diagonal
-        if np.any(pair_mask & ~np.isfinite(observed)):
-            raise ValueError("every positive-weight pair must have a finite distance")
-
-    if not np.any(np.triu(pair_mask, k=1)):
-        raise ValueError("at least one off-diagonal pair must be observed")
-    if not np.array_equal(pair_mask, pair_mask.T):
-        raise ValueError("the observed-pair pattern must be symmetric")
-    if not np.allclose(
-        observed[pair_mask], observed.T[pair_mask], rtol=1e-10, atol=1e-12
-    ):
-        raise ValueError("observed squared distances must be symmetric")
-
-    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
-        raise ValueError("max_iterations must be a positive integer")
-    if isinstance(gram_eigenvalue_floor, (bool, np.bool_)) or not np.isscalar(
-        gram_eigenvalue_floor
-    ):
-        raise ValueError("gram_eigenvalue_floor must be a finite nonnegative scalar")
-    try:
-        gram_eigenvalue_floor = float(gram_eigenvalue_floor)
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            "gram_eigenvalue_floor must be a finite nonnegative scalar"
-        ) from error
-    if not np.isfinite(gram_eigenvalue_floor) or gram_eigenvalue_floor < 0.0:
-        raise ValueError("gram_eigenvalue_floor must be a finite nonnegative scalar")
-    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
-        raise ValueError("convergence tolerances must be nonnegative")
-    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
-        raise ValueError("at least one convergence tolerance must be positive")
-
-    target = np.zeros_like(observed)
-    target[pair_mask] = observed[pair_mask]
-    target = 0.5 * (target + target.T)
-
-    weight_sum = float(0.5 * np.sum(pair_weights))
-    array_module = cp if use_gpu else np
-    gpu_memory_pool = cp.get_default_memory_pool() if use_gpu else None
-    gpu_memory_pool_baseline_used_bytes = (
-        int(gpu_memory_pool.used_bytes()) if use_gpu else None
-    )
-    gpu_memory_pool_baseline_total_bytes = (
-        int(gpu_memory_pool.total_bytes()) if use_gpu else None
-    )
-    gpu_memory_pool_maximum_used_bytes = gpu_memory_pool_baseline_used_bytes
-    gpu_memory_pool_maximum_total_bytes = gpu_memory_pool_baseline_total_bytes
-
-    if use_gpu:
-        cp.cuda.get_current_stream().synchronize()
-    start_time = time.perf_counter()
-    solver_target = array_module.asarray(target, dtype=array_module.float64)
-    solver_weights = array_module.asarray(pair_weights, dtype=array_module.float64)
-
-    def record_gpu_memory():
-        nonlocal gpu_memory_pool_maximum_total_bytes
-        nonlocal gpu_memory_pool_maximum_used_bytes
-        if use_gpu:
-            gpu_memory_pool_maximum_used_bytes = max(
-                gpu_memory_pool_maximum_used_bytes,
-                int(gpu_memory_pool.used_bytes()),
-            )
-            gpu_memory_pool_maximum_total_bytes = max(
-                gpu_memory_pool_maximum_total_bytes,
-                int(gpu_memory_pool.total_bytes()),
-            )
-
-    def solver_sum(value):
-        result = array_module.sum(value)
-        return float(result.item()) if hasattr(result, "item") else float(result)
-
-    def solver_norm(value):
-        result = array_module.linalg.norm(value, ord="fro")
-        return float(result.item()) if hasattr(result, "item") else float(result)
-
-    projection_count = 1
-    line_search_projection_count = 0
-    certificate_projection_count = 0
-    backtracking_rejection_count = 0
-    monotone_restart_count = 0
-    B = _project_centered_psd(
-        array_module.zeros_like(solver_target),
-        gram_eigenvalue_floor,
-        array_module=array_module,
-    )
-    record_gpu_memory()
-    extrapolated = B.copy()
-    momentum = 1.0
-    current_objective, _, _ = _nearest_edm_objective_gradient(
-        B,
-        solver_target,
-        solver_weights,
-        array_module=array_module,
-    )
-    record_gpu_memory()
-
-    # For H -> D(H), 4 * max_i sum_j w_ij is a safe Hessian-norm bound.
-    # Backtracking protects the iteration against roundoff and permits the
-    # bound to shrink toward a less conservative local value.
-    lipschitz = 4.0 * np.max(np.sum(pair_weights, axis=1))
-    lipschitz = max(float(lipschitz), np.finfo(np.float64).tiny)
-
-    history = {
-        "iteration": [],
-        "objective": [],
-        "weighted_rmse": [],
-        "projected_gradient_norm": [],
-        "relative_projected_gradient_norm": [],
-        "relative_step": [],
-        "step_size": [],
-        "restarted": [],
-    }
-    converged = False
-    status = "max_iterations"
-
-    for iteration in range(1, max_iterations + 1):
-        restarted = False
-        while True:
-            objective, gradient, _ = _nearest_edm_objective_gradient(
-                extrapolated,
-                solver_target,
-                solver_weights,
-                array_module=array_module,
-            )
-
-            for _ in range(60):
-                step_size = 1.0 / lipschitz
-                candidate = _project_centered_psd(
-                    extrapolated - step_size * gradient,
-                    gram_eigenvalue_floor,
-                    array_module=array_module,
-                )
-                projection_count += 1
-                line_search_projection_count += 1
-                candidate_objective, candidate_gradient, _ = (
-                    _nearest_edm_objective_gradient(
-                        candidate,
-                        solver_target,
-                        solver_weights,
-                        array_module=array_module,
-                    )
-                )
-                record_gpu_memory()
-                proximal_delta = candidate - extrapolated
-                proximal_delta_norm_squared = solver_sum(
-                    proximal_delta * proximal_delta
-                )
-                majorizer = (
-                    objective
-                    + solver_sum(gradient * proximal_delta)
-                    + 0.5 * lipschitz * proximal_delta_norm_squared
-                )
-                slack = 1e-12 * max(1.0, abs(objective), abs(candidate_objective))
-                if candidate_objective <= majorizer + slack:
-                    break
-                lipschitz *= 2.0
-                backtracking_rejection_count += 1
-            else:
-                raise RuntimeError("nearest_edm backtracking line search failed")
-
-            monotone_slack = 1e-12 * max(
-                1.0, abs(current_objective), abs(candidate_objective)
-            )
-            if candidate_objective <= current_objective + monotone_slack:
-                break
-            if restarted:
-                raise RuntimeError("nearest_edm monotone restart failed")
-
-            extrapolated = B
-            momentum = 1.0
-            restarted = True
-            monotone_restart_count += 1
-
-        certificate = _project_centered_psd(
-            candidate - step_size * candidate_gradient,
-            gram_eigenvalue_floor,
-            array_module=array_module,
-        )
-        projection_count += 1
-        certificate_projection_count += 1
-        record_gpu_memory()
-        certificate_delta = candidate - certificate
-        projected_gradient_norm = lipschitz * solver_norm(certificate_delta)
-        gradient_norm = solver_norm(candidate_gradient)
-        relative_projected_gradient_norm = projected_gradient_norm / max(
-            gradient_norm, np.finfo(np.float64).tiny
-        )
-        accepted_delta = candidate - B
-        relative_step = solver_norm(accepted_delta) / max(solver_norm(B), 1.0)
-        weighted_rmse = np.sqrt(2.0 * candidate_objective / weight_sum)
-
-        history["iteration"].append(iteration)
-        history["objective"].append(candidate_objective)
-        history["weighted_rmse"].append(weighted_rmse)
-        history["projected_gradient_norm"].append(projected_gradient_norm)
-        history["relative_projected_gradient_norm"].append(
-            relative_projected_gradient_norm
-        )
-        history["relative_step"].append(relative_step)
-        history["step_size"].append(step_size)
-        history["restarted"].append(restarted)
-
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    "stage": "nearest_edm_initialization",
-                    "iteration": iteration,
-                    "total": max_iterations,
-                    "objective": candidate_objective,
-                    "weighted_rmse": weighted_rmse,
-                    "relative_projected_gradient_norm": (
-                        relative_projected_gradient_norm
-                    ),
-                    "relative_step": relative_step,
-                    "step_size": step_size,
-                    "restarted": restarted,
-                    "method": "nearest_edm",
-                    "general_method": "covariance_initialization",
-                    "use_gpu": bool(use_gpu),
-                }
-            )
-
-        previous_B = B
-        B = candidate
-        current_objective = candidate_objective
-        if projected_gradient_norm <= (
-            absolute_tolerance + relative_tolerance * gradient_norm
-        ):
-            converged = True
-            status = "optimality_tolerance"
-            break
-
-        next_momentum = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * momentum**2))
-        extrapolated = B + ((momentum - 1.0) / next_momentum) * (B - previous_B)
-        momentum = next_momentum
-        lipschitz *= 0.9
-
-    for key, values in history.items():
-        history[key] = np.asarray(values)
-
-    fitted_squared_distances = _squared_distances_from_gram(
-        B, array_module=array_module
-    )
-    if use_gpu:
-        fitted_squared_distances = cp.asnumpy(fitted_squared_distances)
-        B = cp.asnumpy(B)
-        cp.cuda.get_current_stream().synchronize()
-    wall_seconds = time.perf_counter() - start_time
-    final_objective = float(history["objective"][-1])
-    final_weighted_rmse = float(history["weighted_rmse"][-1])
-    final_projected_gradient_norm = float(history["projected_gradient_norm"][-1])
-    final_relative_projected_gradient_norm = float(
-        history["relative_projected_gradient_norm"][-1]
-    )
-    info = {
-        "converged": converged,
-        "status": status,
-        "message": (
-            "projected-gradient optimality tolerance reached"
-            if converged
-            else "maximum number of iterations reached"
-        ),
-        "iterations": int(history["iteration"][-1]),
-        "objective": final_objective,
-        "weighted_rmse": final_weighted_rmse,
-        "projected_gradient_norm": final_projected_gradient_norm,
-        "relative_projected_gradient_norm": final_relative_projected_gradient_norm,
-        "gram_eigenvalue_floor": gram_eigenvalue_floor,
-        "weight_sum": float(weight_sum),
-        "backend": "gpu" if use_gpu else "cpu",
-        "dtype": "float64",
-        "gpu_device": get_gpu_name() if use_gpu else None,
-        "cupy_version": cp.__version__ if use_gpu else None,
-        "wall_seconds": float(wall_seconds),
-        "projection_count": projection_count,
-        "line_search_projection_count": line_search_projection_count,
-        "certificate_projection_count": certificate_projection_count,
-        "backtracking_rejection_count": backtracking_rejection_count,
-        "monotone_restart_count": monotone_restart_count,
-        "gpu_memory_pool_baseline_used_bytes": (
-            gpu_memory_pool_baseline_used_bytes
-        ),
-        "gpu_memory_pool_maximum_used_bytes": (
-            gpu_memory_pool_maximum_used_bytes
-        ),
-        "gpu_memory_pool_baseline_total_bytes": (
-            gpu_memory_pool_baseline_total_bytes
-        ),
-        "gpu_memory_pool_maximum_total_bytes": (
-            gpu_memory_pool_maximum_total_bytes
-        ),
-        "history": history,
-    }
-    if not converged:
-        warnings.warn(
-            "nearest_edm reached max_iterations before satisfying the "
-            "projected-gradient optimality tolerance",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-
-    return fitted_squared_distances, B, info
-
-
 _COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE = 4096
 
 
@@ -2451,7 +1991,6 @@ def _validate_gaussian_covariance_inputs(
 
     return (
         observed,
-        pair_mask,
         pair_i,
         pair_j,
         target_pairs,
@@ -2913,28 +2452,13 @@ def _calibrate_gaussian_covariance_initial_scale(
 
 def _initialize_gaussian_reduced_gram(
     observed,
-    pair_mask,
     pair_i,
     pair_j,
-    inverse_variance,
     basis,
-    initialization,
     initial_connectivity,
-    initial_gram_floor_relative,
-    use_gpu=False,
-    progress_callback=None,
 ):
-    """Return the requested physical initialization for COV."""
-    if initialization not in {"rouse", "nearest_edm"}:
-        raise ValueError("initialization must be 'rouse' or 'nearest_edm'")
-    if initial_connectivity is not None and initialization == "nearest_edm":
-        raise ValueError(
-            "initial_connectivity cannot be combined with nearest_edm initialization"
-        )
-
+    """Return the Rouse or explicitly supplied connectivity initialization."""
     start_time = time.perf_counter()
-    n = observed.shape[0]
-    n_modes = n - 1
     if initial_connectivity is not None:
         reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
             initial_connectivity, basis
@@ -2944,7 +2468,7 @@ def _initialize_gaussian_reduced_gram(
             "minimum_internal_stiffness": float(eigenvalues[0]),
             "maximum_internal_stiffness": float(eigenvalues[-1]),
         }
-    elif initialization == "rouse":
+    else:
         (
             connectivity,
             observed_pair_mean_squared_distance,
@@ -2966,58 +2490,6 @@ def _initialize_gaussian_reduced_gram(
             "minimum_internal_stiffness": float(eigenvalues[0]),
             "maximum_internal_stiffness": float(eigenvalues[-1]),
         }
-    else:
-        normalized_weights = np.zeros_like(observed)
-        normalized_pair_weights = inverse_variance / float(
-            np.mean(inverse_variance)
-        )
-        normalized_weights[pair_i, pair_j] = normalized_pair_weights
-        normalized_weights[pair_j, pair_i] = normalized_pair_weights
-        projection_target = observed.copy()
-        projection_target[~pair_mask] = np.nan
-        np.fill_diagonal(projection_target, 0.0)
-        _, closest_gram, initializer = nearest_edm(
-            projection_target,
-            normalized_weights,
-            max_iterations=2000,
-            relative_tolerance=1e-8,
-            absolute_tolerance=1e-10,
-            use_gpu=use_gpu,
-            progress_callback=progress_callback,
-        )
-        gram_scale = float(np.trace(closest_gram) / n_modes)
-        if not np.isfinite(gram_scale) or gram_scale <= 0.0:
-            raise RuntimeError("nearest-EDM initialization has a nonpositive scale")
-        initial_floor = initial_gram_floor_relative * gram_scale
-        closest_gram = _project_centered_psd(closest_gram, initial_floor)
-        reduced_gram = basis.T @ closest_gram @ basis
-        initialization_info = {
-            "kind": "weighted_nearest_edm",
-            "nearest_edm_converged": bool(initializer["converged"]),
-            "nearest_edm_status": initializer["status"],
-            "nearest_edm_iterations": int(initializer["iterations"]),
-            "nearest_edm_weighted_rmse": float(initializer["weighted_rmse"]),
-            "nearest_edm_wall_seconds": float(initializer["wall_seconds"]),
-            "nearest_edm_projection_count": int(initializer["projection_count"]),
-            "dtype": initializer["dtype"],
-            "gpu_device": initializer["gpu_device"],
-            "cupy_version": initializer["cupy_version"],
-            "gpu_memory_pool_baseline_used_bytes": initializer[
-                "gpu_memory_pool_baseline_used_bytes"
-            ],
-            "gpu_memory_pool_maximum_used_bytes": initializer[
-                "gpu_memory_pool_maximum_used_bytes"
-            ],
-            "gpu_memory_pool_baseline_total_bytes": initializer[
-                "gpu_memory_pool_baseline_total_bytes"
-            ],
-            "gpu_memory_pool_maximum_total_bytes": initializer[
-                "gpu_memory_pool_maximum_total_bytes"
-            ],
-            "gram_scale": gram_scale,
-            "gram_eigenvalue_floor": initial_floor,
-            "backend": initializer["backend"],
-        }
 
     reduced_gram = 0.5 * (reduced_gram + reduced_gram.T)
     try:
@@ -3036,7 +2508,6 @@ def fit_gaussian_noise_covariance(
     noise_variance=None,
     *,
     relative_noise_std=None,
-    initialization="rouse",
     initial_connectivity=None,
     use_gpu=False,
     max_iterations=100,
@@ -3044,7 +2515,6 @@ def fit_gaussian_noise_covariance(
     absolute_tolerance=1e-10,
     cg_relative_tolerance=1e-4,
     cg_max_iterations=None,
-    initial_gram_floor_relative=1e-8,
     save_steps=None,
     progress_callback=None,
 ):
@@ -3058,10 +2528,10 @@ def fit_gaussian_noise_covariance(
     ``sigma_ij / Dobs_ij`` shared by all observed pairs. The latter produces
     ``v_ij = (relative_noise_std * Dobs_ij)**2``. With ``use_gpu=True``,
     Newton-CG and the once-per-fit exact blockwise data-Hessian setup run in
-    float64 on the GPU. The default Rouse initialization remains on the CPU;
-    the optional nearest-EDM initialization uses the requested backend. Every
-    initial Gram shape is exactly rescaled along its positive ray for the COV
-    objective before Newton starts.
+    float64 on the GPU. A Rouse chain initializes the covariance unless an
+    initial connectivity matrix is supplied. Every initial Gram shape is
+    exactly rescaled along its positive ray for the COV objective before
+    Newton starts.
     """
     if use_gpu and not is_gpu_available():
         raise RuntimeError(
@@ -3070,7 +2540,6 @@ def fit_gaussian_noise_covariance(
         )
     (
         observed,
-        pair_mask,
         pair_i,
         pair_j,
         target_pairs,
@@ -3093,11 +2562,6 @@ def fit_gaussian_noise_covariance(
         raise ValueError(
             "cg_relative_tolerance must lie strictly between zero and one"
         )
-    if not np.isfinite(initial_gram_floor_relative) or (
-        initial_gram_floor_relative <= 0.0
-    ):
-        raise ValueError("initial_gram_floor_relative must be positive and finite")
-
     n = observed.shape[0]
     n_modes = n - 1
     if cg_max_iterations is None:
@@ -3126,16 +2590,10 @@ def fit_gaussian_noise_covariance(
     )
     reduced_gram, initialization_info = _initialize_gaussian_reduced_gram(
         observed,
-        pair_mask,
         pair_i,
         pair_j,
-        inverse_variance,
         basis,
-        initialization,
         initial_connectivity,
-        initial_gram_floor_relative,
-        use_gpu=use_gpu,
-        progress_callback=progress_callback,
     )
 
     if use_gpu:

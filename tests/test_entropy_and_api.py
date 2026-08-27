@@ -356,13 +356,11 @@ def test_run_optimization_progress_callback_receives_structured_updates():
         (
             "hybrid",
             [
-                "Nearest EDM initialization",
                 "COV PDHG optimization",
                 "COV preconditioner",
                 "COV Newton optimization",
             ],
             {
-                "nearest_edm_initialization",
                 "covariance_preconditioner",
                 "covariance_optimization",
             },
@@ -370,19 +368,17 @@ def test_run_optimization_progress_callback_receives_structured_updates():
         ),
         (
             "pdhg",
-            ["Nearest EDM initialization", "COV PDHG optimization"],
-            {"nearest_edm_initialization", "covariance_optimization"},
+            ["COV PDHG optimization"],
+            {"covariance_optimization"},
             False,
         ),
         (
             "newton",
             [
-                "Nearest EDM initialization",
                 "COV preconditioner",
                 "COV Newton optimization",
             ],
             {
-                "nearest_edm_initialization",
                 "covariance_preconditioner",
                 "covariance_optimization",
             },
@@ -434,7 +430,6 @@ def test_cov_progress_distinguishes_pdhg_and_newton(
         input_format="text",
         method="COV",
         covariance_optimizer=optimizer,
-        covariance_initialization="nearest_edm",
         gaussian_noise_variance=0.1,
         iteration=200,
         no_xyzs=True,
@@ -552,7 +547,7 @@ def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
     assert parameters["covariance_initialization_resolved"] == "rouse"
 
 
-def test_run_optimization_cov_cmap_nearest_edm_ignores_missing_pairs(tmp_path):
+def test_run_optimization_cov_cmap_rouse_ignores_missing_pairs(tmp_path):
     """Direct contact input should preserve missing pairs through COV setup."""
     n = 6
     truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
@@ -570,7 +565,6 @@ def test_run_optimization_cov_cmap_nearest_edm_ignores_missing_pairs(tmp_path):
         input_format="npy",
         method="COV",
         gaussian_noise_relative_std=0.1,
-        covariance_initialization="nearest_edm",
         iteration=300,
         ignore_missing_data=True,
         not_normalize=True,
@@ -589,7 +583,7 @@ def test_run_optimization_cov_cmap_nearest_edm_ignores_missing_pairs(tmp_path):
 
     assert info["converged"]
     assert info["observed_pair_count"] == n * (n - 1) // 2 - len(missing_pairs)
-    assert info["initialization"]["kind"] == "weighted_nearest_edm"
+    assert info["initialization"]["kind"] == "rouse"
     assert parameters["missing_pairs"] == len(missing_pairs)
     assert bool(parameters["ignore_missing_data"]) is True
 
@@ -629,10 +623,6 @@ def test_run_optimization_cov_uses_gpu_backend():
     assert parameters["use_gpu_enabled"] is True
     assert parameters["covariance_initialization_backend"] == "cpu"
     assert parameters["covariance_initialization_wall_seconds"] >= 0.0
-    assert (
-        parameters["covariance_initialization_nearest_edm_projection_count"]
-        is None
-    )
     assert parameters["covariance_backend"] == "gpu"
     assert parameters["covariance_dtype"] == "float64"
     assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()
@@ -744,14 +734,16 @@ def test_legacy_optimize_no_longer_exposes_noisy_solver():
     assert not hasattr(model, "run_noisy")
 
 
-def test_cli_help_exposes_cov_solver_noise_and_initialization_contract():
+def test_cli_help_exposes_cov_solver_and_noise_contract():
     result = CliRunner().invoke(cli_main, ["--help"])
     parameter_names = {parameter.name for parameter in cli_main.params}
 
     assert result.exit_code == 0
+    assert not hasattr(HippsDimes, "nearest_edm")
+    assert not hasattr(numerics, "nearest_edm")
     assert "COV" in result.output
     assert "gaussian_noise_relative_std" in parameter_names
-    assert "covariance_initialization" in parameter_names
+    assert "covariance_initialization" not in parameter_names
     assert "covariance_optimizer" in parameter_names
     assert "covariance_relative_tolerance" in parameter_names
     assert "covariance_absolute_tolerance" in parameter_names

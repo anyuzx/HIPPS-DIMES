@@ -114,464 +114,6 @@ def test_a2dmap_theory():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
-def test_centered_psd_projection_constraints_and_idempotence():
-    """The EDM Gram projection should be centered, PSD, and idempotent."""
-    source = np.array(
-        [
-            [2.0, -3.0, 1.0],
-            [-3.0, -1.0, 4.0],
-            [1.0, 4.0, 0.5],
-        ]
-    )
-
-    projected = numerics._project_centered_psd(source)
-    projected_twice = numerics._project_centered_psd(projected)
-
-    assert np.allclose(projected, projected.T, atol=1e-12)
-    assert np.allclose(np.sum(projected, axis=1), 0.0, atol=1e-12)
-    assert np.min(np.linalg.eigvalsh(projected)) >= -1e-12
-    assert np.allclose(projected_twice, projected, rtol=1e-11, atol=1e-12)
-
-
-def test_centered_psd_projection_enforces_internal_eigenvalue_floor():
-    """A positive floor should preserve COM while bounding all internal modes."""
-    source = np.array(
-        [
-            [2.0, -3.0, 1.0, 0.5],
-            [-3.0, -1.0, 4.0, -2.0],
-            [1.0, 4.0, 0.5, 1.5],
-            [0.5, -2.0, 1.5, -0.5],
-        ]
-    )
-    floor = 0.25
-    n = len(source)
-    centering = np.eye(n) - np.ones((n, n)) / n
-
-    projected = numerics._project_centered_psd(source, floor)
-    projected_twice = numerics._project_centered_psd(projected, floor)
-    eigenvalues = np.linalg.eigvalsh(projected)
-
-    assert np.allclose(projected, projected.T, atol=1e-12)
-    assert np.allclose(np.sum(projected, axis=1), 0.0, atol=1e-12)
-    assert np.min(np.linalg.eigvalsh(projected - floor * centering)) >= -1e-12
-    assert np.count_nonzero(eigenvalues > 0.5 * floor) == n - 1
-    assert np.allclose(projected_twice, projected, rtol=1e-11, atol=1e-12)
-
-
-def test_nearest_edm_gradient_matches_finite_difference():
-    """The weighted unique-pair objective should have the implemented gradient."""
-    target = np.array(
-        [
-            [0.0, 1.0, 4.0],
-            [1.0, 0.0, 2.0],
-            [4.0, 2.0, 0.0],
-        ]
-    )
-    weights = np.array(
-        [
-            [0.0, 1.0, 0.5],
-            [1.0, 0.0, 2.0],
-            [0.5, 2.0, 0.0],
-        ]
-    )
-    source = np.array(
-        [
-            [1.0, -0.2, 0.3],
-            [-0.2, 0.5, -0.1],
-            [0.3, -0.1, 0.8],
-        ]
-    )
-    gram = numerics._project_centered_psd(source)
-    direction = np.array(
-        [
-            [0.2, -0.5, 0.7],
-            [-0.5, 0.4, 0.1],
-            [0.7, 0.1, -0.3],
-        ]
-    )
-
-    _, gradient, _ = numerics._nearest_edm_objective_gradient(
-        gram, target, weights
-    )
-    epsilon = 1e-6
-    forward, _, _ = numerics._nearest_edm_objective_gradient(
-        gram + epsilon * direction, target, weights
-    )
-    backward, _, _ = numerics._nearest_edm_objective_gradient(
-        gram - epsilon * direction, target, weights
-    )
-
-    finite_difference = (forward - backward) / (2.0 * epsilon)
-    assert finite_difference == pytest.approx(
-        np.sum(gradient * direction), rel=1e-8, abs=1e-9
-    )
-
-
-def test_nearest_edm_matches_analytic_three_point_solution_and_exports():
-    """The closest invalid three-point EDM has a closed-form boundary solution."""
-    target = np.array(
-        [
-            [0.0, 1.0, 1.0],
-            [1.0, 0.0, 9.0],
-            [1.0, 9.0, 0.0],
-        ]
-    )
-    expected = np.array(
-        [
-            [0.0, 19.0 / 9.0, 19.0 / 9.0],
-            [19.0 / 9.0, 0.0, 76.0 / 9.0],
-            [19.0 / 9.0, 76.0 / 9.0, 0.0],
-        ]
-    )
-
-    progress_events = []
-    fitted, gram, info = hipps_dimes.nearest_edm(
-        target, progress_callback=progress_events.append
-    )
-
-    assert info["converged"]
-    assert info["status"] == "optimality_tolerance"
-    assert np.allclose(fitted, expected, rtol=1e-8, atol=1e-9)
-    assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
-    assert np.min(np.linalg.eigvalsh(gram)) >= -1e-12
-    assert np.all(np.diff(info["history"]["objective"]) <= 1e-12)
-    assert info["backend"] == "cpu"
-    assert info["dtype"] == "float64"
-    assert info["gpu_device"] is None
-    assert info["cupy_version"] is None
-    assert info["wall_seconds"] >= 0.0
-    assert info["projection_count"] == (
-        1
-        + info["line_search_projection_count"]
-        + info["certificate_projection_count"]
-    )
-    assert info["certificate_projection_count"] == info["iterations"]
-    assert info["gpu_memory_pool_baseline_used_bytes"] is None
-    assert info["gpu_memory_pool_maximum_used_bytes"] is None
-    assert info["gpu_memory_pool_baseline_total_bytes"] is None
-    assert info["gpu_memory_pool_maximum_total_bytes"] is None
-    assert len(progress_events) == info["iterations"]
-    assert all(
-        event["stage"] == "nearest_edm_initialization"
-        and event["use_gpu"] is False
-        for event in progress_events
-    )
-    assert HippsDimes.nearest_edm is hipps_dimes.nearest_edm
-
-
-def test_nearest_edm_leaves_valid_squared_distances_unchanged():
-    coordinates = np.array(
-        [
-            [-1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 0.0],
-            [0.0, -1.0],
-        ]
-    )
-    differences = coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
-    target = np.sum(differences * differences, axis=-1)
-
-    fitted, gram, info = hipps_dimes.nearest_edm(target)
-
-    assert info["converged"]
-    assert info["objective"] == pytest.approx(0.0, abs=1e-20)
-    assert np.allclose(fitted, target, rtol=1e-10, atol=1e-11)
-    assert np.allclose(np.sum(gram, axis=1), 0.0, atol=1e-12)
-
-
-def test_nearest_edm_floor_has_analytic_zero_target_solution():
-    """The smallest feasible Gram matrix should fit an all-zero target best."""
-    n = 4
-    floor = 0.2
-    target = np.zeros((n, n))
-    centering = np.eye(n) - np.ones((n, n)) / n
-    expected_gram = floor * centering
-    expected_fitted = np.full((n, n), 2.0 * floor)
-    np.fill_diagonal(expected_fitted, 0.0)
-
-    fitted, gram, info = hipps_dimes.nearest_edm(
-        target, gram_eigenvalue_floor=floor
-    )
-
-    assert info["converged"]
-    assert info["gram_eigenvalue_floor"] == pytest.approx(floor)
-    assert np.allclose(gram, expected_gram, rtol=1e-11, atol=1e-12)
-    assert np.allclose(fitted, expected_fitted, rtol=1e-11, atol=1e-12)
-    assert np.count_nonzero(np.linalg.eigvalsh(gram) > 0.5 * floor) == n - 1
-
-
-def test_nearest_edm_honors_weights_and_is_invariant_to_weight_scale():
-    """Pair weights should move the optimum without depending on global scale."""
-    target = np.array(
-        [
-            [0.0, 1.0, 1.0],
-            [1.0, 0.0, 9.0],
-            [1.0, 9.0, 0.0],
-        ]
-    )
-    leg_weight = 2.0
-    base_weight = 0.25
-    weights = np.array(
-        [
-            [0.0, leg_weight, leg_weight],
-            [leg_weight, 0.0, base_weight],
-            [leg_weight, base_weight, 0.0],
-        ]
-    )
-    expected_leg = (leg_weight + 18.0 * base_weight) / (
-        leg_weight + 8.0 * base_weight
-    )
-    expected = np.array(
-        [
-            [0.0, expected_leg, expected_leg],
-            [expected_leg, 0.0, 4.0 * expected_leg],
-            [expected_leg, 4.0 * expected_leg, 0.0],
-        ]
-    )
-
-    fitted, _, info = hipps_dimes.nearest_edm(target, weights)
-    scaled_fitted, _, scaled_info = hipps_dimes.nearest_edm(
-        target, 7.0 * weights
-    )
-
-    assert info["converged"]
-    assert scaled_info["converged"]
-    assert np.allclose(fitted, expected, rtol=1e-8, atol=1e-9)
-    assert np.allclose(scaled_fitted, fitted, rtol=1e-10, atol=1e-11)
-
-
-def test_nearest_edm_completes_missing_pairs_without_imputation():
-    """NaNs should remove pairs from the objective while retaining a valid EDM."""
-    coordinates = np.array(
-        [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [1.0, 1.0],
-        ]
-    )
-    differences = coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
-    target = np.sum(differences * differences, axis=-1)
-    target[0, 3] = np.nan
-    target[3, 0] = np.nan
-
-    fitted, gram, info = hipps_dimes.nearest_edm(target)
-    observed = np.isfinite(target) & ~np.eye(len(target), dtype=bool)
-
-    assert info["converged"]
-    assert np.allclose(fitted[observed], target[observed], atol=1e-7)
-    assert np.allclose(np.diag(fitted), 0.0)
-    assert np.min(fitted) >= -1e-12
-    assert np.min(np.linalg.eigvalsh(gram)) >= -1e-12
-
-
-@pytest.mark.parametrize(
-    ("target", "weights", "message"),
-    [
-        (np.ones((2, 3)), None, "square"),
-        (np.array([[0.0, np.inf], [np.inf, 0.0]]), None, "infinite"),
-        (np.array([[0.0, 1.0], [2.0, 0.0]]), None, "symmetric"),
-        (
-            np.array([[0.0, 1.0], [1.0, 0.0]]),
-            np.array([[0.0, -1.0], [-1.0, 0.0]]),
-            "nonnegative",
-        ),
-        (
-            np.array([[0.0, np.nan], [np.nan, 0.0]]),
-            np.array([[0.0, 1.0], [1.0, 0.0]]),
-            "finite distance",
-        ),
-    ],
-)
-def test_nearest_edm_rejects_invalid_inputs(target, weights, message):
-    with pytest.raises(ValueError, match=message):
-        hipps_dimes.nearest_edm(target, weights)
-
-
-def test_nearest_edm_reports_iteration_limit():
-    target = np.array(
-        [
-            [0.0, 1.0, 1.0],
-            [1.0, 0.0, 9.0],
-            [1.0, 9.0, 0.0],
-        ]
-    )
-
-    with pytest.warns(RuntimeWarning, match="max_iterations"):
-        _, _, info = hipps_dimes.nearest_edm(
-            target,
-            max_iterations=1,
-            relative_tolerance=1e-15,
-            absolute_tolerance=0.0,
-        )
-
-    assert not info["converged"]
-    assert info["status"] == "max_iterations"
-    assert info["iterations"] == 1
-
-
-@pytest.mark.parametrize("floor", [-0.1, np.nan, np.inf, True, [0.1]])
-def test_nearest_edm_rejects_invalid_gram_eigenvalue_floor(floor):
-    target = np.array([[0.0, 1.0], [1.0, 0.0]])
-
-    with pytest.raises(ValueError, match="finite nonnegative scalar"):
-        hipps_dimes.nearest_edm(target, gram_eigenvalue_floor=floor)
-
-
-def test_nearest_edm_gpu_request_fails_without_available_gpu(monkeypatch):
-    target = np.array([[0.0, 1.0], [1.0, 0.0]])
-    monkeypatch.setattr(numerics, "_CUPY_AVAILABLE", False)
-
-    with pytest.raises(RuntimeError, match="CuPy.*accessible CUDA GPU"):
-        hipps_dimes.nearest_edm(target, use_gpu=True)
-
-
-@pytest.mark.skipif(
-    not numerics.is_gpu_available(),
-    reason="requires CuPy and an accessible CUDA GPU",
-)
-def test_nearest_edm_gpu_helpers_match_cpu(working_cupy):
-    """The shared float64 projection and objective helpers should match."""
-    source = np.array(
-        [
-            [1.0, -0.4, 0.3, 0.2],
-            [-0.4, 0.8, -0.1, 0.4],
-            [0.3, -0.1, 0.5, -0.2],
-            [0.2, 0.4, -0.2, 1.2],
-        ]
-    )
-    target = np.array(
-        [
-            [0.0, 1.0, 4.0, 2.0],
-            [1.0, 0.0, 2.5, 3.0],
-            [4.0, 2.5, 0.0, 1.5],
-            [2.0, 3.0, 1.5, 0.0],
-        ]
-    )
-    weights = np.array(
-        [
-            [0.0, 1.0, 0.5, 0.0],
-            [1.0, 0.0, 2.0, 0.75],
-            [0.5, 2.0, 0.0, 1.25],
-            [0.0, 0.75, 1.25, 0.0],
-        ]
-    )
-    floor = 0.05
-
-    cpu_projection = numerics._project_centered_psd(source, floor)
-    gpu_projection = numerics._project_centered_psd(
-        working_cupy.asarray(source),
-        floor,
-        array_module=working_cupy,
-    )
-    cpu_objective, cpu_gradient, cpu_fitted = (
-        numerics._nearest_edm_objective_gradient(
-            cpu_projection, target, weights
-        )
-    )
-    gpu_objective, gpu_gradient, gpu_fitted = (
-        numerics._nearest_edm_objective_gradient(
-            gpu_projection,
-            working_cupy.asarray(target),
-            working_cupy.asarray(weights),
-            array_module=working_cupy,
-        )
-    )
-
-    assert np.allclose(
-        working_cupy.asnumpy(gpu_projection),
-        cpu_projection,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    assert gpu_objective == pytest.approx(cpu_objective, rel=1e-12, abs=1e-12)
-    assert np.allclose(
-        working_cupy.asnumpy(gpu_gradient), cpu_gradient, rtol=1e-12, atol=1e-12
-    )
-    assert np.allclose(
-        working_cupy.asnumpy(gpu_fitted), cpu_fitted, rtol=1e-12, atol=1e-12
-    )
-
-
-@pytest.mark.skipif(
-    not numerics.is_gpu_available(),
-    reason="requires CuPy and an accessible CUDA GPU",
-)
-@pytest.mark.parametrize("case", ["weighted_floor", "missing_pair"])
-def test_nearest_edm_gpu_matches_cpu_end_to_end(case, working_cupy):
-    """GPU nearest EDM should preserve weights, floors, and missing-pair logic."""
-    if case == "weighted_floor":
-        target = np.array(
-            [
-                [0.0, 1.0, 1.0],
-                [1.0, 0.0, 9.0],
-                [1.0, 9.0, 0.0],
-            ]
-        )
-        weights = np.array(
-            [
-                [0.0, 2.0, 2.0],
-                [2.0, 0.0, 0.25],
-                [2.0, 0.25, 0.0],
-            ]
-        )
-        floor = 1e-3
-    else:
-        coordinates = np.array(
-            [
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [0.0, 1.0],
-                [1.0, 1.0],
-            ]
-        )
-        differences = (
-            coordinates[:, np.newaxis, :] - coordinates[np.newaxis, :, :]
-        )
-        target = np.sum(differences * differences, axis=-1)
-        target[0, 3] = np.nan
-        target[3, 0] = np.nan
-        weights = None
-        floor = 0.0
-
-    options = {
-        "gram_eigenvalue_floor": floor,
-        "max_iterations": 1000,
-        "relative_tolerance": 1e-8,
-        "absolute_tolerance": 1e-10,
-    }
-    cpu = hipps_dimes.nearest_edm(target, weights, **options)
-    progress_events = []
-    gpu = hipps_dimes.nearest_edm(
-        target,
-        weights,
-        use_gpu=True,
-        progress_callback=progress_events.append,
-        **options,
-    )
-
-    assert cpu[2]["converged"]
-    assert gpu[2]["converged"]
-    assert isinstance(gpu[0], np.ndarray)
-    assert isinstance(gpu[1], np.ndarray)
-    assert gpu[2]["backend"] == "gpu"
-    assert gpu[2]["dtype"] == "float64"
-    assert gpu[2]["gpu_device"] == numerics.get_gpu_name()
-    assert gpu[2]["cupy_version"] == working_cupy.__version__
-    assert gpu[2]["wall_seconds"] >= 0.0
-    assert gpu[2]["gpu_memory_pool_maximum_used_bytes"] >= gpu[2][
-        "gpu_memory_pool_baseline_used_bytes"
-    ]
-    assert gpu[2]["gpu_memory_pool_maximum_total_bytes"] >= gpu[2][
-        "gpu_memory_pool_baseline_total_bytes"
-    ]
-    assert gpu[2]["certificate_projection_count"] == gpu[2]["iterations"]
-    assert len(progress_events) == gpu[2]["iterations"]
-    assert all(event["use_gpu"] for event in progress_events)
-    assert np.allclose(gpu[0], cpu[0], rtol=1e-7, atol=1e-8)
-    assert np.allclose(gpu[1], cpu[1], rtol=1e-7, atol=1e-8)
-
-
 def test_gaussian_covariance_objective_gradient_matches_finite_difference():
     """The calibrated COV objective should expose its true matrix gradient."""
     n = 5
@@ -845,7 +387,7 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
 
 
 def test_gaussian_covariance_absolute_noise_initializations_match():
-    """All scalar-calibrated starts should reach the homoskedastic optimum."""
+    """Rouse and restart starts should reach the homoskedastic optimum."""
     target = _rouse_squared_distance_target()
     variance = 0.02
     solver_options = {
@@ -858,12 +400,6 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
         variance,
         **solver_options,
     )
-    nearest = HippsDimes.fit_gaussian_noise_covariance(
-        target,
-        variance,
-        initialization="nearest_edm",
-        **solver_options,
-    )
     provided = HippsDimes.fit_gaussian_noise_covariance(
         target,
         variance,
@@ -873,7 +409,7 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
         **solver_options,
     )
 
-    for result in (rouse, nearest, provided):
+    for result in (rouse, provided):
         assert result[3]["converged"]
         scalar_calibration = result[3]["initialization"]["scalar_calibration"]
         assert scalar_calibration["scale_factor"] > 0.0
@@ -881,16 +417,7 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
             "objective_before"
         ]
     assert rouse[3]["noise_model"] == "homoskedastic_absolute_variance"
-    assert nearest[3]["initialization"]["kind"] == "weighted_nearest_edm"
     assert provided[3]["initialization"]["kind"] == "provided_connectivity"
-    assert nearest[3]["initialization"]["backend"] == "cpu"
-    assert nearest[3]["initialization"]["nearest_edm_wall_seconds"] >= 0.0
-    assert nearest[3]["initialization"]["nearest_edm_projection_count"] > 0
-    assert nearest[3]["initialization"]["wall_seconds"] >= nearest[3][
-        "initialization"
-    ]["nearest_edm_wall_seconds"]
-    assert np.allclose(rouse[0], nearest[0], rtol=1e-8, atol=1e-9)
-    assert np.allclose(rouse[2], nearest[2], rtol=1e-8, atol=1e-9)
     assert np.allclose(rouse[0], provided[0], rtol=1e-8, atol=1e-9)
     assert np.allclose(rouse[2], provided[2], rtol=1e-8, atol=1e-9)
 
@@ -937,19 +464,6 @@ def test_gaussian_covariance_rejects_invalid_noise_contract(
             target,
             noise_variance,
             relative_noise_std=relative_noise_std,
-        )
-
-
-def test_gaussian_covariance_rejects_nearest_edm_with_connectivity():
-    target = _rouse_squared_distance_target(4)
-    connectivity = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
-
-    with pytest.raises(ValueError, match="cannot be combined"):
-        HippsDimes.fit_gaussian_noise_covariance(
-            target,
-            0.1,
-            initialization="nearest_edm",
-            initial_connectivity=connectivity,
         )
 
 
@@ -1057,13 +571,13 @@ def test_gaussian_covariance_gpu_kernels_match_cpu(working_cupy):
     "noise_options",
     [
         {"relative_noise_std": 0.05},
-        {"noise_variance": 0.02, "initialization": "nearest_edm"},
+        {"noise_variance": 0.02},
     ],
 )
 def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     noise_options, working_cupy
 ):
-    """GPU COV should match CPU for both noise models and both initializers."""
+    """GPU COV should match CPU for both noise models."""
     target = _rouse_squared_distance_target(6)
     solver_options = {
         "max_iterations": 30,
@@ -1107,14 +621,7 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
         "covariance_preconditioner",
         "covariance_optimization",
     }
-    if noise_options.get("initialization") == "nearest_edm":
-        expected_stages.add("nearest_edm_initialization")
-        assert gpu[3]["initialization"]["backend"] == "gpu"
-        assert gpu[3]["initialization"]["gpu_device"] == numerics.get_gpu_name()
-        assert gpu[3]["initialization"]["nearest_edm_wall_seconds"] >= 0.0
-        assert gpu[3]["initialization"]["nearest_edm_projection_count"] > 0
-    else:
-        assert gpu[3]["initialization"]["backend"] == "cpu"
+    assert gpu[3]["initialization"]["backend"] == "cpu"
     assert {event["stage"] for event in progress_events} == expected_stages
     assert all(event["use_gpu"] for event in progress_events)
 

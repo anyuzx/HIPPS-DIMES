@@ -19,7 +19,6 @@ from .numerics import *  # noqa: F401,F403
 
 
 _COVARIANCE_PROGRESS_STAGES = {
-    'nearest_edm_initialization': ('Nearest EDM initialization', 'iteration'),
     'covariance_preconditioner': ('COV preconditioner', 'block'),
 }
 
@@ -67,16 +66,7 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
             )
             current_stage = stage_key
 
-        if stage == 'nearest_edm_initialization':
-            progress_bar.set_postfix(
-                objective=f"{event['objective']:.3e}",
-                weighted_rmse=f"{event['weighted_rmse']:.3e}",
-                relative_gradient=(
-                    f"{event['relative_projected_gradient_norm']:.3e}"
-                ),
-                refresh=False,
-            )
-        elif stage == 'covariance_preconditioner':
+        if stage == 'covariance_preconditioner':
             progress_bar.set_postfix(
                 pairs=f"{event['pairs_completed']}/{event['pair_count']}",
                 refresh=False,
@@ -315,7 +305,6 @@ def run_optimization(input_path=None,
                      reg='L2',
                      gaussian_noise_variance=0.0,
                      gaussian_noise_relative_std=None,
-                     covariance_initialization='rouse',
                      covariance_optimizer='hybrid',
                      covariance_relative_tolerance=1e-5,
                      covariance_absolute_tolerance=1e-10,
@@ -377,8 +366,6 @@ def run_optimization(input_path=None,
         Positive shared relative standard deviation ``sigma_ij / Dobs_ij``.
         COV converts it to ``variance_ij = (value * Dobs_ij)**2`` after input
         conversion and missing-data handling.
-    covariance_initialization : {'rouse', 'nearest_edm'}, default='rouse'
-        Initialization used by COV when no connectivity matrix is supplied.
     covariance_optimizer : {'hybrid', 'pdhg', 'newton'}, default='hybrid'
         Optimizer used for the Gaussian COV objective. The hybrid default uses
         PDHG globally and Newton-CG locally. Both component solvers remain
@@ -408,10 +395,10 @@ def run_optimization(input_path=None,
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
         If True, use CuPy GPU acceleration. All COV optimizers use float64
-        throughout, and a requested nearest-EDM initializer runs on the same
-        GPU. Newton-CG additionally builds its exact data-Hessian diagonal
-        preconditioner once in bounded pair blocks. COV fails clearly if no
-        CUDA GPU is accessible. Legacy IS/GD retain their existing behavior.
+        throughout. Newton-CG additionally builds its exact data-Hessian
+        diagonal preconditioner once in bounded pair blocks. COV fails clearly
+        if no CUDA GPU is accessible. Legacy IS/GD retain their existing
+        behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -462,10 +449,9 @@ def run_optimization(input_path=None,
         Payload keys include iteration, total, loss, entropy,
         iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
     show_progress : bool, default=True
-        Whether to render solver progress bars. COV reports nearest-EDM
-        initialization and the selected optimizer separately; Newton also
-        reports preconditioner construction. Set to False when consuming
-        progress_callback programmatically.
+        Whether to render solver progress bars. COV reports the selected
+        optimizer and Newton preconditioner construction separately. Set to
+        False when consuming progress_callback programmatically.
         
     Returns
     -------
@@ -584,10 +570,6 @@ def run_optimization(input_path=None,
             raise ValueError(
                 "gaussian_noise_relative_std must be a positive finite scalar"
             )
-    if covariance_initialization not in {'rouse', 'nearest_edm'}:
-        raise ValueError(
-            "covariance_initialization must be 'rouse' or 'nearest_edm'"
-        )
     if covariance_optimizer not in {'hybrid', 'pdhg', 'newton'}:
         raise ValueError(
             "covariance_optimizer must be 'hybrid', 'pdhg', or 'newton'"
@@ -674,19 +656,11 @@ def run_optimization(input_path=None,
             )
         if gpu_float32:
             raise ValueError("COV supports float64 only; gpu_float32 is not allowed")
-        if connectivity_matrix is not None and covariance_initialization == 'nearest_edm':
-            raise ValueError(
-                "connectivity_matrix cannot be combined with nearest_edm initialization"
-            )
     else:
         if has_absolute_noise or has_relative_noise:
             raise ValueError(
                 "Gaussian-noise options are supported only with method='COV'; "
                 "legacy noisy IS/GD does not optimize the calibrated Gaussian objective"
-            )
-        if covariance_initialization != 'rouse':
-            raise ValueError(
-                "covariance_initialization is supported only with method='COV'"
             )
         if covariance_optimizer != 'hybrid':
             raise ValueError(
@@ -1132,7 +1106,7 @@ def run_optimization(input_path=None,
                     "Initialization",
                     "provided connectivity"
                     if connectivity_matrix is not None
-                    else covariance_initialization,
+                    else "Rouse",
                 )
                 if has_absolute_noise:
                     opt_table.add_row(
@@ -1222,7 +1196,6 @@ def run_optimization(input_path=None,
         try:
             covariance_solver_arguments = {
                 'relative_noise_std': gaussian_noise_relative_std,
-                'initialization': covariance_initialization,
                 'initial_connectivity': connectivity_matrix,
                 'use_gpu': use_gpu,
                 'max_iterations': iteration,
@@ -1368,9 +1341,6 @@ def run_optimization(input_path=None,
             if covariance_optimization_info is not None
             else None
         ),
-        'covariance_initialization_requested': (
-            covariance_initialization if method == 'COV' else None
-        ),
         'covariance_optimizer_requested': (
             covariance_optimizer if method == 'COV' else None
         ),
@@ -1434,13 +1404,6 @@ def run_optimization(input_path=None,
         ),
         'covariance_initialization_wall_seconds': (
             covariance_optimization_info['initialization']['wall_seconds']
-            if covariance_optimization_info is not None
-            else None
-        ),
-        'covariance_initialization_nearest_edm_projection_count': (
-            covariance_optimization_info['initialization'].get(
-                'nearest_edm_projection_count'
-            )
             if covariance_optimization_info is not None
             else None
         ),

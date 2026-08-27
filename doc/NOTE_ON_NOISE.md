@@ -88,9 +88,9 @@ IS, GD, and DI remain available for their noiseless contracts.
 COV uses a Rouse chain calibrated over exactly the observed pairs by default:
 `k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Its unweighted
 observed-pair mean squared distance therefore matches the target without
-imputing missing pairs. A weighted nearest-EDM initialization is optional.
-Initialization changes only the starting point; it does not add a Rouse prior
-or change the COV objective.
+imputing missing pairs. An explicitly supplied connectivity matrix may instead
+be used to restart a fit. Initialization changes only the starting point; it
+does not add a Rouse prior or change the COV objective.
 
 Every resulting initial shape is then optimally rescaled for the actual COV
 objective. Let $B_0$ be its positive-definite internal Gram matrix,
@@ -117,11 +117,11 @@ The unique positive minimizer is
 s^*=\frac{c+\sqrt{c^2+6ma}}{2a}.
 \]
 
-This exact scalar step is applied to Rouse, weighted nearest-EDM, and supplied
-connectivity initializations before the selected optimizer. It preserves feasibility, supports
-both noise models without imputing missing pairs, and changes a Rouse spring
-constant from $k_0$ to $k_0/s^*$. The initialization metadata records the
-scale and the COV objective before and after calibration.
+This exact scalar step is applied to Rouse and supplied-connectivity
+initializations before the selected optimizer. It preserves feasibility,
+supports both noise models without imputing missing pairs, and changes a Rouse
+spring constant from $k_0$ to $k_0/s^*$. The initialization metadata records
+the scale and the COV objective before and after calibration.
 
 ## COV optimizers and convergence
 
@@ -156,9 +156,8 @@ $10^{-8}$ value remains available for small, well-conditioned tests.
 The CPU and GPU backends optimize the same objective. The GPU path uses float64
 for PDHG and Newton-CG matrix operations. It requires CuPy and an accessible
 CUDA GPU and does not silently fall back to the CPU. Rouse initialization is
-computed on the CPU. Weighted nearest-EDM initialization uses the selected
-backend; its initialized Gram matrix is then passed to the COV solver. Final
-fitted matrices and saved checkpoints are NumPy arrays.
+computed on the CPU. Final fitted matrices and saved checkpoints are NumPy
+arrays.
 
 When Newton is selected, both backends construct the exact diagonal of the
 Gaussian data Hessian as its preconditioner. For pair vector

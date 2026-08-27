@@ -38,7 +38,6 @@ def _parse_save_steps(save_steps_str):
 @click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
 @click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Positive homoskedastic variance on squared-distance constraints. Supported only with --method COV and mutually exclusive with --gaussian-noise-relative-std.')
 @click.option('--gaussian-noise-relative-std', type=click.FloatRange(0, max=None), default=None, help='Positive shared relative standard deviation sigma_ij / Dobs_ij. COV converts this after input preprocessing to variance_ij=(value*Dobs_ij)^2.')
-@click.option('--covariance-initialization', type=click.Choice(['rouse', 'nearest-edm'], case_sensitive=True), default='rouse', show_default=True, help='COV initialization when no connectivity matrix is supplied.')
 @click.option('--covariance-optimizer', type=click.Choice(['hybrid', 'pdhg', 'newton'], case_sensitive=True), default='hybrid', show_default=True, help='Optimizer for method COV. The hybrid default uses PDHG globally and Newton-CG locally; both standalone solvers remain available.')
 @click.option('--covariance-relative-tolerance', type=click.FloatRange(0, max=None), default=1e-5, show_default=True, help='Relative KKT convergence tolerance for method COV.')
 @click.option('--covariance-absolute-tolerance', type=click.FloatRange(0, max=None), default=1e-10, show_default=True, help='Absolute internal KKT convergence tolerance for method COV.')
@@ -54,8 +53,7 @@ def _parse_save_steps(save_steps_str):
     help=(
         'Use GPU acceleration via CuPy. All COV optimizers run in float64; '
         'Newton builds its exact blockwise data-Hessian diagonal once per fit. '
-        'A requested nearest-EDM initializer also runs on the GPU. Requires an '
-        'accessible CUDA GPU; there is no silent CPU fallback.'
+        'Requires an accessible CUDA GPU; there is no silent CPU fallback.'
     ),
 )
 @click.option(
@@ -83,7 +81,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-pickle', is_flag=True, default=False, show_default=True, help='Save the returned results dictionary to {output_prefix}_HIPPS_DIMES_results.pkl and suppress the default text/CSV/XYZ file outputs')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, gaussian_noise_relative_std, covariance_initialization, covariance_optimizer, covariance_relative_tolerance, covariance_absolute_tolerance, covariance_handoff_relative_tolerance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, gaussian_noise_relative_std, covariance_optimizer, covariance_relative_tolerance, covariance_absolute_tolerance, covariance_handoff_relative_tolerance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -105,7 +103,6 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         reg=reg,
         gaussian_noise_variance=gaussian_noise_variance,
         gaussian_noise_relative_std=gaussian_noise_relative_std,
-        covariance_initialization=covariance_initialization.replace('-', '_'),
         covariance_optimizer=covariance_optimizer,
         covariance_relative_tolerance=covariance_relative_tolerance,
         covariance_absolute_tolerance=covariance_absolute_tolerance,

@@ -286,7 +286,6 @@ def test_pdhg_reaches_same_small_system_optimum_as_newton():
         max_iterations=100,
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
-        initialization="nearest_edm",
     )
     fitted, gram, connectivity, info = (
         HippsDimes.fit_gaussian_noise_covariance_pdhg(
@@ -392,7 +391,6 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     reference = HippsDimes.fit_gaussian_noise_covariance(
         target,
         variance,
-        initialization="nearest_edm",
         max_iterations=100,
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
@@ -570,7 +568,6 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
         gaussian_noise_relative_std=(
             metadata["covariance_model"]["relative_noise_std"]
         ),
-        covariance_initialization="rouse",
         covariance_relative_tolerance=solver["relative_tolerance"],
         covariance_absolute_tolerance=solver["absolute_tolerance"],
         iteration=solver["maximum_iterations"],

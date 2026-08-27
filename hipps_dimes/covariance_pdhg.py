@@ -366,13 +366,11 @@ def fit_gaussian_noise_covariance_pdhg(
     noise_variance=None,
     *,
     relative_noise_std=None,
-    initialization="rouse",
     initial_connectivity=None,
     use_gpu=False,
     max_iterations=1000,
     relative_tolerance=1e-5,
     absolute_tolerance=1e-10,
-    initial_gram_floor_relative=1e-8,
     save_steps=None,
     progress_callback=None,
     theta=1.0,
@@ -411,7 +409,6 @@ def fit_gaussian_noise_covariance_pdhg(
         )
     (
         observed,
-        pair_mask,
         pair_i,
         pair_j,
         target_pairs,
@@ -464,16 +461,10 @@ def fit_gaussian_noise_covariance_pdhg(
     reduced_gram, initialization_info = (
         _num._initialize_gaussian_reduced_gram(
             observed,
-            pair_mask,
             pair_i,
             pair_j,
-            inverse_variance,
             basis,
-            initialization,
             initial_connectivity,
-            initial_gram_floor_relative,
-            use_gpu=use_gpu,
-            progress_callback=progress_callback,
         )
     )
 
@@ -1112,21 +1103,19 @@ def fit_gaussian_noise_covariance_hybrid(
     noise_variance=None,
     *,
     relative_noise_std=None,
-    initialization="rouse",
     initial_connectivity=None,
     use_gpu=False,
     max_iterations=1000,
     relative_tolerance=1e-5,
     absolute_tolerance=1e-10,
     handoff_relative_tolerance=1e-3,
-    initial_gram_floor_relative=1e-8,
     save_steps=None,
     progress_callback=None,
 ):
     """Fit COV globally with PDHG and finish locally with Newton-CG.
 
-    PDHG starts from the requested physical initialization and runs until its
-    independently certified KKT residual reaches
+    PDHG starts from a Rouse chain or an explicitly supplied connectivity
+    matrix and runs until its independently certified KKT residual reaches
     ``handoff_relative_tolerance``. The returned PDHG connectivity then
     initializes the existing centered Newton-CG solver. ``max_iterations`` is
     a single total update budget shared by both phases. The final returned
@@ -1191,13 +1180,11 @@ def fit_gaussian_noise_covariance_hybrid(
         squared_distances,
         noise_variance,
         relative_noise_std=relative_noise_std,
-        initialization=initialization,
         initial_connectivity=initial_connectivity,
         use_gpu=use_gpu,
         max_iterations=max_iterations,
         relative_tolerance=handoff_relative_tolerance,
         absolute_tolerance=absolute_tolerance,
-        initial_gram_floor_relative=initial_gram_floor_relative,
         save_steps=sorted(save_steps_set),
         progress_callback=phase_progress_callback("pdhg", 0),
         _eliminated_kkt_stopping=True,
@@ -1274,13 +1261,11 @@ def fit_gaussian_noise_covariance_hybrid(
         squared_distances,
         noise_variance,
         relative_noise_std=relative_noise_std,
-        initialization="rouse",
         initial_connectivity=connectivity,
         use_gpu=use_gpu,
         max_iterations=remaining_iterations,
         relative_tolerance=relative_tolerance,
         absolute_tolerance=absolute_tolerance,
-        initial_gram_floor_relative=initial_gram_floor_relative,
         save_steps=newton_save_steps,
         progress_callback=phase_progress_callback(
             "newton", pdhg_iterations
@@ -1291,7 +1276,6 @@ def fit_gaussian_noise_covariance_hybrid(
     newton_iterations = int(newton_info["iterations"])
 
     (
-        _,
         _,
         pair_i,
         pair_j,

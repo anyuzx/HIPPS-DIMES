@@ -147,7 +147,6 @@ This script will generate several files:
 - `-r, --reg`: Specify the type of regularization. Options: L1, L2 (default). This option should be used together with option `-l`.
 - `--gaussian-noise-variance`: Positive scalar absolute variance on squared-distance constraints. COV only.
 - `--gaussian-noise-relative-std`: Positive scalar relative standard deviation `sigma_ij / Dobs_ij`. COV converts it to pair variance `(value * Dobs_ij)^2` after preprocessing. Mutually exclusive with `--gaussian-noise-variance`.
-- `--covariance-initialization`: COV start, either `rouse` (default) or `nearest-edm`. A supplied connectivity matrix remains the explicit restart initialization.
 - `--covariance-optimizer`: COV optimizer: `hybrid` (default), `pdhg`, or `newton`.
 - `--covariance-relative-tolerance`: Relative COV KKT tolerance. Default: `1e-5`.
 - `--covariance-absolute-tolerance`: Absolute internal COV KKT tolerance. Default: `1e-10`.
@@ -158,8 +157,8 @@ This script will generate several files:
 - `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
 - `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
 - `--use-gpu`: Enable GPU acceleration via CuPy. All COV optimizers use
-  float64; a requested nearest-EDM initializer also runs on the GPU. COV fails
-  rather than silently falling back when CUDA is unavailable.
+  float64. COV fails rather than silently falling back when CUDA is
+  unavailable.
 - `--gpu-float32`: Use float32 for legacy GPU IS/GD. COV is float64-only.
 - `--save-steps`: Comma-separated list of iteration steps at which to save the connectivity matrix. Example: `--save-steps 1000,5000,10000`. Files are saved as `{output_prefix}_connectivity_matrix_iter{step}.txt`. When used as a library (without `output_prefix`), connectivity matrices at these steps are still returned in `results['connectivity_matrix_at_steps']`.
 - `--eigh-threads`: Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, the backend default is used. Set to 1 for single-threaded runs.
@@ -189,22 +188,20 @@ over internal Gram matrices `B` that remain strictly positive definite. The
 default start is a Rouse chain calibrated over exactly the observed pairs:
 `k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Thus its unweighted
 observed-pair mean squared distance matches the target without imputing missing
-pairs. `--covariance-initialization nearest-edm` selects the weighted
-nearest-EDM alternative. Initialization changes only the starting point, not
-the objective. The Rouse initializer is inexpensive and remains on the CPU.
-With `--use-gpu`, the optional nearest-EDM solver uses the GPU before COV starts.
-Before optimization, every initial internal Gram matrix `B0` is rescaled to `s*B0`
-using the exact positive minimizer of the COV objective along that ray. This
-second calibration includes the entropy term, the selected pair variances, and
-only the observed pairs. Its scale, objective reduction, derivative residual,
-backend, and wall time are recorded under
+pairs. An explicitly supplied connectivity matrix remains available for
+restarts. Initialization changes only the starting point, not the objective.
+Before optimization, the initial internal Gram matrix `B0` is rescaled to
+`s*B0` using the exact positive minimizer of the COV objective along that ray.
+This second calibration includes the entropy term, the selected pair variances,
+and only the observed pairs. Its scale, objective reduction, derivative
+residual, backend, and wall time are recorded under
 `results['covariance_optimization']['initialization']['scalar_calibration']`.
 
 ```bash
 python -m hipps_dimes observed_ddmap.npy cov_fit \
   --input-type ddmap --input-format npy \
   --method COV --gaussian-noise-relative-std 0.1 \
-  --covariance-initialization rouse --covariance-optimizer hybrid --use-gpu \
+  --covariance-optimizer hybrid --use-gpu \
   --iteration 10000 --no-xyzs --save-pickle
 ```
 
@@ -426,61 +423,6 @@ The `run_optimization()` function returns a dictionary with:
 - `'run_parameters'`: Run parameters (pandas DataFrame with columns: parameter, value)
 - `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, if input_type='cmap')
-
-#### Weighted closest Euclidean distance matrix
-
-`nearest_edm()` fits noisy or incomplete squared-distance observations by
-weighted least squares over centered positive-semidefinite Gram matrices. Zero
-weights and `NaN` distances mark unobserved pairs.
-
-```python
-import hipps_dimes as HD
-import numpy as np
-
-ddmap_observed = np.array(
-    [
-        [0.0, 1.0, 1.0],
-        [1.0, 0.0, 9.0],
-        [1.0, 9.0, 0.0],
-    ]
-)
-
-ddmap_fit, gram_fit, diagnostics = HD.nearest_edm(ddmap_observed)
-assert diagnostics["converged"]
-```
-
-Each unordered pair is counted once, and `weights[i, j]` multiplies that
-pair's squared residual. The solver uses a dense eigendecomposition for each
-covariance-cone projection and reports a projected-gradient convergence
-certificate. It imposes no embedding-rank constraint by default.
-
-Set `use_gpu=True` to keep the float64 projected-gradient arrays and dense
-eigendecompositions on an accessible CUDA GPU. Input validation and returned
-matrices remain NumPy-based, and GPU requests fail explicitly rather than
-silently falling back:
-
-```python
-ddmap_fit, gram_fit, diagnostics = HD.nearest_edm(
-    ddmap_observed,
-    use_gpu=True,
-)
-assert diagnostics["backend"] == "gpu"
-```
-
-GPU execution changes the backend, not the asymptotic cost: each iteration is
-still O(N^3) time and the working arrays require O(N^2) memory.
-
-Set `gram_eigenvalue_floor` to require strictly positive internal Gram modes:
-
-```python
-ddmap_full_rank, gram_full_rank, diagnostics = HD.nearest_edm(
-    ddmap_observed,
-    gram_eigenvalue_floor=1e-4,
-)
-```
-
-The floor has squared-distance units and is a model constraint, not a numerical
-tolerance. It leaves the center-of-mass mode at zero.
 
 #### Additional Utility Functions
 

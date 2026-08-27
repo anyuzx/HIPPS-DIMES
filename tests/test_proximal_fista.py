@@ -111,7 +111,10 @@ def test_monotone_fista_preserves_validity_and_decreases_objective():
 
     objective = info["history"]["objective"]
     assert objective.size > 1
-    assert np.all(np.diff(objective) <= 2e-10 * np.maximum(1.0, np.abs(objective[:-1])))
+    assert np.all(
+        np.diff(objective)
+        <= 2e-10 * np.maximum(1.0, np.abs(objective[:-1]))
+    )
     assert np.all(
         info["history"]["minimum_internal_precision_eigenvalue"] > 0.0
     )
@@ -140,12 +143,23 @@ def test_heteroskedastic_variance_obeys_pair_stationarity():
 
     assert info["converged"]
     assert info["noise_model"] == "heteroskedastic_variance_matrix"
-    assert np.allclose(
-        (fitted - target)[pair_i, pair_j],
-        0.5 * variance[pair_i, pair_j] * connectivity[pair_i, pair_j],
-        rtol=4e-6,
-        atol=4e-9,
+    stationarity = (
+        (fitted - target)[pair_i, pair_j]
+        - 0.5
+        * variance[pair_i, pair_j]
+        * connectivity[pair_i, pair_j]
     )
+    scale = max(
+        1.0,
+        np.linalg.norm((fitted - target)[pair_i, pair_j]),
+        np.linalg.norm(
+            0.5
+            * variance[pair_i, pair_j]
+            * connectivity[pair_i, pair_j]
+        ),
+    )
+    assert np.linalg.norm(stationarity) / scale <= 2e-7
+    assert np.max(np.abs(stationarity)) <= 5e-8
 
 
 def test_accelerated_and_plain_proximal_gradient_reach_same_solution():

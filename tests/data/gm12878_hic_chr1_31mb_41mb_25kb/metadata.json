@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "case_id": "gm12878_hic_chr1_31000000_41000000_25kb",
+  "description": "Experimental GM12878 Hi-C chromosome 1 regional contact map and a converged COV-PDHG reference Gram matrix.",
+  "assay": "Hi-C",
+  "biosample": "GM12878",
+  "assembly": "hg19",
+  "region": {
+    "chromosome": "chr1",
+    "start_bp": 31000000,
+    "end_bp": 41000000,
+    "coordinate_convention": "0-based half-open",
+    "resolution_bp": 25000,
+    "n_bins": 400
+  },
+  "source": {
+    "accession": "ENCFF065LSP",
+    "format": "hic",
+    "normalization": "KR",
+    "source_file_sha256": "73712c80ae75c242116c9dcdfbb39de673e4d4535d130d14f8d4bc4dcd17330b"
+  },
+  "preprocessing": {
+    "description": "The catalog contact_hipps_ready matrix uses the HIPPS-DIMES missing-locus repair and symmetric neighbor balancing workflow.",
+    "hipps_dimes_commit": "b2ec64dd6f265374764d96f96b669e42958187f7",
+    "missing_unique_pairs": 1660,
+    "observed_unique_pairs": 78140
+  },
+  "contact_to_squared_distance": {
+    "function": "hipps_dimes.numerics.cmap2dmap_missing_data",
+    "alpha": 4.0,
+    "not_normalize": true,
+    "formula": "D_squared=(3*pi/8)*cmap2dmap_missing_data(contact)^2"
+  },
+  "covariance_model": {
+    "noise_model": "heteroskedastic_relative_std",
+    "relative_noise_std": 0.1
+  },
+  "solver": {
+    "optimizer": "pdhg",
+    "initialization": "rouse",
+    "relative_tolerance": 1e-5,
+    "absolute_tolerance": 1e-10,
+    "maximum_iterations": 8000,
+    "dtype": "float64",
+    "reference_gpu": "NVIDIA GeForce RTX 4070",
+    "hipps_dimes_commit": "f7a14d05378f541614ff51e161bd41ee45d8504e"
+  },
+  "reference_solution": {
+    "converged": true,
+    "status": "optimality_tolerance",
+    "iterations": 7378,
+    "returned_iteration": 7378,
+    "observed_pair_count": 78140,
+    "objective": 122664.34144184145,
+    "trusted_reference_objective": 122664.34144175866,
+    "independent_relative_eliminated_kkt_residual": 9.994458226017685e-6
+  },
+  "files": {
+    "contact_map": "contact_hipps_ready.npy",
+    "contact_map_sha256": "714c2dfcb387876b4e9c476f98ab6445e6cf2deb073a8be740b93e8db819860c",
+    "reference": "cov_pdhg_reference.npz",
+    "reference_sha256": "95daf0c6e82ee7392d4ef8784f554d94fe57fdb1e47b8dba2e08562604d5747d"
+  }
+}

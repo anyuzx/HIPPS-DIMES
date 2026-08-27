@@ -1,12 +1,42 @@
 """Tests for the primal-dual covariance-cone optimizer."""
 
+import hashlib
 import inspect
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 import HippsDimes
 from hipps_dimes import covariance_pdhg as pdhg
+from hipps_dimes import numerics
+
+_REAL_DATA_DIRECTORY = (
+    Path(__file__).parent
+    / "data"
+    / "gm12878_hic_chr1_31mb_41mb_25kb"
+)
+
+
+def _load_real_chromosome_case():
+    metadata_path = _REAL_DATA_DIRECTORY / "metadata.json"
+    contact_path = _REAL_DATA_DIRECTORY / "contact_hipps_ready.npy"
+    reference_path = _REAL_DATA_DIRECTORY / "cov_pdhg_reference.npz"
+    metadata = json.loads(metadata_path.read_text())
+    contact = np.load(contact_path)
+    with np.load(reference_path) as reference:
+        gram = reference["gram_matrix"].copy()
+
+    with np.errstate(divide="ignore"):
+        distance = numerics.cmap2dmap_missing_data(
+            contact,
+            metadata["contact_to_squared_distance"]["alpha"],
+            metadata["contact_to_squared_distance"]["not_normalize"],
+        )
+    target = (3.0 * np.pi / 8.0) * np.square(distance)
+    target[np.isinf(target)] = np.nan
+    return metadata, contact, target, gram
 
 
 def _rouse_squared_distance_target(n=6, spring_constant=1.0):
@@ -266,6 +296,109 @@ def test_pdhg_supports_heteroskedastic_noise_with_missing_pairs():
     assert info["noise_model"] == "heteroskedastic_relative_std"
     assert info["observed_pair_count"] == 14
     assert independent <= 1e-5
+
+
+def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
+    """Protect the COV objective with an experimental chromosome fixture."""
+    metadata, contact, target, gram = _load_real_chromosome_case()
+    contact_path = _REAL_DATA_DIRECTORY / "contact_hipps_ready.npy"
+    reference_path = _REAL_DATA_DIRECTORY / "cov_pdhg_reference.npz"
+    contact_sha256 = hashlib.sha256(contact_path.read_bytes()).hexdigest()
+    reference_sha256 = hashlib.sha256(reference_path.read_bytes()).hexdigest()
+
+    n = metadata["region"]["n_bins"]
+    pair_mask = np.triu(np.isfinite(target), k=1)
+    pair_i, pair_j = np.where(pair_mask)
+    target_pairs = target[pair_i, pair_j]
+    relative_std = metadata["covariance_model"]["relative_noise_std"]
+    pair_variance = np.square(relative_std * target_pairs)
+
+    eigenvalues = np.linalg.eigvalsh(gram)
+    zero_index = int(np.argmin(np.abs(eigenvalues)))
+    internal_eigenvalues = np.delete(eigenvalues, zero_index)
+    diagonal = np.diag(gram)
+    fitted_pairs = (
+        diagonal[pair_i]
+        + diagonal[pair_j]
+        - 2.0 * gram[pair_i, pair_j]
+    )
+    objective = -1.5 * np.sum(np.log(internal_eigenvalues))
+    objective += 0.5 * np.sum(
+        np.square(fitted_pairs - target_pairs) / pair_variance
+    )
+    relative_kkt = _independent_relative_kkt(
+        target, gram, pair_variance
+    )
+    expected = metadata["reference_solution"]
+
+    assert contact_sha256 == metadata["files"]["contact_map_sha256"]
+    assert reference_sha256 == metadata["files"]["reference_sha256"]
+    assert contact.shape == (n, n) == gram.shape
+    assert np.array_equal(contact, contact.T)
+    assert len(target_pairs) == expected["observed_pair_count"]
+    assert n * (n - 1) // 2 - len(target_pairs) == 1660
+    assert np.max(np.abs(np.sum(gram, axis=1))) <= 1e-10
+    assert np.min(internal_eigenvalues) > 0.0
+    assert objective == pytest.approx(
+        expected["objective"], rel=1e-11, abs=1e-6
+    )
+    assert objective == pytest.approx(
+        expected["trusted_reference_objective"], rel=1e-11, abs=1e-6
+    )
+    assert relative_kkt == pytest.approx(
+        expected["independent_relative_eliminated_kkt_residual"],
+        rel=1e-7,
+        abs=1e-10,
+    )
+    assert relative_kkt <= metadata["solver"]["relative_tolerance"]
+
+
+@pytest.mark.real_data
+@pytest.mark.filterwarnings("ignore:divide by zero encountered:RuntimeWarning")
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+@pytest.mark.skipif(
+    not HippsDimes.is_gpu_available(),
+    reason="full N=400 convergence regression requires a CUDA GPU",
+)
+def test_pdhg_converges_from_rouse_on_real_n400_contact_map():
+    """Run the complete public contact-map workflow on the real fixture."""
+    metadata, contact, _, _ = _load_real_chromosome_case()
+    solver = metadata["solver"]
+    expected = metadata["reference_solution"]
+
+    results = HippsDimes.run_optimization(
+        input_matrix=contact,
+        input_type="cmap",
+        input_format="npy",
+        method="COV",
+        gaussian_noise_relative_std=(
+            metadata["covariance_model"]["relative_noise_std"]
+        ),
+        covariance_initialization="rouse",
+        covariance_optimizer="pdhg",
+        covariance_relative_tolerance=solver["relative_tolerance"],
+        covariance_absolute_tolerance=solver["absolute_tolerance"],
+        iteration=solver["maximum_iterations"],
+        use_gpu=True,
+        ignore_missing_data=True,
+        not_normalize=True,
+        no_log=True,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    info = results["covariance_optimization"]
+
+    assert info["converged"]
+    assert info["status"] == "optimality_tolerance"
+    assert info["independent_kkt_converged"]
+    assert info["iterations"] <= solver["maximum_iterations"]
+    assert info["relative_eliminated_kkt_residual"] <= (
+        solver["relative_tolerance"]
+    )
+    assert info["objective"] == pytest.approx(
+        expected["trusted_reference_objective"], rel=1e-11, abs=1e-6
+    )
 
 
 @pytest.mark.skipif(

@@ -171,3 +171,21 @@ still be used as a local solver or reference implementation.
 The history records objective components, primal, dual, and dual-eliminated
 KKT residuals, step sizes, step-ratio adaptations, Gram conditioning, and
 connectivity norm.
+
+## Real-data regression
+
+The test suite includes the processed experimental GM12878 Hi-C contact map
+for `chr1:31,000,000-41,000,000` at 25 kb resolution (`N=400`) and a converged
+reference Gram matrix. The ordinary CPU suite independently reconstructs its
+target squared-distance observations and verifies the COV objective and KKT
+certificate of the full-size reference solution.
+
+When CuPy and a CUDA GPU are available, the `real_data` test also runs the
+complete public contact-map workflow from Rouse initialization:
+
+```bash
+pytest -q -m real_data tests/test_covariance_pdhg.py
+```
+
+CPU-only environments skip this approximately two-minute end-to-end solve but
+still execute the fast full-size objective/KKT regression.

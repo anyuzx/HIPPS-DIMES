@@ -10,7 +10,10 @@ import scipy
 from rich import print
 from tqdm import tqdm
 
-from .covariance_pdhg import fit_gaussian_noise_covariance_pdhg
+from .covariance_pdhg import (
+    fit_gaussian_noise_covariance_hybrid,
+    fit_gaussian_noise_covariance_pdhg,
+)
 from .models import Optimize
 from .numerics import *  # noqa: F401,F403
 
@@ -313,9 +316,10 @@ def run_optimization(input_path=None,
                      gaussian_noise_variance=0.0,
                      gaussian_noise_relative_std=None,
                      covariance_initialization='rouse',
-                     covariance_optimizer='pdhg',
+                     covariance_optimizer='hybrid',
                      covariance_relative_tolerance=1e-5,
                      covariance_absolute_tolerance=1e-10,
+                     covariance_handoff_relative_tolerance=1e-3,
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -375,19 +379,23 @@ def run_optimization(input_path=None,
         conversion and missing-data handling.
     covariance_initialization : {'rouse', 'nearest_edm'}, default='rouse'
         Initialization used by COV when no connectivity matrix is supplied.
-    covariance_optimizer : {'pdhg', 'newton'}, default='pdhg'
-        Optimizer used for the Gaussian COV objective. PDHG is the robust
-        global default; Newton-CG remains available for comparison and local
-        refinement from a good initialization.
+    covariance_optimizer : {'hybrid', 'pdhg', 'newton'}, default='hybrid'
+        Optimizer used for the Gaussian COV objective. The hybrid default uses
+        PDHG globally and Newton-CG locally. Both component solvers remain
+        separately selectable.
     covariance_relative_tolerance : float, default=1e-5
-        Relative COV KKT tolerance. For PDHG, the returned Gram matrix must
-        pass a freshly recomputed dual-eliminated KKT certificate at this
-        tolerance before the run is reported as converged.
+        Relative COV KKT tolerance. Hybrid and PDHG results must pass a
+        freshly recomputed dual-eliminated KKT certificate at this tolerance
+        before the run is reported as converged.
     covariance_absolute_tolerance : float, default=1e-10
         Absolute tolerance used by the selected COV optimizer's internal KKT
         checks.
+    covariance_handoff_relative_tolerance : float, default=1e-3
+        Relative KKT threshold at which the hybrid optimizer switches from
+        PDHG to Newton-CG. Ignored by the standalone optimizers.
     iteration : int, default=10000
-        Number of optimization iterations
+        Maximum optimization iterations. Hybrid PDHG and Newton updates share
+        this single total budget.
     learning_rate : float, default=10.0
         Learning rate for optimization
     momentum : float, default=0.0
@@ -399,7 +407,7 @@ def run_optimization(input_path=None,
         NAG's look-ahead correction enables higher momentum (0.95) without divergence.
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
-        If True, use CuPy GPU acceleration. Both COV solvers use float64
+        If True, use CuPy GPU acceleration. All COV optimizers use float64
         throughout, and a requested nearest-EDM initializer runs on the same
         GPU. Newton-CG additionally builds its exact data-Hessian diagonal
         preconditioner once in bounded pair blocks. COV fails clearly if no
@@ -491,7 +499,7 @@ def run_optimization(input_path=None,
     
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
-    - Both COV optimizers run GPU matrix operations in float64
+    - All COV optimizers run GPU matrix operations in float64
     - COV Newton builds the exact blockwise data-Hessian diagonal once per fit
     - For small matrices, CPU may be faster due to GPU setup overhead
     - Install CuPy: conda install -c conda-forge cupy
@@ -580,8 +588,10 @@ def run_optimization(input_path=None,
         raise ValueError(
             "covariance_initialization must be 'rouse' or 'nearest_edm'"
         )
-    if covariance_optimizer not in {'pdhg', 'newton'}:
-        raise ValueError("covariance_optimizer must be 'pdhg' or 'newton'")
+    if covariance_optimizer not in {'hybrid', 'pdhg', 'newton'}:
+        raise ValueError(
+            "covariance_optimizer must be 'hybrid', 'pdhg', or 'newton'"
+        )
     covariance_tolerances = {
         'covariance_relative_tolerance': covariance_relative_tolerance,
         'covariance_absolute_tolerance': covariance_absolute_tolerance,
@@ -615,6 +625,38 @@ def run_optimization(input_path=None,
         and covariance_absolute_tolerance == 0.0
     ):
         raise ValueError("at least one covariance convergence tolerance must be positive")
+    if (
+        isinstance(covariance_handoff_relative_tolerance, (bool, np.bool_))
+        or not np.isscalar(covariance_handoff_relative_tolerance)
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        )
+    try:
+        covariance_handoff_relative_tolerance = float(
+            covariance_handoff_relative_tolerance
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        ) from error
+    if (
+        not np.isfinite(covariance_handoff_relative_tolerance)
+        or covariance_handoff_relative_tolerance <= 0.0
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        )
+    if (
+        covariance_optimizer == 'hybrid'
+        and covariance_relative_tolerance > 0.0
+        and covariance_handoff_relative_tolerance
+        < covariance_relative_tolerance
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must not be smaller than "
+            "covariance_relative_tolerance"
+        )
 
     has_absolute_noise = gaussian_noise_variance > 0.0
     has_relative_noise = gaussian_noise_relative_std is not None
@@ -646,7 +688,7 @@ def run_optimization(input_path=None,
             raise ValueError(
                 "covariance_initialization is supported only with method='COV'"
             )
-        if covariance_optimizer != 'pdhg':
+        if covariance_optimizer != 'hybrid':
             raise ValueError(
                 "covariance_optimizer is supported only with method='COV'"
             )
@@ -657,6 +699,11 @@ def run_optimization(input_path=None,
             raise ValueError(
                 "covariance convergence tolerances are supported only with "
                 "method='COV'"
+            )
+        if covariance_handoff_relative_tolerance != 1e-3:
+            raise ValueError(
+                "covariance_handoff_relative_tolerance is supported only "
+                "with method='COV'"
             )
     if log is not None:
         no_log = not log
@@ -1104,6 +1151,11 @@ def run_optimization(input_path=None,
                     "Absolute KKT Tolerance",
                     f"{covariance_absolute_tolerance:.3e}",
                 )
+                if covariance_optimizer == 'hybrid':
+                    opt_table.add_row(
+                        "PDHG-to-Newton Handoff",
+                        f"{covariance_handoff_relative_tolerance:.3e}",
+                    )
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -1159,15 +1211,30 @@ def run_optimization(input_path=None,
     use_gpu_enabled = False
 
     if method == 'COV':
-        covariance_solver = (
-            fit_gaussian_noise_covariance_pdhg
-            if covariance_optimizer == 'pdhg'
-            else fit_gaussian_noise_covariance
-        )
+        covariance_solver = {
+            'hybrid': fit_gaussian_noise_covariance_hybrid,
+            'pdhg': fit_gaussian_noise_covariance_pdhg,
+            'newton': fit_gaussian_noise_covariance,
+        }[covariance_optimizer]
         covariance_progress_callback, close_covariance_progress = (
             _make_covariance_progress_callback(progress_callback, show_progress)
         )
         try:
+            covariance_solver_arguments = {
+                'relative_noise_std': gaussian_noise_relative_std,
+                'initialization': covariance_initialization,
+                'initial_connectivity': connectivity_matrix,
+                'use_gpu': use_gpu,
+                'max_iterations': iteration,
+                'relative_tolerance': covariance_relative_tolerance,
+                'absolute_tolerance': covariance_absolute_tolerance,
+                'save_steps': save_steps,
+                'progress_callback': covariance_progress_callback,
+            }
+            if covariance_optimizer == 'hybrid':
+                covariance_solver_arguments[
+                    'handoff_relative_tolerance'
+                ] = covariance_handoff_relative_tolerance
             (
                 fitted_ddmap,
                 fitted_gram_matrix,
@@ -1176,15 +1243,7 @@ def run_optimization(input_path=None,
             ) = covariance_solver(
                 ddmap_target,
                 gaussian_noise_variance if has_absolute_noise else None,
-                relative_noise_std=gaussian_noise_relative_std,
-                initialization=covariance_initialization,
-                initial_connectivity=connectivity_matrix,
-                use_gpu=use_gpu,
-                max_iterations=iteration,
-                relative_tolerance=covariance_relative_tolerance,
-                absolute_tolerance=covariance_absolute_tolerance,
-                save_steps=save_steps,
-                progress_callback=covariance_progress_callback,
+                **covariance_solver_arguments,
             )
         finally:
             close_covariance_progress()
@@ -1325,6 +1384,21 @@ def run_optimization(input_path=None,
         ),
         'covariance_absolute_tolerance': (
             covariance_absolute_tolerance if method == 'COV' else None
+        ),
+        'covariance_handoff_relative_tolerance': (
+            covariance_handoff_relative_tolerance
+            if method == 'COV' and covariance_optimizer == 'hybrid'
+            else None
+        ),
+        'covariance_phase_iterations': (
+            covariance_optimization_info.get('phase_iterations')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_phase_wall_seconds': (
+            covariance_optimization_info.get('phase_wall_seconds')
+            if covariance_optimization_info is not None
+            else None
         ),
         'covariance_converged': (
             covariance_optimization_info['converged']

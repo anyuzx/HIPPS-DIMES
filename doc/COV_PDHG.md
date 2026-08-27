@@ -1,4 +1,4 @@
-# PDHG solver for Gaussian noise-aware COV
+# PDHG and hybrid solvers for Gaussian noise-aware COV
 
 `fit_gaussian_noise_covariance_pdhg` solves the same convex objective as the
 noise-aware COV Newton solver,
@@ -116,7 +116,10 @@ when the internal stopping conditions and this final certificate pass.
 
 ## Use
 
-PDHG is the default optimizer for the high-level COV interface:
+The high-level COV interface defaults to the hybrid optimizer. It runs PDHG to
+an independently certified relative KKT residual of `1e-3`, then initializes
+the existing centered Newton-CG solver from that feasible result. The phases
+share one maximum-iteration budget.
 
 ```python
 results = HippsDimes.run_optimization(
@@ -124,19 +127,31 @@ results = HippsDimes.run_optimization(
     input_type="ddmap",
     method="COV",
     gaussian_noise_relative_std=0.10,
-    covariance_optimizer="pdhg",
+    covariance_optimizer="hybrid",
     covariance_relative_tolerance=1e-5,
+    covariance_handoff_relative_tolerance=1e-3,
     iteration=10000,
     use_gpu=True,
 )
 ```
 
-The low-level solver remains available directly:
+The low-level hybrid and standalone PDHG solvers remain available directly:
 
 ```python
 import HippsDimes
 
 fitted_ddmap, gram, connectivity, info = (
+    HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target_ddmap,
+        relative_noise_std=0.10,
+        initialization="rouse",
+        max_iterations=10000,
+        handoff_relative_tolerance=1e-3,
+        use_gpu=True,
+    )
+)
+
+pdhg_only = (
     HippsDimes.fit_gaussian_noise_covariance_pdhg(
         target_ddmap,
         relative_noise_std=0.10,
@@ -150,9 +165,9 @@ fitted_ddmap, gram, connectivity, info = (
 For homoskedastic errors, pass `noise_variance=<positive scalar>` instead of
 `relative_noise_std`.
 
-The Newton-CG solver remains available through
-`covariance_optimizer="newton"`. It is not deleted or wrapped by PDHG and can
-still be used as a local solver or reference implementation.
+The standalone solvers remain available through
+`covariance_optimizer="pdhg"` and `covariance_optimizer="newton"`. Newton-CG
+is not deleted or replaced; the hybrid path reuses it as its local phase.
 
 ## Main tuning parameters
 
@@ -167,6 +182,8 @@ still be used as a local solver or reference implementation.
 - `theta`: extrapolation coefficient in `[0,1]`; default `1`.
 - `relative_tolerance`: production relative KKT tolerance; default `1e-5`.
   Explicitly pass `1e-8` for strict small-system validation.
+- `handoff_relative_tolerance`: hybrid PDHG-to-Newton relative KKT threshold;
+  default `1e-3`.
 
 The history records objective components, primal, dual, and dual-eliminated
 KKT residuals, step sizes, step-ratio adaptations, Gram conditioning, and
@@ -181,11 +198,11 @@ target squared-distance observations and verifies the COV objective and KKT
 certificate of the full-size reference solution.
 
 When CuPy and a CUDA GPU are available, the `real_data` test also runs the
-complete public contact-map workflow from Rouse initialization:
+complete default hybrid contact-map workflow from Rouse initialization:
 
 ```bash
 pytest -q -m real_data tests/test_covariance_pdhg.py
 ```
 
-CPU-only environments skip this approximately two-minute end-to-end solve but
+CPU-only environments skip this approximately 70-second end-to-end solve but
 still execute the fast full-size objective/KKT regression.

@@ -1,4 +1,4 @@
-name: COV PDHG CI
+name: COV hybrid and PDHG CI
 
 on:
   pull_request:

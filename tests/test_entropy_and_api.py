@@ -354,6 +354,21 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     "optimizer, expected_descriptions, expected_stages, expects_cg",
     [
         (
+            "hybrid",
+            [
+                "Nearest EDM initialization",
+                "COV PDHG optimization",
+                "COV preconditioner",
+                "COV Newton optimization",
+            ],
+            {
+                "nearest_edm_initialization",
+                "covariance_preconditioner",
+                "covariance_optimization",
+            },
+            True,
+        ),
+        (
             "pdhg",
             ["Nearest EDM initialization", "COV PDHG optimization"],
             {"nearest_edm_initialization", "covariance_optimization"},
@@ -462,7 +477,10 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
     assert results["connectivity_matrix_at_steps"][1].shape == (n, n)
     assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
     assert results["covariance_optimization"]["converged"]
-    assert results["covariance_optimization"]["algorithm"] == "pdhg"
+    assert results["covariance_optimization"]["algorithm"] == "hybrid"
+    assert results["covariance_optimization"]["handoff"]["reached"]
+    assert results["covariance_optimization"]["phase_iterations"]["pdhg"] > 0
+    assert results["covariance_optimization"]["phase_iterations"]["newton"] > 0
     assert (
         results["covariance_optimization"][
             "relative_eliminated_kkt_residual"
@@ -477,12 +495,16 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
             results["run_parameters"]["value"],
         )
     )
-    assert parameters["covariance_optimizer_requested"] == "pdhg"
-    assert parameters["covariance_optimizer_resolved"] == "pdhg"
+    assert parameters["covariance_optimizer_requested"] == "hybrid"
+    assert parameters["covariance_optimizer_resolved"] == "hybrid"
     assert parameters["covariance_relative_tolerance"] == pytest.approx(1e-5)
     assert parameters["covariance_absolute_tolerance"] == pytest.approx(1e-10)
+    assert parameters[
+        "covariance_handoff_relative_tolerance"
+    ] == pytest.approx(1e-3)
+    assert json.loads(parameters["covariance_phase_iterations"])["newton"] > 0
     assert bool(parameters["covariance_independent_kkt_converged"])
-    assert parameters["covariance_preconditioner_setup_seconds"] is None
+    assert parameters["covariance_preconditioner_setup_seconds"] >= 0.0
 
 
 def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
@@ -670,6 +692,20 @@ def test_run_optimization_rejects_gaussian_noise_outside_cov(method):
             },
             "at least one covariance convergence tolerance",
         ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_handoff_relative_tolerance": 0.0,
+            },
+            "covariance_handoff_relative_tolerance",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_handoff_relative_tolerance": 1e-6,
+            },
+            "must not be smaller",
+        ),
     ],
 )
 def test_run_optimization_rejects_invalid_cov_combinations(options, message):
@@ -719,6 +755,13 @@ def test_cli_help_exposes_cov_solver_noise_and_initialization_contract():
     assert "covariance_optimizer" in parameter_names
     assert "covariance_relative_tolerance" in parameter_names
     assert "covariance_absolute_tolerance" in parameter_names
+    assert "covariance_handoff_relative_tolerance" in parameter_names
+    optimizer_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "covariance_optimizer"
+    )
+    assert optimizer_parameter.default == "hybrid"
 
 
 def test_cli_routes_cov_to_pdhg_with_configurable_tolerance(tmp_path):

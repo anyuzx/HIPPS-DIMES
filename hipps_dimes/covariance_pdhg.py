@@ -1,4 +1,4 @@
-"""Primal-dual hybrid gradient solver for the noise-aware COV objective.
+"""PDHG and PDHG-to-Newton solvers for the noise-aware COV objective.
 
 The solver minimizes
 
@@ -1034,3 +1034,359 @@ def fit_gaussian_noise_covariance_pdhg(
             stacklevel=2,
         )
     return full_fitted, full_gram, connectivity, info
+
+
+def _combine_hybrid_histories(pdhg_history, newton_history):
+    """Combine phase histories on one global accepted-update axis."""
+    pdhg_count = len(pdhg_history["iteration"])
+    newton_count = len(newton_history["iteration"])
+    combined = {
+        "iteration": np.arange(
+            1, pdhg_count + newton_count + 1, dtype=np.int64
+        ),
+        "phase": np.asarray(
+            ["pdhg"] * pdhg_count + ["newton"] * newton_count
+        ),
+        "phase_iteration": np.concatenate(
+            (
+                np.asarray(pdhg_history["iteration"], dtype=np.int64),
+                np.asarray(newton_history["iteration"], dtype=np.int64),
+            )
+        ),
+    }
+    history_keys = (
+        set(pdhg_history) | set(newton_history)
+    ) - {"iteration"}
+    for key in sorted(history_keys):
+        pdhg_values = pdhg_history.get(key)
+        newton_values = newton_history.get(key)
+        if key == "relative_eliminated_kkt_residual" and newton_values is None:
+            newton_values = newton_history.get("relative_gradient_norm")
+        if pdhg_values is None:
+            pdhg_values = np.full(pdhg_count, np.nan)
+        if newton_values is None:
+            newton_values = np.full(newton_count, np.nan)
+        combined[key] = np.concatenate(
+            (np.asarray(pdhg_values), np.asarray(newton_values))
+        )
+    return combined
+
+
+def fit_gaussian_noise_covariance_hybrid(
+    squared_distances,
+    noise_variance=None,
+    *,
+    relative_noise_std=None,
+    initialization="rouse",
+    initial_connectivity=None,
+    use_gpu=False,
+    max_iterations=1000,
+    relative_tolerance=1e-5,
+    absolute_tolerance=1e-10,
+    handoff_relative_tolerance=1e-3,
+    initial_gram_floor_relative=1e-8,
+    save_steps=None,
+    progress_callback=None,
+):
+    """Fit COV globally with PDHG and finish locally with Newton-CG.
+
+    PDHG starts from the requested physical initialization and runs until its
+    independently certified KKT residual reaches
+    ``handoff_relative_tolerance``. The returned PDHG connectivity then
+    initializes the existing centered Newton-CG solver. ``max_iterations`` is
+    a single total update budget shared by both phases. The final returned
+    Gram matrix is independently certified against ``relative_tolerance``.
+    """
+    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
+        raise ValueError("max_iterations must be a positive integer")
+    if (
+        isinstance(handoff_relative_tolerance, (bool, np.bool_))
+        or not np.isscalar(handoff_relative_tolerance)
+    ):
+        raise ValueError(
+            "handoff_relative_tolerance must be a positive finite scalar"
+        )
+    handoff_relative_tolerance = float(handoff_relative_tolerance)
+    if (
+        not np.isfinite(handoff_relative_tolerance)
+        or handoff_relative_tolerance <= 0.0
+    ):
+        raise ValueError(
+            "handoff_relative_tolerance must be a positive finite scalar"
+        )
+    if (
+        relative_tolerance > 0.0
+        and handoff_relative_tolerance < relative_tolerance
+    ):
+        raise ValueError(
+            "handoff_relative_tolerance must not be smaller than the final "
+            "relative_tolerance"
+        )
+
+    save_steps_set = set(save_steps or ())
+    if any(
+        not isinstance(step, (int, np.integer))
+        or step < 1
+        or step > max_iterations
+        for step in save_steps_set
+    ):
+        raise ValueError("save_steps must lie between 1 and max_iterations")
+
+    def phase_progress_callback(phase, offset):
+        if progress_callback is None:
+            return None
+
+        def report(event):
+            event = dict(event)
+            event["optimizer"] = "hybrid"
+            event["phase"] = phase
+            if event.get("stage") == "covariance_optimization":
+                event["phase_iteration"] = int(event["iteration"])
+                event["phase_total"] = int(event["total"])
+                event["iteration"] = offset + int(event["iteration"])
+                event["total"] = int(max_iterations)
+                event["method"] = "COV-hybrid"
+            progress_callback(event)
+
+        return report
+
+    start_time = time.perf_counter()
+    pdhg_start_time = time.perf_counter()
+    pdhg_result = fit_gaussian_noise_covariance_pdhg(
+        squared_distances,
+        noise_variance,
+        relative_noise_std=relative_noise_std,
+        initialization=initialization,
+        initial_connectivity=initial_connectivity,
+        use_gpu=use_gpu,
+        max_iterations=max_iterations,
+        relative_tolerance=handoff_relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+        initial_gram_floor_relative=initial_gram_floor_relative,
+        save_steps=sorted(save_steps_set),
+        progress_callback=phase_progress_callback("pdhg", 0),
+    )
+    pdhg_wall_seconds = time.perf_counter() - pdhg_start_time
+    fitted, gram, connectivity, pdhg_info = pdhg_result
+    pdhg_iterations = int(pdhg_info["iterations"])
+    handoff = {
+        "reached": bool(pdhg_info["converged"]),
+        "relative_tolerance": handoff_relative_tolerance,
+        "relative_eliminated_kkt_residual": float(
+            pdhg_info["relative_eliminated_kkt_residual"]
+        ),
+        "objective": float(pdhg_info["objective"]),
+        "iterations": pdhg_iterations,
+        "returned_iteration": int(pdhg_info["returned_iteration"]),
+    }
+    remaining_iterations = max_iterations - pdhg_iterations
+    if not handoff["reached"] or remaining_iterations <= 0:
+        status = (
+            "pdhg_handoff_not_reached"
+            if not handoff["reached"]
+            else "iteration_budget_exhausted_at_handoff"
+        )
+        message = (
+            "PDHG did not reach the hybrid handoff tolerance"
+            if not handoff["reached"]
+            else "PDHG reached the handoff at the end of the iteration budget"
+        )
+        info = dict(pdhg_info)
+        info.update(
+            {
+                "algorithm": "hybrid",
+                "coordinate_parameterization": "centered_hybrid",
+                "converged": False,
+                "status": status,
+                "message": message,
+                "relative_tolerance": float(relative_tolerance),
+                "handoff_relative_tolerance": (
+                    handoff_relative_tolerance
+                ),
+                "handoff": handoff,
+                "phase_iterations": {
+                    "pdhg": pdhg_iterations,
+                    "newton": 0,
+                },
+                "phase_wall_seconds": {
+                    "pdhg": pdhg_wall_seconds,
+                    "newton": 0.0,
+                },
+                "history": _combine_hybrid_histories(
+                    pdhg_info["history"],
+                    {"iteration": np.asarray([], dtype=np.int64)},
+                ),
+                "wall_seconds": time.perf_counter() - start_time,
+            }
+        )
+        warnings.warn(
+            "fit_gaussian_noise_covariance_hybrid stopped before Newton "
+            f"refinement (status={status})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return fitted, gram, connectivity, info
+
+    newton_save_steps = sorted(
+        step - pdhg_iterations
+        for step in save_steps_set
+        if step > pdhg_iterations
+    )
+    newton_start_time = time.perf_counter()
+    newton_result = _num.fit_gaussian_noise_covariance(
+        squared_distances,
+        noise_variance,
+        relative_noise_std=relative_noise_std,
+        initialization="rouse",
+        initial_connectivity=connectivity,
+        use_gpu=use_gpu,
+        max_iterations=remaining_iterations,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+        initial_gram_floor_relative=initial_gram_floor_relative,
+        save_steps=newton_save_steps,
+        progress_callback=phase_progress_callback(
+            "newton", pdhg_iterations
+        ),
+    )
+    newton_wall_seconds = time.perf_counter() - newton_start_time
+    fitted, gram, connectivity, newton_info = newton_result
+    newton_iterations = int(newton_info["iterations"])
+
+    (
+        _,
+        _,
+        pair_i,
+        pair_j,
+        target_pairs,
+        pair_variance,
+        _,
+        _,
+    ) = _num._validate_gaussian_covariance_inputs(
+        squared_distances, noise_variance, relative_noise_std
+    )
+    independent_residuals = _independent_eliminated_kkt_residuals(
+        gram,
+        target_pairs,
+        pair_variance,
+        pair_i,
+        pair_j,
+    )
+    (
+        independent_norm,
+        independent_scale,
+        independent_relative,
+        _,
+        independent_residual,
+    ) = independent_residuals
+    if relative_tolerance > 0.0:
+        independent_kkt_converged = (
+            independent_relative <= relative_tolerance
+        )
+    else:
+        independent_kkt_converged = (
+            independent_norm <= absolute_tolerance
+        )
+    internal_kkt_converged = bool(newton_info["converged"])
+    converged = internal_kkt_converged and independent_kkt_converged
+    if converged:
+        status = "optimality_tolerance"
+        message = (
+            "PDHG handoff, Newton refinement, and independent final KKT "
+            "certificate reached"
+        )
+    elif internal_kkt_converged:
+        status = "independent_kkt_failed"
+        message = (
+            "Newton reached its internal tolerance, but the returned Gram "
+            "matrix failed the independent eliminated KKT certificate"
+        )
+    else:
+        status = f"newton_{newton_info['status']}"
+        message = f"Newton refinement stopped: {newton_info['message']}"
+
+    combined_history = _combine_hybrid_histories(
+        pdhg_info["history"], newton_info["history"]
+    )
+    connectivity_at_steps = dict(
+        pdhg_info["connectivity_matrix_at_steps"]
+    )
+    connectivity_at_steps.update(
+        {
+            pdhg_iterations + int(step): matrix
+            for step, matrix in newton_info[
+                "connectivity_matrix_at_steps"
+            ].items()
+        }
+    )
+    info = dict(newton_info)
+    info.update(
+        {
+            "converged": bool(converged),
+            "status": status,
+            "message": message,
+            "iterations": pdhg_iterations + newton_iterations,
+            "returned_iteration": pdhg_iterations + newton_iterations,
+            "relative_gradient_norm": float(independent_relative),
+            "relative_eliminated_kkt_residual": float(
+                independent_relative
+            ),
+            "runtime_relative_eliminated_kkt_residual": float(
+                newton_info["relative_gradient_norm"]
+            ),
+            "stationarity_residual_norm": float(independent_norm),
+            "stationarity_residual_scale": float(independent_scale),
+            "relative_stationarity_residual": float(independent_relative),
+            "maximum_absolute_stationarity_residual": float(
+                np.max(np.abs(independent_residual))
+            ),
+            "pair_stationarity_residual_norm": float(
+                newton_info["stationarity_residual_norm"]
+            ),
+            "relative_pair_stationarity_residual": float(
+                newton_info["relative_stationarity_residual"]
+            ),
+            "maximum_absolute_pair_stationarity_residual": float(
+                newton_info["maximum_absolute_stationarity_residual"]
+            ),
+            "termination_internal_kkt_converged": internal_kkt_converged,
+            "independent_kkt_converged": bool(independent_kkt_converged),
+            "independent_kkt_recomputed_from_returned_gram": True,
+            "relative_tolerance": float(relative_tolerance),
+            "absolute_tolerance": float(absolute_tolerance),
+            "handoff_relative_tolerance": handoff_relative_tolerance,
+            "handoff": handoff,
+            "phase_iterations": {
+                "pdhg": pdhg_iterations,
+                "newton": newton_iterations,
+            },
+            "phase_wall_seconds": {
+                "pdhg": pdhg_wall_seconds,
+                "newton": newton_wall_seconds,
+            },
+            "initialization": pdhg_info["initialization"],
+            "algorithm": "hybrid",
+            "coordinate_parameterization": "centered_hybrid",
+            "history": combined_history,
+            "connectivity_matrix_at_steps": connectivity_at_steps,
+            "wall_seconds": time.perf_counter() - start_time,
+            "stationarity_definition": pdhg_info[
+                "stationarity_definition"
+            ],
+            "pair_stationarity_definition": pdhg_info[
+                "pair_stationarity_definition"
+            ],
+            "logged_metric_timing": (
+                "post-update PDHG then Newton iterates on one global axis; "
+                "final certificate recomputed from returned Gram matrix"
+            ),
+        }
+    )
+    if not converged:
+        warnings.warn(
+            "fit_gaussian_noise_covariance_hybrid stopped without satisfying "
+            f"the final KKT tolerance (status={status})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return fitted, gram, connectivity, info

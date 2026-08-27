@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "case_id": "gm12878_hic_chr1_31000000_41000000_25kb",
-  "description": "Experimental GM12878 Hi-C chromosome 1 regional contact map and a converged COV-PDHG reference Gram matrix.",
+  "description": "Experimental GM12878 Hi-C chromosome 1 regional contact map and a converged COV reference Gram matrix used to test the default hybrid optimizer.",
   "assay": "Hi-C",
   "biosample": "GM12878",
   "assembly": "hg19",
@@ -36,14 +36,16 @@
     "relative_noise_std": 0.1
   },
   "solver": {
-    "optimizer": "pdhg",
+    "optimizer": "hybrid",
     "initialization": "rouse",
     "relative_tolerance": 1e-5,
     "absolute_tolerance": 1e-10,
+    "handoff_relative_tolerance": 1e-3,
     "maximum_iterations": 8000,
     "dtype": "float64",
     "reference_gpu": "NVIDIA GeForce RTX 4070",
-    "hipps_dimes_commit": "f7a14d05378f541614ff51e161bd41ee45d8504e"
+    "reference_optimizer": "pdhg",
+    "reference_hipps_dimes_commit": "f7a14d05378f541614ff51e161bd41ee45d8504e"
   },
   "reference_solution": {
     "converged": true,

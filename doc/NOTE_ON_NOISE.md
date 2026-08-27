@@ -125,10 +125,13 @@ scale and the COV objective before and after calibration.
 
 ## COV optimizers and convergence
 
-PDHG is the default optimizer because it robustly traverses the covariance
-cone from the calibrated Rouse start. Newton-CG remains available with
-`covariance_optimizer="newton"` for comparisons and local refinement. Both
-optimize the same objective and return the same physical quantities.
+The default `covariance_optimizer="hybrid"` uses PDHG to robustly traverse the
+covariance cone from the calibrated Rouse start. Once the independently
+recomputed relative KKT residual reaches `1e-3`, it passes the feasible
+connectivity matrix to the existing centered Newton-CG solver for local
+refinement. Both phases optimize the same objective, and their update counts
+share the single `iteration` budget. Standalone PDHG and Newton-CG remain
+available with `covariance_optimizer="pdhg"` and `"newton"`.
 
 PDHG monitors its primal and dual KKT equations during iteration. Before a
 returned solution is marked converged, the implementation discards the cached
@@ -144,7 +147,8 @@ recomputes $B^+$ from the returned Gram matrix, and evaluates
 \mathcal D^*y(B)-\frac32B^+.
 \]
 
-The default relative tolerance is $10^{-5}$ and is configurable. A stricter
+The final default relative tolerance is $10^{-5}$ and the default hybrid
+handoff tolerance is $10^{-3}$; both are configurable. A stricter final
 $10^{-8}$ value remains available for small, well-conditioned tests.
 
 ## CPU and GPU backends

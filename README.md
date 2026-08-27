@@ -148,14 +148,16 @@ This script will generate several files:
 - `--gaussian-noise-variance`: Positive scalar absolute variance on squared-distance constraints. COV only.
 - `--gaussian-noise-relative-std`: Positive scalar relative standard deviation `sigma_ij / Dobs_ij`. COV converts it to pair variance `(value * Dobs_ij)^2` after preprocessing. Mutually exclusive with `--gaussian-noise-variance`.
 - `--covariance-initialization`: COV start, either `rouse` (default) or `nearest-edm`. A supplied connectivity matrix remains the explicit restart initialization.
-- `--covariance-optimizer`: COV optimizer, either `pdhg` (default) or `newton`.
+- `--covariance-optimizer`: COV optimizer: `hybrid` (default), `pdhg`, or `newton`.
 - `--covariance-relative-tolerance`: Relative COV KKT tolerance. Default: `1e-5`.
 - `--covariance-absolute-tolerance`: Absolute internal COV KKT tolerance. Default: `1e-10`.
+- `--covariance-handoff-relative-tolerance`: Relative KKT threshold for the
+  default PDHG-to-Newton handoff. Default: `1e-3`.
 - `-i, --iteration`: Maximum optimizer iterations. Default: 10000.
 - `--learning-rate`: Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if using Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization. Default: 10.0.
 - `--momentum`: Momentum coefficient for IS method (0.0 to 1.0). Accelerates convergence by accumulating gradient history. **Recommended: Use 0.95 with `--nesterov` for fastest convergence (~50% faster).** Use 0.9 for more conservative settings. Only applies when method=IS. Default: 0.0.
 - `--nesterov`: Use Nesterov Accelerated Gradient (NAG). Enables higher momentum values (0.95) without divergence. **Recommended: Use with `--momentum 0.95` for best performance.**
-- `--use-gpu`: Enable GPU acceleration via CuPy. Both COV optimizers use
+- `--use-gpu`: Enable GPU acceleration via CuPy. All COV optimizers use
   float64; a requested nearest-EDM initializer also runs on the GPU. COV fails
   rather than silently falling back when CUDA is unavailable.
 - `--gpu-float32`: Use float32 for legacy GPU IS/GD. COV is float64-only.
@@ -202,15 +204,22 @@ backend, and wall time are recorded under
 python -m hipps_dimes observed_ddmap.npy cov_fit \
   --input-type ddmap --input-format npy \
   --method COV --gaussian-noise-relative-std 0.1 \
-  --covariance-initialization rouse --covariance-optimizer pdhg --use-gpu \
+  --covariance-initialization rouse --covariance-optimizer hybrid --use-gpu \
   --iteration 10000 --no-xyzs --save-pickle
 ```
 
-PDHG is the robust default and performs one internal eigendecomposition per
-iteration without an inner linear solve or a data-Hessian preconditioner. The
-returned Gram matrix is accepted only when a freshly recomputed,
-dual-eliminated relative KKT residual is at most `1e-5` by default. Use
-`--covariance-relative-tolerance 1e-8` for strict small-system tests.
+The hybrid default uses PDHG to traverse the covariance cone from the
+calibrated initialization. When its independently checked relative KKT
+residual reaches `1e-3`, the existing centered Newton-CG solver performs local
+refinement. The two phases share the single `--iteration` budget. The returned
+Gram matrix is accepted only when a freshly recomputed, dual-eliminated
+relative KKT residual is at most `1e-5` by default. Use
+`--covariance-relative-tolerance 1e-8` for strict small-system tests. The
+standalone `pdhg` and `newton` choices remain available.
+
+Each PDHG update performs one internal eigendecomposition without an inner
+linear solve or data-Hessian preconditioner. On handoff, Newton constructs the
+exact data-Hessian diagonal once and reuses it for all local updates.
 
 The optional Newton optimizer constructs the expensive exact data-Hessian
 diagonal once per fit and reuses it for every Newton iteration. Pair blocks of

@@ -110,6 +110,18 @@ def test_pdhg_default_relative_tolerance_is_production_value():
     assert parameter.default == 1e-5
 
 
+def test_hybrid_defaults_to_fixed_production_handoff():
+    signature = inspect.signature(
+        HippsDimes.fit_gaussian_noise_covariance_hybrid
+    )
+
+    assert signature.parameters["relative_tolerance"].default == 1e-5
+    assert (
+        signature.parameters["handoff_relative_tolerance"].default
+        == 1e-3
+    )
+
+
 def test_distance_operator_and_adjoint_are_exact_duals():
     rng = np.random.default_rng(20260827)
     n = 7
@@ -298,6 +310,81 @@ def test_pdhg_supports_heteroskedastic_noise_with_missing_pairs():
     assert independent <= 1e-5
 
 
+def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
+    target = _rouse_squared_distance_target(6)
+    variance = 0.1
+
+    reference = HippsDimes.fit_gaussian_noise_covariance(
+        target,
+        variance,
+        initialization="nearest_edm",
+        max_iterations=100,
+        relative_tolerance=1e-10,
+        absolute_tolerance=1e-12,
+    )
+    fitted, gram, connectivity, info = (
+        HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            variance,
+            max_iterations=500,
+        )
+    )
+
+    assert reference[3]["converged"]
+    assert info["converged"]
+    assert info["algorithm"] == "hybrid"
+    assert info["handoff"]["reached"]
+    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-3
+    assert info["phase_iterations"]["pdhg"] > 0
+    assert info["phase_iterations"]["newton"] > 0
+    assert sum(info["phase_iterations"].values()) == info["iterations"]
+    assert info["relative_eliminated_kkt_residual"] <= 1e-5
+    assert info["independent_kkt_recomputed_from_returned_gram"]
+    assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
+    assert np.allclose(gram, reference[1], rtol=2e-7, atol=2e-8)
+    assert np.allclose(
+        connectivity, reference[2], rtol=2e-6, atol=2e-7
+    )
+
+    history = info["history"]
+    assert len(history["iteration"]) == info["iterations"]
+    assert np.array_equal(
+        history["iteration"], np.arange(1, info["iterations"] + 1)
+    )
+    assert set(history["phase"]) == {"pdhg", "newton"}
+    assert history["phase"][-1] == "newton"
+    assert np.all(np.isfinite(history["objective"]))
+    assert np.isfinite(history["relative_eliminated_kkt_residual"][-1])
+
+
+def test_hybrid_rejects_handoff_stricter_than_final_tolerance():
+    target = _rouse_squared_distance_target(4)
+
+    with pytest.raises(ValueError, match="must not be smaller"):
+        HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            0.1,
+            relative_tolerance=1e-5,
+            handoff_relative_tolerance=1e-6,
+        )
+
+
+def test_hybrid_reports_when_total_budget_ends_before_handoff():
+    target = _rouse_squared_distance_target(6)
+
+    with pytest.warns(RuntimeWarning):
+        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            0.1,
+            max_iterations=1,
+        )
+
+    assert not info["converged"]
+    assert info["status"] == "pdhg_handoff_not_reached"
+    assert info["phase_iterations"] == {"pdhg": 1, "newton": 0}
+    assert info["iterations"] == 1
+
+
 def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     """Protect the COV objective with an experimental chromosome fixture."""
     metadata, contact, target, gram = _load_real_chromosome_case()
@@ -360,8 +447,8 @@ def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     not HippsDimes.is_gpu_available(),
     reason="full N=400 convergence regression requires a CUDA GPU",
 )
-def test_pdhg_converges_from_rouse_on_real_n400_contact_map():
-    """Run the complete public contact-map workflow on the real fixture."""
+def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
+    """Run the default public COV workflow on the real fixture."""
     metadata, contact, _, _ = _load_real_chromosome_case()
     solver = metadata["solver"]
     expected = metadata["reference_solution"]
@@ -375,7 +462,6 @@ def test_pdhg_converges_from_rouse_on_real_n400_contact_map():
             metadata["covariance_model"]["relative_noise_std"]
         ),
         covariance_initialization="rouse",
-        covariance_optimizer="pdhg",
         covariance_relative_tolerance=solver["relative_tolerance"],
         covariance_absolute_tolerance=solver["absolute_tolerance"],
         iteration=solver["maximum_iterations"],
@@ -391,6 +477,16 @@ def test_pdhg_converges_from_rouse_on_real_n400_contact_map():
 
     assert info["converged"]
     assert info["status"] == "optimality_tolerance"
+    assert info["algorithm"] == "hybrid"
+    assert info["handoff_relative_tolerance"] == pytest.approx(
+        solver["handoff_relative_tolerance"]
+    )
+    assert info["handoff"]["reached"]
+    assert info["handoff"]["relative_eliminated_kkt_residual"] <= (
+        solver["handoff_relative_tolerance"]
+    )
+    assert info["phase_iterations"]["pdhg"] > 0
+    assert info["phase_iterations"]["newton"] > 0
     assert info["independent_kkt_converged"]
     assert info["iterations"] <= solver["maximum_iterations"]
     assert info["relative_eliminated_kkt_residual"] <= (

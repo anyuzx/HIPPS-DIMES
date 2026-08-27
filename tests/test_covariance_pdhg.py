@@ -122,6 +122,21 @@ def test_hybrid_defaults_to_fixed_production_handoff():
     )
 
 
+def test_cupy_cg_tolerance_keyword_supports_old_and_new_signatures():
+    def cupy_13_cg(A, b, x0=None, tol=1e-5, atol=None):
+        return A, b, x0, tol, atol
+
+    def cupy_14_cg(A, b, x0=None, *, rtol=1e-5, atol=0.0):
+        return A, b, x0, rtol, atol
+
+    assert numerics._cupy_cg_tolerance_kwargs(cupy_13_cg, 2e-7) == {
+        "tol": 2e-7
+    }
+    assert numerics._cupy_cg_tolerance_kwargs(cupy_14_cg, 2e-7) == {
+        "rtol": 2e-7
+    }
+
+
 def test_distance_operator_and_adjoint_are_exact_duals():
     rng = np.random.default_rng(20260827)
     n = 7

@@ -2232,6 +2232,18 @@ def _preconditioned_conjugate_gradient(
     return solution, iteration, residual_norm, converged
 
 
+def _cupy_cg_tolerance_kwargs(conjugate_gradient_function, relative_tolerance):
+    """Return the tolerance keyword accepted by the installed CuPy CG."""
+    import inspect
+
+    parameters = inspect.signature(conjugate_gradient_function).parameters
+    if "rtol" in parameters:
+        return {"rtol": float(relative_tolerance)}
+    if "tol" in parameters:
+        return {"tol": float(relative_tolerance)}
+    raise TypeError("CuPy conjugate-gradient solver exposes no tolerance keyword")
+
+
 def _preconditioned_conjugate_gradient_gpu(
     operator,
     right_hand_side,
@@ -2269,11 +2281,13 @@ def _preconditioned_conjugate_gradient_gpu(
     solution_vector, solver_status = cupyx_sparse_linalg.cg(
         linear_operator,
         right_hand_side_vector,
-        tol=float(relative_tolerance),
         atol=0.0,
         maxiter=int(max_iterations),
         M=preconditioner,
         callback=count_iteration,
+        **_cupy_cg_tolerance_kwargs(
+            cupyx_sparse_linalg.cg, relative_tolerance
+        ),
     )
     solution = solution_vector.reshape(matrix_shape)
     solution = 0.5 * (solution + solution.T)

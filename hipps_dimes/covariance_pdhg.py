@@ -120,12 +120,19 @@ def _prox_centered_negative_logdet(
     eigenvalues, eigenvectors = _internal_eigh(
         matrix, householder_vector, xp
     )
-    updated = 0.5 * (
-        eigenvalues
-        + xp.sqrt(
-            xp.square(eigenvalues)
-            + 4.0 * _ENTROPY_COEFFICIENT * step_size
-        )
+    # Rationalize the negative branch so a small positive root is not lost
+    # when ``eigenvalues + root`` subtracts nearly equal magnitudes.
+    root = xp.hypot(
+        eigenvalues,
+        np.sqrt(4.0 * _ENTROPY_COEFFICIENT * step_size),
+    )
+    nonnegative = xp.maximum(eigenvalues, 0.0)
+    nonpositive = xp.minimum(eigenvalues, 0.0)
+    updated = xp.where(
+        eigenvalues >= 0.0,
+        0.5 * (nonnegative + root),
+        (2.0 * _ENTROPY_COEFFICIENT * step_size)
+        / (root - nonpositive),
     )
     internal = (eigenvectors * updated) @ eigenvectors.T
     inverse_internal = (

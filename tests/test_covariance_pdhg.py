@@ -167,6 +167,81 @@ def test_logdet_proximal_map_is_centered_spd_and_stationary():
     assert np.linalg.norm(residual, ord="fro") <= 1e-11
 
 
+def test_logdet_proximal_map_stably_handles_large_negative_eigenvalue():
+    n = 3
+    eigenvalues = np.array([-1e9, 2.0])
+    internal = np.diag(eigenvalues)
+    householder = pdhg._householder_vector(n, np)
+    matrix = pdhg._full_centered_from_internal(
+        internal, householder, np
+    )
+    step = 1.0
+
+    fitted, inverse, logdet, updated = (
+        pdhg._prox_centered_negative_logdet(
+            matrix, step, householder, np
+        )
+    )
+
+    assert updated[0] == pytest.approx(1.5e-9, rel=1e-14)
+    assert np.all(np.isfinite(updated))
+    assert np.all(updated > 0.0)
+    assert np.all(np.isfinite(fitted))
+    assert np.all(np.isfinite(inverse))
+    assert np.isfinite(logdet)
+    assert np.allclose(
+        updated * (updated - eigenvalues),
+        pdhg._ENTROPY_COEFFICIENT * step,
+        rtol=1e-14,
+        atol=1e-14,
+    )
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not HippsDimes.is_gpu_available(),
+                reason="requires CuPy and an accessible CUDA GPU",
+            ),
+        ),
+    ],
+)
+def test_pdhg_small_variance_inconsistent_target_stays_finite(use_gpu):
+    target = np.array(
+        [
+            [0.0, 0.19, 54.47],
+            [0.19, 0.0, 5.0],
+            [54.47, 5.0, 0.0],
+        ]
+    )
+
+    with pytest.warns(RuntimeWarning, match="without satisfying"):
+        fitted, gram, connectivity, info = (
+            HippsDimes.fit_gaussian_noise_covariance_pdhg(
+                target,
+                noise_variance=1e-8,
+                max_iterations=20,
+                use_gpu=use_gpu,
+            )
+        )
+
+    assert info["status"] == "max_iterations"
+    assert np.all(np.isfinite(fitted))
+    assert np.all(np.isfinite(gram))
+    assert np.all(np.isfinite(connectivity))
+    assert np.all(np.isfinite(info["history"]["objective"]))
+    assert np.all(
+        np.isfinite(info["history"]["gram_condition_number"])
+    )
+    assert np.all(
+        info["history"]["minimum_internal_gram_eigenvalue"] > 0.0
+    )
+
+
 def test_pdhg_matches_analytic_two_locus_solution():
     target_value = 2.7
     variance = 0.14

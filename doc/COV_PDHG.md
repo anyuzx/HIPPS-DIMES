@@ -61,7 +61,9 @@ B^{k+1}=U\operatorname{diag}\left[
 \]
 
 Every updated internal eigenvalue is positive, even if `Y` is indefinite. The
-extrapolated variable is
+negative-eigenvalue branch is evaluated with a rationalized quadratic root and
+`hypot` so this strict positivity is preserved in float64 without subtractive
+cancellation. The extrapolated variable is
 
 \[
 \bar B^{k+1}=B^{k+1}+\theta(B^{k+1}-B^k).

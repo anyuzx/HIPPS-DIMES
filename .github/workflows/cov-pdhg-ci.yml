@@ -1,0 +1,27 @@
+name: COV hybrid and PDHG CI
+
+on:
+  pull_request:
+    branches: [ feature/cov-gpu ]
+    paths:
+      - "hipps_dimes/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/cov-pdhg-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Install package and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run test suite
+        run: pytest -q

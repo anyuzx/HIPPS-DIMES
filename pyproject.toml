@@ -128,3 +128,6 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --cov=hipps_dimes --cov=HippsDimes --cov-report=term-missing --cov-report=html"
+markers = [
+    "real_data: production-scale regressions using bundled experimental data",
+]

@@ -69,8 +69,8 @@ D_{ij}^{\mathrm{fit}}-D_{ij}^{\mathrm{obs}}
 }.
 \]
 
-The COV diagnostics report both the covariance-gradient norm and the residual
-of this identity.
+The COV diagnostics report both this pair relation and the full
+dual-eliminated covariance-gradient residual.
 
 ## Why Gaussian noise is COV-only
 
@@ -118,24 +118,50 @@ s^*=\frac{c+\sqrt{c^2+6ma}}{2a}.
 \]
 
 This exact scalar step is applied to Rouse, weighted nearest-EDM, and supplied
-connectivity initializations before Newton. It preserves feasibility, supports
+connectivity initializations before the selected optimizer. It preserves feasibility, supports
 both noise models without imputing missing pairs, and changes a Rouse spring
 constant from $k_0$ to $k_0/s^*$. The initialization metadata records the
 scale and the COV objective before and after calibration.
 
+## COV optimizers and convergence
+
+The default `covariance_optimizer="hybrid"` uses PDHG to robustly traverse the
+covariance cone from the calibrated Rouse start. Once the independently
+recomputed relative KKT residual reaches `1e-3`, it passes the feasible
+connectivity matrix to the existing centered Newton-CG solver for local
+refinement. Both phases optimize the same objective, and their update counts
+share the single `iteration` budget. Standalone PDHG and Newton-CG remain
+available with `covariance_optimizer="pdhg"` and `"newton"`.
+
+PDHG monitors its primal and dual KKT equations during iteration. Before a
+returned solution is marked converged, the implementation discards the cached
+dual for certification, reconstructs
+
+\[
+y_{ij}(B)=\frac{D_{ij}(B)-D_{ij}^{\mathrm{obs}}}{v_{ij}},
+\]
+
+recomputes $B^+$ from the returned Gram matrix, and evaluates
+
+\[
+\mathcal D^*y(B)-\frac32B^+.
+\]
+
+The final default relative tolerance is $10^{-5}$ and the default hybrid
+handoff tolerance is $10^{-3}$; both are configurable. A stricter final
+$10^{-8}$ value remains available for small, well-conditioned tests.
+
 ## CPU and GPU backends
 
-The CPU and GPU backends optimize the same objective with the same Newton-CG
-control logic. The GPU path uses float64 for the Gram matrix, objective,
-gradient, Hessian actions, preconditioner, and conjugate-gradient solve. It
-requires CuPy and an accessible CUDA GPU and does not silently fall back to the
-CPU. Rouse initialization is computed on the CPU. Weighted nearest-EDM
-initialization uses the selected backend; its initialized Gram matrix is then
-passed to the COV solver. Final fitted matrices and saved checkpoints are NumPy
-arrays.
+The CPU and GPU backends optimize the same objective. The GPU path uses float64
+for PDHG and Newton-CG matrix operations. It requires CuPy and an accessible
+CUDA GPU and does not silently fall back to the CPU. Rouse initialization is
+computed on the CPU. Weighted nearest-EDM initialization uses the selected
+backend; its initialized Gram matrix is then passed to the COV solver. Final
+fitted matrices and saved checkpoints are NumPy arrays.
 
-Both backends construct the exact diagonal of the Gaussian data Hessian as the
-Newton-CG preconditioner. For pair vector
+When Newton is selected, both backends construct the exact diagonal of the
+Gaussian data Hessian as its preconditioner. For pair vector
 $z_{ij}=Q_i-Q_j$ in the internal basis $Q$, this diagonal is
 
 \[

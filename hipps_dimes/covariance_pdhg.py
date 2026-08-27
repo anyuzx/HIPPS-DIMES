@@ -205,6 +205,83 @@ def _relative_kkt_residuals(
     )
 
 
+def _eliminated_kkt_residuals(
+    gram,
+    inverse_gram,
+    target,
+    variance,
+    n,
+    pair_i,
+    pair_j,
+    xp,
+    *,
+    fitted=None,
+):
+    """Evaluate primal stationarity after analytically eliminating the dual."""
+    if fitted is None:
+        fitted = _distance_operator(gram, pair_i, pair_j, xp)
+    eliminated_dual = (fitted - target) / variance
+    data_gradient = _distance_adjoint(
+        eliminated_dual, n, pair_i, pair_j, xp
+    )
+    entropy_gradient = _ENTROPY_COEFFICIENT * inverse_gram
+    residual = data_gradient - entropy_gradient
+    residual_norm = _norm(residual, xp)
+    residual_scale = max(
+        _norm(data_gradient, xp),
+        _norm(entropy_gradient, xp),
+        np.finfo(np.float64).tiny,
+    )
+    return (
+        residual_norm,
+        residual_scale,
+        residual_norm / residual_scale,
+        fitted,
+        residual,
+    )
+
+
+def _independent_eliminated_kkt_residuals(
+    gram,
+    target,
+    variance,
+    pair_i,
+    pair_j,
+):
+    """Recompute eliminated KKT stationarity from a returned physical Gram."""
+    gram = _symmetrize(np.asarray(gram, dtype=np.float64))
+    target = np.asarray(target, dtype=np.float64)
+    variance = np.asarray(variance, dtype=np.float64)
+    pair_i = np.asarray(pair_i, dtype=np.int64)
+    pair_j = np.asarray(pair_j, dtype=np.int64)
+    n = gram.shape[0]
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    zero_index = int(np.argmin(np.abs(eigenvalues)))
+    internal_mask = np.ones(n, dtype=bool)
+    internal_mask[zero_index] = False
+    internal_eigenvalues = eigenvalues[internal_mask]
+    minimum = float(np.min(internal_eigenvalues))
+    if not np.isfinite(minimum) or minimum <= 0.0:
+        raise RuntimeError(
+            "Cannot certify a returned Gram matrix that is not positive "
+            "definite on the internal subspace"
+        )
+    internal_vectors = eigenvectors[:, internal_mask]
+    inverse_gram = (
+        internal_vectors * (1.0 / internal_eigenvalues)
+    ) @ internal_vectors.T
+    return _eliminated_kkt_residuals(
+        gram,
+        inverse_gram,
+        target,
+        variance,
+        n,
+        pair_i,
+        pair_j,
+        np,
+    )
+
+
 def _choose_initial_dual(
     gram,
     inverse_gram,
@@ -286,7 +363,7 @@ def fit_gaussian_noise_covariance_pdhg(
     initial_connectivity=None,
     use_gpu=False,
     max_iterations=1000,
-    relative_tolerance=1e-8,
+    relative_tolerance=1e-5,
     absolute_tolerance=1e-10,
     initial_gram_floor_relative=1e-8,
     save_steps=None,
@@ -309,7 +386,9 @@ def fit_gaussian_noise_covariance_pdhg(
     Parameters shared with ``fit_gaussian_noise_covariance`` have the same
     meaning. ``step_ratio`` is ``tau / sigma``. When omitted, a scale-aware
     value is selected automatically and, by default, balanced using the KKT
-    residuals while the product ``tau * sigma`` remains fixed. The bound
+    residuals while the product ``tau * sigma`` remains fixed. The returned
+    Gram matrix is accepted only after a fresh, dual-eliminated KKT check. The
+    bound
     ``||D||^2 <= 2N`` for the complete centered distance operator guarantees
     ``tau * sigma * ||D||^2 < 1`` for every observed-pair subset.
     """
@@ -507,6 +586,8 @@ def fit_gaussian_noise_covariance_pdhg(
         "distance_rmse": [],
         "relative_primal_kkt_residual": [],
         "relative_dual_kkt_residual": [],
+        "relative_eliminated_kkt_residual": [],
+        "relative_gradient_norm": [],
         "relative_stationarity_residual": [],
         "primal_step": [],
         "dual_step": [],
@@ -587,7 +668,25 @@ def fit_gaussian_noise_covariance_pdhg(
             dual_relative,
             fitted_normalized,
         ) = residuals
-        stationarity_score = max(primal_relative, dual_relative)
+        eliminated_residuals = _eliminated_kkt_residuals(
+            gram,
+            inverse_gram,
+            target,
+            variance,
+            n,
+            solver_pair_i,
+            solver_pair_j,
+            xp,
+            fitted=fitted_normalized,
+        )
+        (
+            eliminated_norm,
+            eliminated_scale,
+            eliminated_relative,
+            _,
+            _,
+        ) = eliminated_residuals
+        stationarity_score = eliminated_relative
         data_residual = fitted_normalized - target
         data_objective = 0.5 * _scalar(
             xp.sum(xp.square(data_residual) / variance)
@@ -640,6 +739,10 @@ def fit_gaussian_noise_covariance_pdhg(
         history["distance_rmse"].append(distance_rmse)
         history["relative_primal_kkt_residual"].append(primal_relative)
         history["relative_dual_kkt_residual"].append(dual_relative)
+        history["relative_eliminated_kkt_residual"].append(
+            eliminated_relative
+        )
+        history["relative_gradient_norm"].append(stationarity_score)
         history["relative_stationarity_residual"].append(
             stationarity_score
         )
@@ -708,6 +811,9 @@ def fit_gaussian_noise_covariance_pdhg(
                     "relative_gradient_norm": stationarity_score,
                     "relative_primal_kkt_residual": primal_relative,
                     "relative_dual_kkt_residual": dual_relative,
+                    "relative_eliminated_kkt_residual": (
+                        eliminated_relative
+                    ),
                     "primal_step": used_primal_step,
                     "dual_step": used_dual_step,
                     "step_ratio": used_step_ratio,
@@ -726,10 +832,13 @@ def fit_gaussian_noise_covariance_pdhg(
         dual_converged = dual_norm <= (
             absolute_tolerance + relative_tolerance * dual_scale
         )
-        if primal_converged and dual_converged:
+        eliminated_converged = eliminated_norm <= (
+            absolute_tolerance + relative_tolerance * eliminated_scale
+        )
+        if primal_converged and dual_converged and eliminated_converged:
             converged = True
             status = "optimality_tolerance"
-            message = "PDHG KKT tolerance reached"
+            message = "PDHG primal, dual, and eliminated KKT tolerances reached"
             break
 
     if return_best and best is not None:
@@ -745,13 +854,6 @@ def fit_gaussian_noise_covariance_pdhg(
     else:
         best_iteration = iteration
 
-    fitted_normalized = _distance_operator(
-        gram, solver_pair_i, solver_pair_j, xp
-    )
-    fitted_pairs = distance_scale * fitted_normalized
-    full_fitted = xp.zeros((n, n), dtype=xp.float64)
-    full_fitted[solver_pair_i, solver_pair_j] = fitted_pairs
-    full_fitted[solver_pair_j, solver_pair_i] = fitted_pairs
     full_fitted = _num._squared_distances_from_gram(
         distance_scale * gram, array_module=xp
     )
@@ -767,13 +869,13 @@ def fit_gaussian_noise_covariance_pdhg(
         dual = _num.cp.asnumpy(dual)
 
     fitted_pairs_cpu = full_fitted[pair_i, pair_j]
-    stationarity = (
+    pair_stationarity = (
         fitted_pairs_cpu
         - target_pairs
         - 0.5 * pair_variance * connectivity[pair_i, pair_j]
     )
-    stationarity_norm = float(np.linalg.norm(stationarity))
-    stationarity_scale = max(
+    pair_stationarity_norm = float(np.linalg.norm(pair_stationarity))
+    pair_stationarity_scale = max(
         1.0,
         float(np.linalg.norm(fitted_pairs_cpu - target_pairs)),
         float(
@@ -813,6 +915,38 @@ def fit_gaussian_noise_covariance_pdhg(
         final_primal_relative = float(final_residuals[2])
         final_dual_relative = float(final_residuals[5])
 
+    independent_residuals = _independent_eliminated_kkt_residuals(
+        full_gram,
+        target_pairs,
+        pair_variance,
+        pair_i,
+        pair_j,
+    )
+    (
+        independent_norm,
+        independent_scale,
+        independent_relative,
+        _,
+        independent_residual,
+    ) = independent_residuals
+    runtime_eliminated_relative = float(
+        history["relative_eliminated_kkt_residual"][best_iteration - 1]
+    )
+    internal_kkt_converged = bool(converged)
+    if relative_tolerance > 0.0:
+        independent_kkt_converged = (
+            independent_relative <= relative_tolerance
+        )
+    else:
+        independent_kkt_converged = independent_norm <= absolute_tolerance
+    converged = internal_kkt_converged and independent_kkt_converged
+    if internal_kkt_converged and not independent_kkt_converged:
+        status = "independent_kkt_failed"
+        message = (
+            "PDHG internal tolerances were reached, but the returned Gram "
+            "matrix failed the independent eliminated KKT certificate"
+        )
+
     info = {
         "converged": bool(converged),
         "status": status,
@@ -820,18 +954,31 @@ def fit_gaussian_noise_covariance_pdhg(
         "iterations": int(iteration),
         "returned_iteration": int(best_iteration),
         "objective": float(history["objective"][best_iteration - 1]),
-        "relative_gradient_norm": max(
-            final_primal_relative, final_dual_relative
-        ),
+        "relative_gradient_norm": float(independent_relative),
         "relative_primal_kkt_residual": final_primal_relative,
         "relative_dual_kkt_residual": final_dual_relative,
-        "stationarity_residual_norm": stationarity_norm,
-        "relative_stationarity_residual": (
-            stationarity_norm / stationarity_scale
+        "relative_eliminated_kkt_residual": float(independent_relative),
+        "runtime_relative_eliminated_kkt_residual": (
+            runtime_eliminated_relative
         ),
+        "stationarity_residual_norm": float(independent_norm),
+        "stationarity_residual_scale": float(independent_scale),
+        "relative_stationarity_residual": float(independent_relative),
         "maximum_absolute_stationarity_residual": float(
-            np.max(np.abs(stationarity))
+            np.max(np.abs(independent_residual))
         ),
+        "pair_stationarity_residual_norm": pair_stationarity_norm,
+        "relative_pair_stationarity_residual": (
+            pair_stationarity_norm / pair_stationarity_scale
+        ),
+        "maximum_absolute_pair_stationarity_residual": float(
+            np.max(np.abs(pair_stationarity))
+        ),
+        "termination_internal_kkt_converged": internal_kkt_converged,
+        "independent_kkt_converged": bool(independent_kkt_converged),
+        "independent_kkt_recomputed_from_returned_gram": True,
+        "relative_tolerance": float(relative_tolerance),
+        "absolute_tolerance": float(absolute_tolerance),
         "observed_pair_count": len(target_pairs),
         "noise_model": noise_model,
         "noise_parameter": noise_parameter,
@@ -869,9 +1016,15 @@ def fit_gaussian_noise_covariance_pdhg(
             "(D_fit-D_obs)^2/noise_variance)"
         ),
         "stationarity_definition": (
+            "D_adjoint((D(B)-D_obs)/noise_variance)-1.5*B_pseudoinverse"
+        ),
+        "pair_stationarity_definition": (
             "D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"
         ),
-        "logged_metric_timing": "post-update PDHG primal/dual iterate",
+        "logged_metric_timing": (
+            "post-update PDHG iterate; final certificate recomputed from "
+            "returned Gram matrix"
+        ),
     }
     if not converged:
         warnings.warn(

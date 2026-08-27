@@ -109,10 +109,29 @@ D_{ij}^{\rm fit}-D_{ij}^{\rm obs}
 \]
 
 Because PDHG objective values need not be monotone, the implementation returns
-the iterate with the smallest maximum relative KKT residual when
-`return_best=True`.
+the iterate with the smallest dual-eliminated relative KKT residual when
+`return_best=True`. It then independently recomputes the pseudoinverse and
+certificate from that returned Gram matrix. `info["converged"]` is true only
+when the internal stopping conditions and this final certificate pass.
 
 ## Use
+
+PDHG is the default optimizer for the high-level COV interface:
+
+```python
+results = HippsDimes.run_optimization(
+    input_matrix=target_ddmap,
+    input_type="ddmap",
+    method="COV",
+    gaussian_noise_relative_std=0.10,
+    covariance_optimizer="pdhg",
+    covariance_relative_tolerance=1e-5,
+    iteration=10000,
+    use_gpu=True,
+)
+```
+
+The low-level solver remains available directly:
 
 ```python
 import HippsDimes
@@ -131,9 +150,9 @@ fitted_ddmap, gram, connectivity, info = (
 For homoskedastic errors, pass `noise_variance=<positive scalar>` instead of
 `relative_noise_std`.
 
-The current Newton-CG solver is unchanged and remains the default COV solver.
-PDHG is intentionally opt-in until it is benchmarked against the N=400 cases
-and the converged nearest-EDM reference.
+The Newton-CG solver remains available through
+`covariance_optimizer="newton"`. It is not deleted or wrapped by PDHG and can
+still be used as a local solver or reference implementation.
 
 ## Main tuning parameters
 
@@ -146,6 +165,9 @@ and the converged nearest-EDM reference.
   residual balancing.
 - `dual_initialization`: `auto`, `zero`, `residual`, or `connectivity`.
 - `theta`: extrapolation coefficient in `[0,1]`; default `1`.
+- `relative_tolerance`: production relative KKT tolerance; default `1e-5`.
+  Explicitly pass `1e-8` for strict small-system validation.
 
-The history records objective components, both KKT residuals, step sizes,
-step-ratio adaptations, Gram conditioning, and connectivity norm.
+The history records objective components, primal, dual, and dual-eliminated
+KKT residuals, step sizes, step-ratio adaptations, Gram conditioning, and
+connectivity norm.

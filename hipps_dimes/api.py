@@ -8,9 +8,89 @@ import numpy as np
 import pandas as pd
 import scipy
 from rich import print
+from tqdm import tqdm
 
+from .covariance_pdhg import fit_gaussian_noise_covariance_pdhg
 from .models import Optimize
 from .numerics import *  # noqa: F401,F403
+
+
+_COVARIANCE_PROGRESS_STAGES = {
+    'nearest_edm_initialization': ('Nearest EDM initialization', 'iteration'),
+    'covariance_preconditioner': ('COV preconditioner', 'block'),
+}
+
+
+def _make_covariance_progress_callback(progress_callback, show_progress):
+    """Render COV solver stages while preserving structured callbacks."""
+    if not show_progress:
+        return progress_callback, lambda: None
+
+    progress_bar = None
+    current_stage = None
+
+    def close_progress_bar():
+        nonlocal progress_bar
+        if progress_bar is not None:
+            progress_bar.close()
+            progress_bar = None
+
+    def report_progress(event):
+        nonlocal current_stage, progress_bar
+        if progress_callback is not None:
+            progress_callback(event)
+
+        stage = event.get('stage')
+        phase = event.get('phase')
+        if stage == 'covariance_optimization':
+            description = (
+                'COV PDHG optimization'
+                if phase == 'pdhg'
+                else 'COV Newton optimization'
+            )
+            unit = 'iteration'
+        elif stage in _COVARIANCE_PROGRESS_STAGES:
+            description, unit = _COVARIANCE_PROGRESS_STAGES[stage]
+        else:
+            return
+
+        stage_key = (stage, phase)
+        if stage_key != current_stage:
+            close_progress_bar()
+            progress_bar = tqdm(
+                total=int(event['total']),
+                desc=description,
+                unit=unit,
+            )
+            current_stage = stage_key
+
+        if stage == 'nearest_edm_initialization':
+            progress_bar.set_postfix(
+                objective=f"{event['objective']:.3e}",
+                weighted_rmse=f"{event['weighted_rmse']:.3e}",
+                relative_gradient=(
+                    f"{event['relative_projected_gradient_norm']:.3e}"
+                ),
+                refresh=False,
+            )
+        elif stage == 'covariance_preconditioner':
+            progress_bar.set_postfix(
+                pairs=f"{event['pairs_completed']}/{event['pair_count']}",
+                refresh=False,
+            )
+        else:
+            postfix = {
+                'objective': f"{event['objective']:.3e}",
+                'relative_kkt': f"{event['relative_gradient_norm']:.3e}",
+            }
+            if 'cg_iterations' in event:
+                postfix['cg_iterations'] = int(event['cg_iterations'])
+            progress_bar.set_postfix(**postfix, refresh=False)
+
+        completed = int(event['iteration'])
+        progress_bar.update(max(0, completed - progress_bar.n))
+
+    return report_progress, close_progress_bar
 
 
 def _build_iteration_series_frame(loss, entropy, extra_series=None):
@@ -233,6 +313,9 @@ def run_optimization(input_path=None,
                      gaussian_noise_variance=0.0,
                      gaussian_noise_relative_std=None,
                      covariance_initialization='rouse',
+                     covariance_optimizer='pdhg',
+                     covariance_relative_tolerance=1e-5,
+                     covariance_absolute_tolerance=1e-10,
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -292,6 +375,17 @@ def run_optimization(input_path=None,
         conversion and missing-data handling.
     covariance_initialization : {'rouse', 'nearest_edm'}, default='rouse'
         Initialization used by COV when no connectivity matrix is supplied.
+    covariance_optimizer : {'pdhg', 'newton'}, default='pdhg'
+        Optimizer used for the Gaussian COV objective. PDHG is the robust
+        global default; Newton-CG remains available for comparison and local
+        refinement from a good initialization.
+    covariance_relative_tolerance : float, default=1e-5
+        Relative COV KKT tolerance. For PDHG, the returned Gram matrix must
+        pass a freshly recomputed dual-eliminated KKT certificate at this
+        tolerance before the run is reported as converged.
+    covariance_absolute_tolerance : float, default=1e-10
+        Absolute tolerance used by the selected COV optimizer's internal KKT
+        checks.
     iteration : int, default=10000
         Number of optimization iterations
     learning_rate : float, default=10.0
@@ -305,11 +399,11 @@ def run_optimization(input_path=None,
         NAG's look-ahead correction enables higher momentum (0.95) without divergence.
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
-        If True, use CuPy GPU acceleration. COV uses float64 throughout, builds
-        its exact data-Hessian diagonal preconditioner once in bounded pair
-        blocks, and runs a requested nearest-EDM initializer on the same GPU.
-        It fails clearly if no CUDA GPU is accessible. Legacy IS/GD retain
-        their existing GPU behavior.
+        If True, use CuPy GPU acceleration. Both COV solvers use float64
+        throughout, and a requested nearest-EDM initializer runs on the same
+        GPU. Newton-CG additionally builds its exact data-Hessian diagonal
+        preconditioner once in bounded pair blocks. COV fails clearly if no
+        CUDA GPU is accessible. Legacy IS/GD retain their existing behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -360,7 +454,9 @@ def run_optimization(input_path=None,
         Payload keys include iteration, total, loss, entropy,
         iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
     show_progress : bool, default=True
-        Whether to render solver progress bars. Set to False when consuming
+        Whether to render solver progress bars. COV reports nearest-EDM
+        initialization and the selected optimizer separately; Newton also
+        reports preconditioner construction. Set to False when consuming
         progress_callback programmatically.
         
     Returns
@@ -395,8 +491,8 @@ def run_optimization(input_path=None,
     
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
-    - COV keeps Newton-CG matrix operations on the GPU in float64
-    - COV builds the exact blockwise data-Hessian diagonal once per fit
+    - Both COV optimizers run GPU matrix operations in float64
+    - COV Newton builds the exact blockwise data-Hessian diagonal once per fit
     - For small matrices, CPU may be faster due to GPU setup overhead
     - Install CuPy: conda install -c conda-forge cupy
     
@@ -484,6 +580,41 @@ def run_optimization(input_path=None,
         raise ValueError(
             "covariance_initialization must be 'rouse' or 'nearest_edm'"
         )
+    if covariance_optimizer not in {'pdhg', 'newton'}:
+        raise ValueError("covariance_optimizer must be 'pdhg' or 'newton'")
+    covariance_tolerances = {
+        'covariance_relative_tolerance': covariance_relative_tolerance,
+        'covariance_absolute_tolerance': covariance_absolute_tolerance,
+    }
+    for tolerance_name, tolerance_value in covariance_tolerances.items():
+        if isinstance(tolerance_value, (bool, np.bool_)) or not np.isscalar(
+            tolerance_value
+        ):
+            raise ValueError(f"{tolerance_name} must be a nonnegative finite scalar")
+        try:
+            covariance_tolerances[tolerance_name] = float(tolerance_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{tolerance_name} must be a nonnegative finite scalar"
+            ) from error
+        if (
+            not np.isfinite(covariance_tolerances[tolerance_name])
+            or covariance_tolerances[tolerance_name] < 0.0
+        ):
+            raise ValueError(
+                f"{tolerance_name} must be a nonnegative finite scalar"
+            )
+    covariance_relative_tolerance = covariance_tolerances[
+        'covariance_relative_tolerance'
+    ]
+    covariance_absolute_tolerance = covariance_tolerances[
+        'covariance_absolute_tolerance'
+    ]
+    if (
+        covariance_relative_tolerance == 0.0
+        and covariance_absolute_tolerance == 0.0
+    ):
+        raise ValueError("at least one covariance convergence tolerance must be positive")
 
     has_absolute_noise = gaussian_noise_variance > 0.0
     has_relative_noise = gaussian_noise_relative_std is not None
@@ -514,6 +645,18 @@ def run_optimization(input_path=None,
         if covariance_initialization != 'rouse':
             raise ValueError(
                 "covariance_initialization is supported only with method='COV'"
+            )
+        if covariance_optimizer != 'pdhg':
+            raise ValueError(
+                "covariance_optimizer is supported only with method='COV'"
+            )
+        if (
+            covariance_relative_tolerance != 1e-5
+            or covariance_absolute_tolerance != 1e-10
+        ):
+            raise ValueError(
+                "covariance convergence tolerances are supported only with "
+                "method='COV'"
             )
     if log is not None:
         no_log = not log
@@ -937,6 +1080,7 @@ def run_optimization(input_path=None,
             else:
                 opt_table.add_row("Regularization", "None")
             if method == 'COV':
+                opt_table.add_row("Optimizer", covariance_optimizer)
                 opt_table.add_row(
                     "Initialization",
                     "provided connectivity"
@@ -952,6 +1096,14 @@ def run_optimization(input_path=None,
                         "Noise Model",
                         f"relative std {gaussian_noise_relative_std}",
                     )
+                opt_table.add_row(
+                    "Relative KKT Tolerance",
+                    f"{covariance_relative_tolerance:.3e}",
+                )
+                opt_table.add_row(
+                    "Absolute KKT Tolerance",
+                    f"{covariance_absolute_tolerance:.3e}",
+                )
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -1007,22 +1159,35 @@ def run_optimization(input_path=None,
     use_gpu_enabled = False
 
     if method == 'COV':
-        (
-            fitted_ddmap,
-            fitted_gram_matrix,
-            final_connectivity_matrix,
-            covariance_optimization_info,
-        ) = fit_gaussian_noise_covariance(
-            ddmap_target,
-            gaussian_noise_variance if has_absolute_noise else None,
-            relative_noise_std=gaussian_noise_relative_std,
-            initialization=covariance_initialization,
-            initial_connectivity=connectivity_matrix,
-            use_gpu=use_gpu,
-            max_iterations=iteration,
-            save_steps=save_steps,
-            progress_callback=progress_callback,
+        covariance_solver = (
+            fit_gaussian_noise_covariance_pdhg
+            if covariance_optimizer == 'pdhg'
+            else fit_gaussian_noise_covariance
         )
+        covariance_progress_callback, close_covariance_progress = (
+            _make_covariance_progress_callback(progress_callback, show_progress)
+        )
+        try:
+            (
+                fitted_ddmap,
+                fitted_gram_matrix,
+                final_connectivity_matrix,
+                covariance_optimization_info,
+            ) = covariance_solver(
+                ddmap_target,
+                gaussian_noise_variance if has_absolute_noise else None,
+                relative_noise_std=gaussian_noise_relative_std,
+                initialization=covariance_initialization,
+                initial_connectivity=connectivity_matrix,
+                use_gpu=use_gpu,
+                max_iterations=iteration,
+                relative_tolerance=covariance_relative_tolerance,
+                absolute_tolerance=covariance_absolute_tolerance,
+                save_steps=save_steps,
+                progress_callback=covariance_progress_callback,
+            )
+        finally:
+            close_covariance_progress()
         dmap_maxent = a2dmap_theory(
             final_connectivity_matrix, force_positive_definite=True
         )
@@ -1147,6 +1312,42 @@ def run_optimization(input_path=None,
         'covariance_initialization_requested': (
             covariance_initialization if method == 'COV' else None
         ),
+        'covariance_optimizer_requested': (
+            covariance_optimizer if method == 'COV' else None
+        ),
+        'covariance_optimizer_resolved': (
+            covariance_optimization_info.get('algorithm', 'newton')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_relative_tolerance': (
+            covariance_relative_tolerance if method == 'COV' else None
+        ),
+        'covariance_absolute_tolerance': (
+            covariance_absolute_tolerance if method == 'COV' else None
+        ),
+        'covariance_converged': (
+            covariance_optimization_info['converged']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_status': (
+            covariance_optimization_info['status']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_relative_eliminated_kkt_residual': (
+            covariance_optimization_info.get(
+                'relative_eliminated_kkt_residual'
+            )
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_independent_kkt_converged': (
+            covariance_optimization_info.get('independent_kkt_converged')
+            if covariance_optimization_info is not None
+            else None
+        ),
         'covariance_initialization_resolved': (
             covariance_optimization_info['initialization']['kind']
             if covariance_optimization_info is not None
@@ -1190,17 +1391,17 @@ def run_optimization(input_path=None,
             else None
         ),
         'covariance_preconditioner_pair_block_size': (
-            covariance_optimization_info['preconditioner_pair_block_size']
+            covariance_optimization_info.get('preconditioner_pair_block_size')
             if covariance_optimization_info is not None
             else None
         ),
         'covariance_preconditioner_setup_seconds': (
-            covariance_optimization_info['preconditioner_setup_seconds']
+            covariance_optimization_info.get('preconditioner_setup_seconds')
             if covariance_optimization_info is not None
             else None
         ),
         'covariance_preconditioner_data_setup_count': (
-            covariance_optimization_info['preconditioner_data_setup_count']
+            covariance_optimization_info.get('preconditioner_data_setup_count')
             if covariance_optimization_info is not None
             else None
         ),

@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 import HippsDimes
+import hipps_dimes.api as api
 import hipps_dimes.numerics as numerics
 from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
 from hipps_dimes.cli import main as cli_main
@@ -349,6 +350,94 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
 
 
+@pytest.mark.parametrize(
+    "optimizer, expected_descriptions, expected_stages, expects_cg",
+    [
+        (
+            "pdhg",
+            ["Nearest EDM initialization", "COV PDHG optimization"],
+            {"nearest_edm_initialization", "covariance_optimization"},
+            False,
+        ),
+        (
+            "newton",
+            [
+                "Nearest EDM initialization",
+                "COV preconditioner",
+                "COV Newton optimization",
+            ],
+            {
+                "nearest_edm_initialization",
+                "covariance_preconditioner",
+                "covariance_optimization",
+            },
+            True,
+        ),
+    ],
+)
+def test_cov_progress_distinguishes_pdhg_and_newton(
+    monkeypatch,
+    optimizer,
+    expected_descriptions,
+    expected_stages,
+    expects_cg,
+):
+    """COV should render solver-specific stages and preserve callbacks."""
+
+    class FakeProgressBar:
+        instances = []
+
+        def __init__(self, *, total, desc, unit):
+            self.total = total
+            self.desc = desc
+            self.unit = unit
+            self.n = 0
+            self.postfix = {}
+            self.closed = False
+            self.instances.append(self)
+
+        def set_postfix(self, **values):
+            values.pop("refresh", None)
+            self.postfix = values
+
+        def update(self, amount):
+            self.n += amount
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(api, "tqdm", FakeProgressBar)
+
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    updates = []
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        covariance_optimizer=optimizer,
+        covariance_initialization="nearest_edm",
+        gaussian_noise_variance=0.1,
+        iteration=200,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=True,
+        progress_callback=updates.append,
+    )
+
+    bars = FakeProgressBar.instances
+    assert [bar.desc for bar in bars] == expected_descriptions
+    assert all(bar.closed and bar.n > 0 for bar in bars)
+    assert {update["stage"] for update in updates} == expected_stages
+    optimization_bar = bars[-1]
+    assert ("cg_iterations" in optimization_bar.postfix) is expects_cg
+    assert "relative_kkt" in optimization_bar.postfix
+    assert results["covariance_optimization"]["converged"]
+
+
 def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix():
     """COV should return save-step snapshots and calibrated diagnostics."""
     n = 6
@@ -360,7 +449,7 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
         input_type="dmap",
         input_format="text",
         method="COV",
-        iteration=30,
+        iteration=200,
         gaussian_noise_variance=0.1,
         save_steps=[1, 3],
         no_xyzs=True,
@@ -373,8 +462,27 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
     assert results["connectivity_matrix_at_steps"][1].shape == (n, n)
     assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
     assert results["covariance_optimization"]["converged"]
+    assert results["covariance_optimization"]["algorithm"] == "pdhg"
+    assert (
+        results["covariance_optimization"][
+            "relative_eliminated_kkt_residual"
+        ]
+        <= 1e-5
+    )
     assert results["covariance_optimization"]["initialization"]["kind"] == "rouse"
     assert results["gram_matrix"].shape == (n, n)
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    assert parameters["covariance_optimizer_requested"] == "pdhg"
+    assert parameters["covariance_optimizer_resolved"] == "pdhg"
+    assert parameters["covariance_relative_tolerance"] == pytest.approx(1e-5)
+    assert parameters["covariance_absolute_tolerance"] == pytest.approx(1e-10)
+    assert bool(parameters["covariance_independent_kkt_converged"])
+    assert parameters["covariance_preconditioner_setup_seconds"] is None
 
 
 def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
@@ -389,7 +497,7 @@ def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
         input_format="text",
         method="COV",
         gaussian_noise_relative_std=relative_std,
-        iteration=30,
+        iteration=200,
         no_xyzs=True,
         verbose=False,
         show_progress=False,
@@ -441,7 +549,7 @@ def test_run_optimization_cov_cmap_nearest_edm_ignores_missing_pairs(tmp_path):
         method="COV",
         gaussian_noise_relative_std=0.1,
         covariance_initialization="nearest_edm",
-        iteration=40,
+        iteration=300,
         ignore_missing_data=True,
         not_normalize=True,
         no_xyzs=True,
@@ -478,6 +586,7 @@ def test_run_optimization_cov_uses_gpu_backend():
         input_type="dmap",
         input_format="text",
         method="COV",
+        covariance_optimizer="newton",
         gaussian_noise_variance=0.05,
         iteration=30,
         use_gpu=True,
@@ -506,6 +615,7 @@ def test_run_optimization_cov_uses_gpu_backend():
     assert parameters["covariance_dtype"] == "float64"
     assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()
     assert parameters["covariance_cupy_version"] == numerics.cp.__version__
+    assert parameters["covariance_optimizer_resolved"] == "newton"
     assert parameters["covariance_preconditioner_setup_seconds"] >= 0.0
     assert parameters["covariance_preconditioner_data_setup_count"] == 1
 
@@ -548,6 +658,18 @@ def test_run_optimization_rejects_gaussian_noise_outside_cov(method):
             {"gaussian_noise_variance": 0.1, "gpu_float32": True},
             "float64 only",
         ),
+        (
+            {"gaussian_noise_variance": 0.1, "covariance_optimizer": "bad"},
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_relative_tolerance": 0.0,
+                "covariance_absolute_tolerance": 0.0,
+            },
+            "at least one covariance convergence tolerance",
+        ),
     ],
 )
 def test_run_optimization_rejects_invalid_cov_combinations(options, message):
@@ -564,6 +686,20 @@ def test_run_optimization_rejects_invalid_cov_combinations(options, message):
         )
 
 
+def test_run_optimization_rejects_covariance_solver_options_outside_cov():
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="only with method='COV'"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method="IS",
+            covariance_optimizer="newton",
+            no_xyzs=True,
+            verbose=False,
+        )
+
+
 def test_legacy_optimize_no_longer_exposes_noisy_solver():
     target = np.array([[0.0, 1.0], [1.0, 0.0]])
 
@@ -572,7 +708,7 @@ def test_legacy_optimize_no_longer_exposes_noisy_solver():
     assert not hasattr(model, "run_noisy")
 
 
-def test_cli_help_exposes_cov_noise_and_initialization_contract():
+def test_cli_help_exposes_cov_solver_noise_and_initialization_contract():
     result = CliRunner().invoke(cli_main, ["--help"])
     parameter_names = {parameter.name for parameter in cli_main.params}
 
@@ -580,6 +716,53 @@ def test_cli_help_exposes_cov_noise_and_initialization_contract():
     assert "COV" in result.output
     assert "gaussian_noise_relative_std" in parameter_names
     assert "covariance_initialization" in parameter_names
+    assert "covariance_optimizer" in parameter_names
+    assert "covariance_relative_tolerance" in parameter_names
+    assert "covariance_absolute_tolerance" in parameter_names
+
+
+def test_cli_routes_cov_to_pdhg_with_configurable_tolerance(tmp_path):
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    input_path = tmp_path / "target.npy"
+    output_prefix = tmp_path / "cov_pdhg"
+    np.save(input_path, dmap_target)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(input_path),
+            str(output_prefix),
+            "--input-type",
+            "dmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "COV",
+            "--gaussian-noise-variance",
+            "0.1",
+            "--covariance-optimizer",
+            "pdhg",
+            "--covariance-relative-tolerance",
+            "1e-5",
+            "--iteration",
+            "200",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(
+        tmp_path / "cov_pdhg_HIPPS_DIMES_results.pkl", "rb"
+    ) as fin:
+        payload = pickle.load(fin)
+    info = payload["covariance_optimization"]
+    assert info["algorithm"] == "pdhg"
+    assert info["converged"]
+    assert info["relative_eliminated_kkt_residual"] <= 1e-5
 
 
 def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):

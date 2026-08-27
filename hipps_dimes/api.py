@@ -6,7 +6,6 @@ import time
 
 import numpy as np
 import pandas as pd
-import scipy
 from rich import print
 from tqdm import tqdm
 
@@ -16,7 +15,7 @@ from .covariance_pdhg import (
 )
 from .models import Optimize
 from .numerics import *  # noqa: F401,F403
-
+from .numerics import _optimize_contact_threshold
 
 _COVARIANCE_PROGRESS_STAGES = {
     'covariance_preconditioner': ('COV preconditioner', 'block'),
@@ -1500,12 +1499,10 @@ def run_optimization(input_path=None,
     cmap_maxent = None
     rc_optimal = None
     if input_type == 'cmap':
-        cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
-            objective_func, args=(final_connectivity_matrix, cmap))
-        rc_optimal = cmap_rc_minimize_res.x
+        rc_optimal = _optimize_contact_threshold(dmap_maxent, cmap)
         if verbose and console:
             console.print('Optimized contact threshold distance: {}\n'.format(rc_optimal))
-        cmap_maxent = a2cmap_theory(final_connectivity_matrix, rc_optimal)
+        cmap_maxent = dmap2cmap(dmap_maxent, rc_optimal)
         results['cmap_final'] = cmap_maxent
         results['rc_optimal'] = rc_optimal
 

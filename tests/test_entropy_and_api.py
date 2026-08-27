@@ -119,6 +119,65 @@ def test_run_optimization_smoke_cmap_npy_input(tmp_path):
     assert "rc_optimal" in results
 
 
+def test_contact_threshold_fit_uses_normalized_observed_pairs_only():
+    """Threshold fitting should ignore zero/NaN pairs and recover known rc."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(8, 1.0)
+    model_dmap = HippsDimes.a2dmap_theory(connectivity)
+    expected_rc = 0.7
+    experimental_cmap = 4.0 * HippsDimes.dmap2cmap(
+        model_dmap, expected_rc
+    )
+    experimental_cmap[1, 5] = experimental_cmap[5, 1] = 0.0
+    experimental_cmap[2, 6] = experimental_cmap[6, 2] = np.nan
+
+    fitted_rc = numerics._optimize_contact_threshold(
+        model_dmap, experimental_cmap
+    )
+
+    assert fitted_rc == pytest.approx(expected_rc, rel=1e-6)
+
+
+@pytest.mark.parametrize("method", ["IS", "GD", "DI", "COV"])
+@pytest.mark.filterwarnings(
+    "ignore:fit_gaussian_noise_covariance.*stopped:RuntimeWarning"
+)
+def test_contact_threshold_postprocessing_reuses_any_solver_dmap(
+    monkeypatch, method
+):
+    """All contact-map solvers should use their returned distance map for rc."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(6, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+    captured = {}
+
+    def capture_threshold_fit(model_dmap, experimental_cmap):
+        captured["model_dmap"] = np.asarray(model_dmap).copy()
+        captured["experimental_cmap"] = np.asarray(experimental_cmap).copy()
+        return 0.8
+
+    monkeypatch.setattr(
+        api, "_optimize_contact_threshold", capture_threshold_fit
+    )
+    results = HippsDimes.run_optimization(
+        input_matrix=cmap_target,
+        input_type="cmap",
+        input_format="text",
+        method=method,
+        gaussian_noise_relative_std=0.1 if method == "COV" else None,
+        iteration=2,
+        learning_rate=1e-4 if method == "GD" else 5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    assert np.allclose(captured["model_dmap"], results["dmap_final"])
+    assert np.allclose(captured["experimental_cmap"], cmap_target)
+    assert np.allclose(
+        results["cmap_final"],
+        HippsDimes.dmap2cmap(results["dmap_final"], 0.8),
+    )
+
+
 @pytest.mark.parametrize(
     ("input_type", "input_format", "expected_message"),
     [

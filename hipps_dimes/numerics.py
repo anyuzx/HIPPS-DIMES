@@ -1494,20 +1494,119 @@ def a2dmap_theory_with_force_applied(A, force):
     return dmap
 
 
+def _contact_probability_from_mean_distance(mean_distance, rc):
+    """Return Gaussian contact probabilities without diagonal handling."""
+    mean_distance = np.asarray(mean_distance, dtype=np.float64)
+    sigma = 0.5 * np.sqrt(np.pi / 2.0) * mean_distance
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        scaled_cutoff = rc / sigma
+        # Maxwell CDF, equivalent to the prior erf-minus-exponential formula.
+        probability = scipy.special.gammainc(
+            1.5, 0.5 * np.square(scaled_cutoff)
+        )
+    return probability
+
+
 def dmap2cmap(dmap, rc):
-    """
-    Return contact map given the mean distance map and the contact threshold
-    """
-    sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
-    cmap = (
-        scipy.special.erf(rc / (np.sqrt(2) * sigma_mtx))
-        - np.sqrt(2.0 / np.pi)
-        * np.exp(-0.5 * rc**2.0 / np.power(sigma_mtx, 2.0))
-        * rc
-        / sigma_mtx
-    )
+    """Return a contact map given a mean distance map and contact threshold."""
+    cmap = _contact_probability_from_mean_distance(dmap, rc)
     np.fill_diagonal(cmap, 1.0)
     return cmap
+
+
+def _contact_threshold_pair_data(dmap_model, cmap_exp):
+    """Prepare normalized observed pairs for contact-threshold fitting."""
+    dmap_model = np.asarray(dmap_model, dtype=np.float64)
+    cmap_exp = np.asarray(cmap_exp, dtype=np.float64)
+    if (
+        dmap_model.ndim != 2
+        or dmap_model.shape[0] != dmap_model.shape[1]
+        or cmap_exp.shape != dmap_model.shape
+    ):
+        raise ValueError(
+            "model distance and experimental contact maps must be square "
+            "matrices with matching shapes"
+        )
+
+    finite_contacts = cmap_exp[np.isfinite(cmap_exp)]
+    if finite_contacts.size == 0:
+        raise ValueError("experimental contact map has no finite entries")
+    contact_scale = float(np.max(finite_contacts))
+    if contact_scale <= 0.0:
+        raise ValueError("experimental contact map has no positive entries")
+
+    observed = np.triu(np.ones(cmap_exp.shape, dtype=bool), k=1)
+    observed &= np.isfinite(cmap_exp)
+    observed &= cmap_exp > 0.0
+    if not np.any(observed):
+        raise ValueError(
+            "contact-threshold fitting requires at least one positive finite "
+            "observed pair"
+        )
+    model_distances = dmap_model[observed]
+    if not np.all(np.isfinite(model_distances) & (model_distances > 0.0)):
+        raise ValueError(
+            "model distance map must be positive and finite on every "
+            "observed contact pair"
+        )
+    observed_contacts = cmap_exp[observed] / contact_scale
+    return model_distances, np.log(observed_contacts)
+
+
+def _contact_threshold_log_rmse(rc, model_distances, target_log_contacts):
+    """Evaluate log-contact RMSE on a fixed set of observed pairs."""
+    if not np.isfinite(rc) or rc <= 0.0:
+        return np.finfo(np.float64).max
+    model_contacts = _contact_probability_from_mean_distance(
+        model_distances, rc
+    )
+    model_contacts = np.clip(
+        model_contacts, np.finfo(np.float64).tiny, 1.0
+    )
+    squared_log_error = np.square(
+        np.log(model_contacts) - target_log_contacts
+    )
+    return float(np.sqrt(np.mean(squared_log_error)))
+
+
+def _optimize_contact_threshold(dmap_model, cmap_exp):
+    """Fit one contact threshold from a fixed model distance map."""
+    model_distances, target_log_contacts = _contact_threshold_pair_data(
+        dmap_model, cmap_exp
+    )
+    target_contacts = np.exp(target_log_contacts)
+    target_contacts = np.clip(
+        target_contacts,
+        np.finfo(np.float64).tiny,
+        1.0 - np.finfo(np.float64).eps,
+    )
+    sigma = 0.5 * np.sqrt(np.pi / 2.0) * model_distances
+    # Each inverse CDF is the cutoff that matches one observed pair, providing
+    # a scale-aware finite search interval. Optimize log(rc) so the physical
+    # cutoff stays positive across widely different distance scales.
+    implied_cutoffs = sigma * np.sqrt(
+        2.0 * scipy.special.gammaincinv(1.5, target_contacts)
+    )
+    log_lower = float(np.log(np.min(implied_cutoffs)) - np.log(2.0))
+    log_upper = float(np.log(np.max(implied_cutoffs)) + np.log(2.0))
+
+    def objective(log_cutoff):
+        return _contact_threshold_log_rmse(
+            np.exp(log_cutoff), model_distances, target_log_contacts
+        )
+
+    result = scipy.optimize.minimize_scalar(
+        objective,
+        bounds=(log_lower, log_upper),
+        method="bounded",
+        options={"xatol": 1e-10},
+    )
+    rc_optimal = float(np.exp(result.x))
+    if not result.success or not np.isfinite(rc_optimal):
+        raise RuntimeError(
+            "contact-threshold optimization failed: " + str(result.message)
+        )
+    return rc_optimal
 
 
 def a2cmap_theory(A, rc):
@@ -1829,19 +1928,13 @@ def interpolate_missing(matrix):
 
 
 def objective_func(rc, A_mtx, cmap_exp):
-    x = a2cmap_theory(A_mtx, rc)
-    y = cmap_exp / np.nanmax(cmap_exp)
-    logx = interpolate_missing(np.log(x))
-    logy = interpolate_missing(np.log(y))
-    res = (
-        np.power(
-            logx[np.triu_indices_from(logx, k=1)]
-            - logy[np.triu_indices_from(logy, k=1)],
-            2.0,
-        ).mean()
-        ** 0.5
+    """Compatibility objective for callers supplying a connectivity matrix."""
+    model_distances, target_log_contacts = _contact_threshold_pair_data(
+        a2dmap_theory(A_mtx), cmap_exp
     )
-    return res
+    return _contact_threshold_log_rmse(
+        rc, model_distances, target_log_contacts
+    )
 
 
 # FUNCTION TO CONVERT CMAP TO DMAP

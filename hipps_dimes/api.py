@@ -773,6 +773,17 @@ def run_optimization(input_path=None,
             else:
                 ddmap_target = cmap2dmap(cmap, alpha, not_normalize)
             ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
+
+        # Legacy missing-data paths use infinity as their sentinel, while COV
+        # uses NaN so finite entries alone define the observed pair set.
+        if (
+            method == 'COV'
+            and ignore_missing_data
+            and np.any(np.isinf(ddmap_target))
+        ):
+            ddmap_target = np.asarray(ddmap_target, dtype=np.float64).copy()
+            ddmap_target[np.isinf(ddmap_target)] = np.nan
+
         # Load connectivity matrix if provided
         if connectivity_matrix is not None:
             if isinstance(connectivity_matrix, str):

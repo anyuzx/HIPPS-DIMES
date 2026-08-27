@@ -422,6 +422,48 @@ def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
     assert parameters["covariance_initialization_resolved"] == "rouse"
 
 
+def test_run_optimization_cov_cmap_nearest_edm_ignores_missing_pairs(tmp_path):
+    """Direct contact input should preserve missing pairs through COV setup."""
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(truth, rc=1.0)
+    missing_pairs = ((0, 4), (1, 5))
+    for i, j in missing_pairs:
+        cmap_target[i, j] = 0.0
+        cmap_target[j, i] = 0.0
+    cmap_path = tmp_path / "cmap_missing.npy"
+    np.save(cmap_path, cmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_path=str(cmap_path),
+        input_type="cmap",
+        input_format="npy",
+        method="COV",
+        gaussian_noise_relative_std=0.1,
+        covariance_initialization="nearest_edm",
+        iteration=40,
+        ignore_missing_data=True,
+        not_normalize=True,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    assert info["observed_pair_count"] == n * (n - 1) // 2 - len(missing_pairs)
+    assert info["initialization"]["kind"] == "weighted_nearest_edm"
+    assert parameters["missing_pairs"] == len(missing_pairs)
+    assert bool(parameters["ignore_missing_data"]) is True
+
+
 @pytest.mark.skipif(
     not numerics.is_gpu_available(),
     reason="requires CuPy and an accessible CUDA GPU",

@@ -387,6 +387,7 @@ def fit_gaussian_noise_covariance_pdhg(
     dual_initialization="auto",
     distance_scale=None,
     return_best=True,
+    _eliminated_kkt_stopping=False,
 ):
     """Fit the Gaussian noise-aware COV objective with PDHG.
 
@@ -395,6 +396,10 @@ def fit_gaussian_noise_covariance_pdhg(
     value is selected automatically and, by default, balanced using the KKT
     residuals while the product ``tau * sigma`` remains fixed. The returned
     Gram matrix is accepted only after a fresh, dual-eliminated KKT check. The
+    ``_eliminated_kkt_stopping`` is reserved for the hybrid wrapper: it lets
+    PDHG return once the Gram matrix reaches the eliminated KKT tolerance,
+    without requiring its disposable dual iterate to reach the split KKT
+    tolerance. Standalone PDHG retains the stricter combined criterion. The
     bound
     ``||D||^2 <= 2N`` for the complete centered distance operator guarantees
     ``tau * sigma * ||D||^2 < 1`` for every observed-pair subset.
@@ -609,7 +614,8 @@ def fit_gaussian_noise_covariance_pdhg(
     }
     connectivity_at_steps = {}
     best = None
-    converged = False
+    stopping_criterion_reached = False
+    termination_internal_kkt_converged = False
     status = "max_iterations"
     message = "maximum number of PDHG iterations reached"
     start_time = time.perf_counter()
@@ -842,10 +848,27 @@ def fit_gaussian_noise_covariance_pdhg(
         eliminated_converged = eliminated_norm <= (
             absolute_tolerance + relative_tolerance * eliminated_scale
         )
-        if primal_converged and dual_converged and eliminated_converged:
-            converged = True
-            status = "optimality_tolerance"
-            message = "PDHG primal, dual, and eliminated KKT tolerances reached"
+        eliminated_stopping_converged = (
+            eliminated_relative <= relative_tolerance
+            if relative_tolerance > 0.0
+            else eliminated_norm <= absolute_tolerance
+        )
+        internal_kkt_converged = (
+            primal_converged and dual_converged and eliminated_converged
+        )
+        if internal_kkt_converged or (
+            _eliminated_kkt_stopping and eliminated_stopping_converged
+        ):
+            stopping_criterion_reached = True
+            termination_internal_kkt_converged = internal_kkt_converged
+            if internal_kkt_converged:
+                status = "optimality_tolerance"
+                message = (
+                    "PDHG primal, dual, and eliminated KKT tolerances reached"
+                )
+            else:
+                status = "eliminated_kkt_tolerance"
+                message = "PDHG eliminated Gram KKT tolerance reached"
             break
 
     if return_best and best is not None:
@@ -939,18 +962,18 @@ def fit_gaussian_noise_covariance_pdhg(
     runtime_eliminated_relative = float(
         history["relative_eliminated_kkt_residual"][best_iteration - 1]
     )
-    internal_kkt_converged = bool(converged)
+    internal_kkt_converged = bool(termination_internal_kkt_converged)
     if relative_tolerance > 0.0:
         independent_kkt_converged = (
             independent_relative <= relative_tolerance
         )
     else:
         independent_kkt_converged = independent_norm <= absolute_tolerance
-    converged = internal_kkt_converged and independent_kkt_converged
-    if internal_kkt_converged and not independent_kkt_converged:
+    converged = stopping_criterion_reached and independent_kkt_converged
+    if stopping_criterion_reached and not independent_kkt_converged:
         status = "independent_kkt_failed"
         message = (
-            "PDHG internal tolerances were reached, but the returned Gram "
+            "PDHG reached its stopping tolerance, but the returned Gram "
             "matrix failed the independent eliminated KKT certificate"
         )
 
@@ -1016,6 +1039,11 @@ def fit_gaussian_noise_covariance_pdhg(
             "adaptation_threshold": float(adaptation_threshold),
             "adaptation_factor": float(adaptation_factor),
             "return_best": bool(return_best),
+            "stopping_criterion": (
+                "eliminated_kkt"
+                if _eliminated_kkt_stopping
+                else "primal_dual_and_eliminated_kkt"
+            ),
         },
         "wall_seconds": time.perf_counter() - start_time,
         "objective_definition": (
@@ -1172,16 +1200,18 @@ def fit_gaussian_noise_covariance_hybrid(
         initial_gram_floor_relative=initial_gram_floor_relative,
         save_steps=sorted(save_steps_set),
         progress_callback=phase_progress_callback("pdhg", 0),
+        _eliminated_kkt_stopping=True,
     )
     pdhg_wall_seconds = time.perf_counter() - pdhg_start_time
     fitted, gram, connectivity, pdhg_info = pdhg_result
     pdhg_iterations = int(pdhg_info["iterations"])
+    handoff_residual = float(
+        pdhg_info["relative_eliminated_kkt_residual"]
+    )
     handoff = {
-        "reached": bool(pdhg_info["converged"]),
+        "reached": handoff_residual <= handoff_relative_tolerance,
         "relative_tolerance": handoff_relative_tolerance,
-        "relative_eliminated_kkt_residual": float(
-            pdhg_info["relative_eliminated_kkt_residual"]
-        ),
+        "relative_eliminated_kkt_residual": handoff_residual,
         "objective": float(pdhg_info["objective"]),
         "iterations": pdhg_iterations,
         "returned_iteration": int(pdhg_info["returned_iteration"]),

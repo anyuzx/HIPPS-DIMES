@@ -432,6 +432,40 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     assert np.isfinite(history["relative_eliminated_kkt_residual"][-1])
 
 
+def test_hybrid_handoff_does_not_wait_for_disposable_dual(monkeypatch):
+    target = _rouse_squared_distance_target(6)
+    original = pdhg._relative_kkt_residuals
+
+    def force_split_residuals_to_lag(*args, **kwargs):
+        residuals = list(original(*args, **kwargs))
+        residuals[0] = residuals[1]
+        residuals[2] = 1.0
+        residuals[3] = residuals[4]
+        residuals[5] = 1.0
+        return tuple(residuals)
+
+    monkeypatch.setattr(
+        pdhg,
+        "_relative_kkt_residuals",
+        force_split_residuals_to_lag,
+    )
+
+    _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target,
+        0.1,
+        max_iterations=500,
+    )
+
+    assert info["converged"]
+    assert info["handoff"]["reached"]
+    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-3
+    assert info["phase_iterations"]["pdhg"] < 500
+    assert info["phase_iterations"]["newton"] > 0
+    pdhg_end = info["phase_iterations"]["pdhg"] - 1
+    assert info["history"]["relative_primal_kkt_residual"][pdhg_end] == 1.0
+    assert info["history"]["relative_dual_kkt_residual"][pdhg_end] == 1.0
+
+
 def test_hybrid_rejects_handoff_stricter_than_final_tolerance():
     target = _rouse_squared_distance_target(4)
 

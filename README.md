@@ -176,60 +176,30 @@ This script will generate several files:
 - `--enforce-nonnegative-connectivity-matrix`: Constrain all the "spring constants" to be nonnegative.
 - `-q, --quiet`: Quiet mode: disable fancy tables display, keep only the progress bar.
 
-#### Calibrated Gaussian COV method
+#### COV quick start
 
-COV fits noisy mean-squared-distance constraints by minimizing
+COV is the noise-aware optimization method. Specify exactly one noise model:
 
-```text
--3/2 logdet(B) + 1/2 sum_{i<j} (Dfit_ij-Dobs_ij)^2 / variance_ij
-```
-
-over internal Gram matrices `B` that remain strictly positive definite. The
-default start is a Rouse chain calibrated over exactly the observed pairs:
-`k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Thus its unweighted
-observed-pair mean squared distance matches the target without imputing missing
-pairs. An explicitly supplied connectivity matrix remains available for
-restarts. Initialization changes only the starting point, not the objective.
-Before optimization, the initial internal Gram matrix `B0` is rescaled to
-`s*B0` using the exact positive minimizer of the COV objective along that ray.
-This second calibration includes the entropy term, the selected pair variances,
-and only the observed pairs. Its scale, objective reduction, derivative
-residual, backend, and wall time are recorded under
-`results['covariance_optimization']['initialization']['scalar_calibration']`.
+- `--gaussian-noise-variance <v>` for homoskedastic absolute variance
+  (`v_ij = v`).
+- `--gaussian-noise-relative-std <w>` for heteroskedastic relative noise
+  (`sigma_ij = w D_ij`).
 
 ```bash
 python -m hipps_dimes observed_ddmap.npy cov_fit \
   --input-type ddmap --input-format npy \
   --method COV --gaussian-noise-relative-std 0.1 \
-  --covariance-optimizer hybrid --use-gpu \
-  --iteration 10000 --no-xyzs --save-pickle
+  --use-gpu --iteration 10000 --no-xyzs --save-pickle
 ```
 
-The hybrid default uses PDHG to traverse the covariance cone from the
-calibrated initialization. When its independently checked relative KKT
-residual reaches `1e-3`, the existing centered Newton-CG solver performs local
-refinement. The two phases share the single `--iteration` budget. The returned
-Gram matrix is accepted only when a freshly recomputed, dual-eliminated
-relative KKT residual is at most `1e-5` by default. Use
-`--covariance-relative-tolerance 1e-8` for strict small-system tests. The
-standalone `pdhg` and `newton` choices remain available.
+The default hybrid optimizer starts from a calibrated Rouse model, runs PDHG,
+and hands off to Newton refinement. It stops automatically when the built-in
+KKT convergence criterion is met or the requested iteration limit is reached.
 
-Each PDHG update performs one internal eigendecomposition without an inner
-linear solve or data-Hessian preconditioner. On handoff, Newton constructs the
-exact data-Hessian diagonal once and reuses it for all local updates.
-
-The optional Newton optimizer constructs the expensive exact data-Hessian
-diagonal once per fit and reuses it for every Newton iteration. Pair blocks of
-4096 bound temporary GPU memory without changing the exact result. This solves
-the memory problem but retains `O(N^4)` setup arithmetic. Its measured setup
-wall time is stored as `preconditioner_setup_seconds`. All GPU calculations are
-float64 and final arrays are returned as NumPy arrays.
-
-Gaussian-noise options are rejected with IS, GD, and DI because their legacy
-noise-aware update did not converge to this calibrated dual objective. COV also
-rejects additional `--lamd` regularization and nonnegative-connectivity
-projection. Inspect `results['covariance_optimization']` for the convergence,
-stationarity, initialization, variance, and preconditioner diagnostics.
+See [Noise-aware covariance optimization](doc/NOTE_ON_NOISE.md) for the noise
+model, initialization, and scientific interpretation. See
+[PDHG and hybrid COV solver](doc/COV_PDHG.md) for solver details, convergence
+diagnostics, and advanced tuning.
 
 ### Examples
 
@@ -300,25 +270,32 @@ HippsDimes mydata.hic test \
 
 ### Tips
 
-- In practice, a contact map or distance map larger than 5000x5000 is too large
-  for the method to converge. If your matrix is larger than 5000x5000, I suggest
-  that you can either perform a coarse-graining on the original matrix to get a
-  smaller one, or you can use the model on a subregion of the contact
-  map/distance map.
-- When using the Iterative Scaling algorithm (with argument `-m IS`) for optimization, the learning rate typically can
-  be set between 1 and 50. You should try different values to see what is the
-  optimal learning rate to use. For gradient descent (with argument `-m GD`), the learning rate
-  typically needed to be set very small, such as 1e-7.
-- **For faster convergence**, use momentum with Nesterov acceleration: `--momentum 0.95 --nesterov`. This typically provides ~50% faster convergence compared to no momentum, and is more stable than standard momentum at high values.
-- **For large matrices (n ≥ 200)**, consider using GPU acceleration with `--use-gpu` if you have CuPy installed. This provides 2-4x speedup by offloading eigendecomposition to the GPU.
-- You can save intermediate connectivity matrices during optimization using `--save-steps 1000,5000,10000` to monitor convergence or restart from checkpoints.
-- If your contact map/distance map has a lot of missing or zero entries, you can
-  try to turn on the option `--ignore-missing-data`. This will tell the code not
-  to consider these missing entries, thus giving you a less biased result.
-- Whenever the contact map is fed, the program will normalize the contact
-  map by dividing it by its maximum value entry. If you don't want this, you can
-  set the option `--not-normalize`. This will tell the code not to normalize the
-  contact map at all
+- Computational cost and memory use grow rapidly with matrix size, but there
+  is no universal matrix-size cutoff for convergence. The practical limit
+  depends on the selected optimizer, hardware, number of observed pairs, and
+  iteration budget. If a problem is too expensive, coarse-grain the input or
+  analyze a smaller genomic region.
+- Optimization tuning is method-specific. `--learning-rate` applies to IS and
+  GD, while `--momentum` and `--nesterov` apply only to IS. Typical IS learning
+  rates are between 1 and 30; GD generally requires a much smaller value, such
+  as `1e-8`. These parameters are not used by DI or COV. Nesterov acceleration,
+  for example `--momentum 0.95 --nesterov`, can accelerate IS, but the benefit
+  is problem-dependent.
+- For larger problems, consider `--use-gpu` when CuPy and an accessible CUDA
+  GPU are available. The speedup depends on the matrix, optimizer, GPU, and CPU,
+  so benchmark a representative case rather than assuming a fixed acceleration
+  factor. COV uses float64 on the GPU and does not silently fall back to the CPU.
+- Use `--save-steps 1000,5000,10000` to retain intermediate connectivity
+  matrices. For IS, these checkpoints support the manual entropy-and-loss
+  stopping decision described below. For COV, the built-in KKT test determines
+  convergence; checkpoints are useful for diagnostics or restarting but do not
+  replace the reported convergence certificate.
+- Use `--ignore-missing-data` to exclude missing or zero input pairs from the
+  constraints. If a locus has no observed off-diagonal pairs at all, combine it
+  with `--remove-fully-missing-loci` to remove that locus before optimization.
+- Contact-map inputs are normalized by their maximum entry by default. Use
+  `--not-normalize` when the supplied contact map should retain its existing
+  scale.
 - Note that when feeding the contact map, there is no physical length scale
   associated with it. Thus we cannot set a unit to the resulting distance matrix
   or the structures. In this sense, the structures generated are dimensionless.
@@ -327,52 +304,77 @@ HippsDimes mydata.hic test \
   the two nearest loci, then you can use this distance as the measure to rescale the
   structure to be consistent with it.
 
-### Determining the Number of Iterations (Convergence)
+### How to choose optimization method, number of iteration and convergence
 
-The number of iterations needed for convergence varies depending on your data. We recommend the following approach to determine the optimal number of iterations:
+The recommended method and stopping rule depend on the input and on whether
+its uncertainty should be modeled:
 
-1. **Run a trial optimization** with a moderate number of iterations (e.g., 10,000–50,000). The iteration-series log is written by default:
-   ```bash
-   HippsDimes input.cool test --input-type cmap --input-format cooler -i 50000
-   ```
+| Input and interpretation | Recommended method | How to stop |
+| --- | --- | --- |
+| Experimental contact map, with uncertainty | COV with a user-specified noise model and noise level | Automatic KKT convergence test; `--iteration` is the maximum update budget |
+| Experimental contact map, uncertainty unknown | IS is a practical alternative when only static 3D structures are needed | Manual judgment from the entropy and loss histories |
+| Valid mean-squared-distance map, treated as exact | DI (preferred) or IS | DI is a one-step conversion; IS requires enough iterations to reproduce the target |
+| Valid mean-squared-distance map, with uncertainty | COV with a user-specified noise model and noise level | Automatic KKT convergence test; `--iteration` is the maximum update budget |
 
-2. **Plot the entropy vs. iterations** from the generated iteration-series file (`test_iteration_series.csv`). This file contains columns for `iteration`, `loss`, and `entropy`.
+#### Experimental contact maps
 
-3. **Analyze the entropy curve**. In practice, two common patterns are observed:
+Converting an experimental contact map to pairwise distances does not guarantee
+that the resulting mean-squared-distance map is a valid Euclidean distance
+matrix. Consequently, the exact hard-constraint problem approached by
+Iterative Scaling (IS) may have no feasible global solution: no Gaussian
+ensemble may satisfy all inferred pair distances simultaneously.
 
-   - **Peak pattern**: Entropy increases initially, reaches a maximum, and then decreases. In this case, the optimal number of iterations is when the entropy is **maximized**. Running beyond this point may lead to overfitting.
-   
-   - **Plateau pattern**: Entropy increases and then levels off to a plateau. In this case, the optimal number of iterations is when the plateau is reached. Running beyond this point provides no additional benefit.
+If only static 3D structures are needed, IS remains a reasonable practical
+choice. IS has no built-in convergence criterion and always runs for the number
+of iterations requested by the user. The iteration-series file records both
+`entropy` and `loss`; here, `loss` is the root-mean-square relative difference
+between the model and target mean-squared distances over the constrained pairs.
+As a default, select the iteration with the highest recorded entropy. In the
+rarer case where the entropy curve has an early or local maximum while the loss
+is still changing materially, do not treat that peak as convergence. Continue
+until the loss begins to level off, and select a checkpoint using both curves.
+This is necessarily an educated user judgment rather than a convergence
+certificate supplied by HIPPS-DIMES.
 
-4. **Re-run with the optimal iterations** once you've identified the convergence point from the entropy plot.
+> **Warning — IS with experimental contact maps:** Because the inferred target
+> may have no feasible global solution, the high-frequency relaxation modes
+> continue to drift as more IS iterations are performed. Interpret these modes
+> with caution. This sensitivity is most relevant to the high-frequency regime
+> of the predicted loss modulus, $G''(\omega)$. The low-frequency modes converge
+> and, once converged, do not depend on the selected number of IS iterations.
 
-Example Python code to visualize convergence:
-```python
-import pandas as pd
-import matplotlib.pyplot as plt
+For experimental contact maps, the preferred method is COV with an uncertainty
+level supplied by the user. Either of the implemented noise models may be used:
 
-# Load the iteration-series log file
-df = pd.read_csv('test_iteration_series.csv')
+- `--gaussian-noise-variance` specifies one homoskedastic absolute variance
+  shared by all observed mean-squared-distance pairs.
+- `--gaussian-noise-relative-std` specifies one shared relative standard
+  deviation, `sigma_ij / Dobs_ij`; the resulting pair variances are
+  heteroskedastic.
 
-# Plot entropy vs iterations
-plt.figure(figsize=(10, 4))
-plt.subplot(1, 2, 1)
-plt.plot(df['iteration'], df['entropy'])
-plt.xlabel('Iteration')
-plt.ylabel('Entropy')
-plt.title('Entropy vs Iteration')
+COV has a well-defined objective and built-in convergence tests. The default
+hybrid PDHG-to-Newton solver stops automatically only after the independently
+recomputed KKT residual meets the requested tolerance. For COV, `--iteration`
+therefore sets a maximum update budget rather than a recommended stopping
+iteration. If the budget is exhausted first, the returned convergence status
+is false and the user should not describe the result as converged. Inspect
+`results['covariance_optimization']['converged']`, `status`, and
+`relative_eliminated_kkt_residual` for the final certificate.
 
-# Plot loss vs iterations
-plt.subplot(1, 2, 2)
-plt.plot(df['iteration'], df['loss'])
-plt.xlabel('Iteration')
-plt.ylabel('Loss')
-plt.title('Loss vs Iteration')
-plt.tight_layout()
-plt.show()
-```
+#### Valid mean-squared-distance maps
 
-> **Note**: The entropy is a measure of the "randomness" or "uncertainty" in the predicted ensemble. The maximum entropy principle seeks to find the distribution that maximizes entropy while satisfying the constraints (the input contact/distance map). Therefore, the entropy at convergence represents the most unbiased prediction consistent with your data.
+A mean-squared-distance map computed directly from an ensemble of 3D
+coordinates is a valid Euclidean distance matrix, up to numerical precision.
+If it is to be treated as exact, use Direct Inversion (`--method DI`). DI
+performs the covariance-to-connectivity conversion in one step, so no iteration
+count or iterative convergence decision is needed.
+
+For a complete valid target, IS with suitable numerical settings converges to
+the same solution as DI, but the required number of iterations depends on the
+system size and optimization settings. DI is therefore preferred when the map
+is valid and uncertainty is intentionally ignored. If uncertainty in the
+mean-squared distances should be represented, use COV instead and specify
+either the homoskedastic or heteroskedastic noise model and its level.
 
 ### Use it as a Python Library
 

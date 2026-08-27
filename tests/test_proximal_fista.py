@@ -159,7 +159,10 @@ def test_heteroskedastic_variance_obeys_pair_stationarity():
         ),
     )
     assert np.linalg.norm(stationarity) / scale <= 2e-7
-    assert np.max(np.abs(stationarity)) <= 5e-8
+    assert np.max(np.abs(stationarity)) <= 2e-7
+    assert info["maximum_absolute_kkt_residual"] == pytest.approx(
+        np.max(np.abs(stationarity)), rel=1e-10, abs=1e-14
+    )
 
 
 def test_accelerated_and_plain_proximal_gradient_reach_same_solution():

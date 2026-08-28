@@ -3,6 +3,7 @@
 import hashlib
 import inspect
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -110,6 +111,18 @@ def test_pdhg_default_relative_tolerance_is_production_value():
     assert parameter.default == 1e-5
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "fit_gaussian_noise_covariance_pdhg_whitened",
+        "fit_gaussian_noise_covariance_preconditioned_pdhg",
+        "fit_gaussian_noise_covariance_hybrid_whitened",
+    ],
+)
+def test_pdhg_has_one_canonical_public_surface(name):
+    assert not hasattr(HippsDimes, name)
+
+
 def test_hybrid_defaults_to_fixed_production_handoff():
     signature = inspect.signature(
         HippsDimes.fit_gaussian_noise_covariance_hybrid
@@ -120,6 +133,55 @@ def test_hybrid_defaults_to_fixed_production_handoff():
         signature.parameters["handoff_relative_tolerance"].default
         == 1e-3
     )
+
+
+def test_large_newton_warning_boundary():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        numerics._warn_large_covariance_newton(2000, "newton")
+    assert caught == []
+
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"N=2,001.*covariance_optimizer='pdhg'",
+    ):
+        numerics._warn_large_covariance_newton(2001, "newton")
+
+
+def test_large_hybrid_warns_once_and_continues(monkeypatch):
+    monkeypatch.setattr(numerics, "_COVARIANCE_NEWTON_WARNING_SIZE", 4)
+    target = _rouse_squared_distance_target(5)
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="optimizer 'hybrid'",
+    ) as caught:
+        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            0.1,
+            max_iterations=500,
+        )
+
+    assert len(caught) == 1
+    assert info["converged"]
+    assert info["algorithm"] == "hybrid"
+
+
+def test_large_standalone_newton_warns_and_continues(monkeypatch):
+    monkeypatch.setattr(numerics, "_COVARIANCE_NEWTON_WARNING_SIZE", 4)
+    target = _rouse_squared_distance_target(5)
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="optimizer 'newton'",
+    ):
+        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance(
+            target,
+            0.1,
+            max_iterations=100,
+        )
+
+    assert info["converged"]
 
 
 def test_cupy_cg_tolerance_keyword_supports_old_and_new_signatures():
@@ -159,6 +221,139 @@ def test_distance_operator_and_adjoint_are_exact_duals():
     assert left == pytest.approx(right, rel=1e-13, abs=1e-13)
 
 
+def test_weighted_distance_operator_and_adjoint_are_exact_duals():
+    rng = np.random.default_rng(20260828)
+    n = 7
+    pair_i, pair_j = np.triu_indices(n, k=1)
+    keep = np.arange(len(pair_i)) % 4 != 0
+    pair_i = pair_i[keep]
+    pair_j = pair_j[keep]
+    inverse_std = np.exp(rng.normal(scale=0.7, size=len(pair_i)))
+    matrix = rng.normal(size=(n, n))
+    matrix = pdhg._center(0.5 * (matrix + matrix.T), np)
+    dual = rng.normal(size=len(pair_i))
+
+    left = np.dot(
+        pdhg._weighted_distance_operator(
+            matrix, inverse_std, pair_i, pair_j, np
+        ),
+        dual,
+    )
+    right = np.sum(
+        matrix
+        * pdhg._weighted_distance_adjoint(
+            dual, inverse_std, n, pair_i, pair_j, np
+        )
+    )
+    assert left == pytest.approx(right, rel=1e-13, abs=1e-13)
+
+
+def test_weighted_operator_norm_estimate_is_safe_on_small_system():
+    rng = np.random.default_rng(20260829)
+    n = 5
+    pair_i, pair_j = np.triu_indices(n, k=1)
+    inverse_std = np.exp(rng.normal(scale=0.8, size=len(pair_i)))
+    basis = numerics._centered_orthonormal_basis(n)
+    n_modes = n - 1
+    columns = []
+    for i in range(n_modes):
+        for j in range(i, n_modes):
+            internal = np.zeros((n_modes, n_modes), dtype=float)
+            if i == j:
+                internal[i, j] = 1.0
+            else:
+                internal[i, j] = 1.0 / np.sqrt(2.0)
+                internal[j, i] = 1.0 / np.sqrt(2.0)
+            columns.append(
+                pdhg._weighted_distance_operator(
+                    basis @ internal @ basis.T,
+                    inverse_std,
+                    pair_i,
+                    pair_j,
+                    np,
+                )
+            )
+    design = np.column_stack(columns)
+    exact = float(np.linalg.eigvalsh(design.T @ design)[-1])
+    initial = basis @ np.diag(np.linspace(1.0, 2.0, n_modes)) @ basis.T
+    estimated, info = pdhg._estimate_weighted_operator_norm_squared(
+        initial,
+        inverse_std,
+        n,
+        pair_i,
+        pair_j,
+        np,
+        max_iterations=80,
+        relative_tolerance=1e-10,
+        safety_factor=1.05,
+    )
+
+    assert info["rayleigh_quotient"] == pytest.approx(exact, rel=2e-7)
+    assert exact < estimated < 1.08 * exact
+
+
+def test_inverse_free_eliminated_kkt_matches_explicit_inverse():
+    rng = np.random.default_rng(20260830)
+    n = 6
+    pair_i, pair_j = np.triu_indices(n, k=1)
+    variance = 0.05 + rng.random(len(pair_i))
+    inverse_std = 1.0 / np.sqrt(variance)
+    target = 1.0 + rng.random(len(pair_i))
+    whitened_target = target * inverse_std
+    householder = pdhg._householder_vector(n, np)
+    basis = numerics._centered_orthonormal_basis(n)
+    internal = np.diag(np.linspace(0.8, 1.7, n - 1))
+    previous = basis @ internal @ basis.T
+    dual = rng.normal(scale=0.1, size=len(pair_i))
+    step = 0.03
+    dual_adjoint = pdhg._weighted_distance_adjoint(
+        dual, inverse_std, n, pair_i, pair_j, np
+    )
+    gram, _, eigenvalues, eigenvectors = (
+        pdhg._prox_centered_negative_logdet_inverse_free(
+            previous - step * dual_adjoint,
+            step,
+            householder,
+            np,
+        )
+    )
+    fitted = pdhg._weighted_distance_operator(
+        gram, inverse_std, pair_i, pair_j, np
+    )
+    residuals = pdhg._inverse_free_residuals(
+        previous,
+        gram,
+        dual_adjoint,
+        dual,
+        fitted,
+        whitened_target,
+        inverse_std,
+        step,
+        n,
+        pair_i,
+        pair_j,
+        np,
+    )
+    inverse = pdhg._inverse_from_internal_spectrum(
+        eigenvalues, eigenvectors, householder, np
+    )
+    explicit = pdhg._weighted_distance_adjoint(
+        fitted - whitened_target,
+        inverse_std,
+        n,
+        pair_i,
+        pair_j,
+        np,
+    ) - 1.5 * inverse
+
+    assert np.allclose(
+        residuals["eliminated_residual"],
+        explicit,
+        rtol=2e-11,
+        atol=2e-11,
+    )
+
+
 def test_logdet_proximal_map_is_centered_spd_and_stationary():
     rng = np.random.default_rng(20260828)
     n = 8
@@ -167,10 +362,13 @@ def test_logdet_proximal_map_is_centered_spd_and_stationary():
     householder = pdhg._householder_vector(n, np)
     step = 0.17
 
-    fitted, inverse, _, eigenvalues = (
-        pdhg._prox_centered_negative_logdet(
+    fitted, _, eigenvalues, eigenvectors = (
+        pdhg._prox_centered_negative_logdet_inverse_free(
             matrix, step, householder, np
         )
+    )
+    inverse = pdhg._inverse_from_internal_spectrum(
+        eigenvalues, eigenvectors, householder, np
     )
 
     assert np.max(np.abs(np.sum(fitted, axis=1))) <= 1e-12
@@ -192,10 +390,13 @@ def test_logdet_proximal_map_stably_handles_large_negative_eigenvalue():
     )
     step = 1.0
 
-    fitted, inverse, logdet, updated = (
-        pdhg._prox_centered_negative_logdet(
+    fitted, logdet, updated, eigenvectors = (
+        pdhg._prox_centered_negative_logdet_inverse_free(
             matrix, step, householder, np
         )
+    )
+    inverse = pdhg._inverse_from_internal_spectrum(
+        updated, eigenvectors, householder, np
     )
 
     assert updated[0] == pytest.approx(1.5e-9, rel=1e-14)
@@ -244,7 +445,10 @@ def test_pdhg_small_variance_inconsistent_target_stays_finite(use_gpu):
             )
         )
 
-    assert info["status"] == "max_iterations"
+    assert not info["converged"]
+    assert info["status"] == "independent_kkt_failed"
+    assert info["termination_internal_kkt_converged"]
+    assert not info["independent_kkt_converged"]
     assert np.all(np.isfinite(fitted))
     assert np.all(np.isfinite(gram))
     assert np.all(np.isfinite(connectivity))
@@ -315,6 +519,9 @@ def test_pdhg_reaches_same_small_system_optimum_as_newton():
     assert reference[3]["converged"]
     assert info["converged"]
     assert info["algorithm"] == "pdhg"
+    assert info["pdhg"]["variance_whitened"]
+    assert info["pdhg"]["inverse_free_runtime_kkt"]
+    assert info["pdhg"]["weighted_residual_balancing"]
     assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
     assert np.allclose(gram, reference[1], rtol=2e-7, atol=2e-8)
     assert np.allclose(
@@ -349,6 +556,27 @@ def test_pdhg_reports_fresh_eliminated_kkt_certificate():
         info["history"]["relative_gradient_norm"],
         info["history"]["relative_eliminated_kkt_residual"],
     )
+
+
+def test_pdhg_does_not_reconstruct_inverse_at_every_iteration():
+    target = _rouse_squared_distance_target(5, spring_constant=1.1)
+    with pytest.warns(RuntimeWarning, match="without satisfying"):
+        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_pdhg(
+            target,
+            relative_noise_std=0.1,
+            max_iterations=8,
+            relative_tolerance=1e-14,
+            save_steps=[4],
+            adaptive_steps=False,
+            operator_norm_power_iterations=12,
+        )
+
+    assert info["inverse_reconstruction_count"] == 4
+    assert not info["inverse_reconstructed_each_iteration"]
+    assert len(info["history"]["iteration"]) == 8
+    assert np.isfinite(
+        info["history"]["relative_eliminated_kkt_residual"]
+    ).all()
 
 
 def test_pdhg_independent_certificate_controls_converged(monkeypatch):
@@ -421,6 +649,8 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     assert reference[3]["converged"]
     assert info["converged"]
     assert info["algorithm"] == "hybrid"
+    assert info["pdhg"]["variance_whitened"]
+    assert info["pdhg"]["inverse_free_runtime_kkt"]
     assert info["handoff"]["reached"]
     assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-3
     assert info["phase_iterations"]["pdhg"] > 0
@@ -445,21 +675,19 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     assert np.isfinite(history["relative_eliminated_kkt_residual"][-1])
 
 
-def test_hybrid_handoff_does_not_wait_for_disposable_dual(monkeypatch):
+def test_hybrid_handoff_does_not_wait_for_split_residuals(monkeypatch):
     target = _rouse_squared_distance_target(6)
-    original = pdhg._relative_kkt_residuals
+    original = pdhg._inverse_free_residuals
 
     def force_split_residuals_to_lag(*args, **kwargs):
-        residuals = list(original(*args, **kwargs))
-        residuals[0] = residuals[1]
-        residuals[2] = 1.0
-        residuals[3] = residuals[4]
-        residuals[5] = 1.0
-        return tuple(residuals)
+        residuals = dict(original(*args, **kwargs))
+        residuals["primal_relative"] = 1.0
+        residuals["dual_relative"] = 1.0
+        return residuals
 
     monkeypatch.setattr(
         pdhg,
-        "_relative_kkt_residuals",
+        "_inverse_free_residuals",
         force_split_residuals_to_lag,
     )
 
@@ -599,6 +827,8 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
     assert info["converged"]
     assert info["status"] == "optimality_tolerance"
     assert info["algorithm"] == "hybrid"
+    assert info["pdhg"]["variance_whitened"]
+    assert info["pdhg"]["inverse_free_runtime_kkt"]
     assert info["handoff_relative_tolerance"] == pytest.approx(
         solver["handoff_relative_tolerance"]
     )
@@ -607,6 +837,7 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
         solver["handoff_relative_tolerance"]
     )
     assert info["phase_iterations"]["pdhg"] > 0
+    assert info["phase_iterations"]["pdhg"] <= 1500
     assert info["phase_iterations"]["newton"] > 0
     assert info["independent_kkt_converged"]
     assert info["iterations"] <= solver["maximum_iterations"]

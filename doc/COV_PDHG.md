@@ -1,210 +1,202 @@
-# PDHG and hybrid solvers for Gaussian noise-aware COV
+# Variance-whitened PDHG and hybrid COV optimization
 
-`fit_gaussian_noise_covariance_pdhg` solves the same convex objective as the
-noise-aware COV Newton solver,
+`fit_gaussian_noise_covariance_pdhg` is the sole PDHG implementation for the
+Gaussian noise-aware COV objective,
 
 $$
 F(B)=-\frac32\log\det{}'B
-+\frac12\sum_{a}\frac{(\mathcal D_a B-d_a)^2}{v_a},
++\frac12\sum_a\frac{[\mathcal D_a(B)-d_a]^2}{v_a},
 $$
 
-where `B` is the centered three-dimensional Gram matrix, `a=(i,j)` indexes the
-observed locus pairs, and
+where `B` is the centered three-dimensional Gram matrix, `a=(i,j)` indexes an
+observed locus pair, and
 
 $$
 \mathcal D_{ij}(B)=B_{ii}+B_{jj}-2B_{ij}.
 $$
 
-The translational mode of `B` remains zero and every internal mode remains
-strictly positive.
+The translational mode remains zero, and every internal mode remains strictly
+positive. The former scalar-step PDHG implementation has been replaced rather
+than retained as a fallback.
 
-## Primal-dual splitting
+## Variance whitening
 
-Write
-
-$$
-g(B)=-\frac32\log\det{}'B,
-\qquad
-h(z)=\frac12\sum_a\frac{(z_a-d_a)^2}{v_a}.
-$$
-
-The conjugate of the pairwise Gaussian term is
+Define
 
 $$
-h^*(y)=d^Ty+\frac12\sum_a v_a y_a^2.
+\mathcal A=V^{-1/2}\mathcal D,\qquad b=V^{-1/2}d.
 $$
 
-The Chambolle--Pock/PDHG iteration is
+The objective becomes
 
 $$
-y_a^{k+1}=\frac{y_a^k+\sigma
-[\mathcal D_a(\bar B^k)-d_a]}{1+\sigma v_a},
+F(B)=-\frac32\log\det{}'B+\frac12\|\mathcal A(B)-b\|_2^2.
 $$
 
-$$
-Y^k=B^k-\tau\mathcal D^*y^{k+1},
-$$
-
-followed by the analytic log-determinant proximal step. If an internal
-eigendecomposition of `Y` is
+For the whitened dual variable `u`, PDHG applies
 
 $$
-Y=U\operatorname{diag}(\lambda_p)U^T,
+u^{k+1}=\frac{u^k+\sigma[\mathcal A(\bar B^k)-b]}{1+\sigma},
 $$
 
-then
+followed by the analytic proximal update
 
 $$
-B^{k+1}=U\operatorname{diag}\left[
-\frac{\lambda_p+\sqrt{\lambda_p^2+6\tau}}{2}
-\right]U^T.
+B^{k+1}=\operatorname{prox}_{\tau(-3\log\det'/2)}
+[B^k-\tau\mathcal A^*u^{k+1}].
 $$
 
-Every updated internal eigenvalue is positive, even if `Y` is indefinite. The
-negative-eigenvalue branch is evaluated with a rationalized quadratic root and
-`hypot` so this strict positivity is preserved in float64 without subtractive
-cancellation. The extrapolated variable is
+Whitening gives every observed-pair dual coordinate unit quadratic curvature.
+For `relative_noise_std=c`, the standardized target is the constant `1/c`.
+
+The implementation estimates
 
 $$
-\bar B^{k+1}=B^{k+1}+\theta(B^{k+1}-B^k).
+\|\mathcal A\|^2
+=\lambda_{\max}(\mathcal D^*V^{-1}\mathcal D)
 $$
 
-For the complete unique-pair distance operator on centered symmetric matrices,
+with matrix-free power iteration. The estimate includes a safety factor, and
+PDHG preserves the resulting safe product `tau*sigma` while adapting only the
+ratio `tau/sigma`.
+
+## Inverse-free runtime KKT residual
+
+The primal proximal optimality equation gives
 
 $$
-\|\mathcal D\|^2=2N.
+\frac32(B^{k+1})^+
+=\mathcal A^*u^{k+1}+\frac{B^{k+1}-B^k}{\tau}.
 $$
 
-For any observed-pair subset the norm is no larger, so the implementation uses
+Consequently, the eliminated stationarity residual can be evaluated during
+PDHG without reconstructing the inverse Gram matrix:
 
 $$
-\tau\sigma=\frac{s^2}{2N},\qquad 0<s<1.
+g_{\mathrm{elim}}^{k+1}
+=-\frac{B^{k+1}-B^k}{\tau}
++\mathcal A^*[\mathcal A(B^{k+1})-b-u^{k+1}].
 $$
 
-Only the ratio `tau/sigma` is adapted; their product remains fixed.
+Step adaptation compares the two terms in this common primal matrix space.
+The inverse and physical connectivity are reconstructed only for initial dual
+setup, requested checkpoints, the returned model, and the independent final
+certificate.
 
-## Optimality certificates
-
-The solver monitors both KKT equations:
-
-$$
-\mathcal D^*y-\frac32B^+=0,
-$$
-
-and
+Because PDHG objective values need not be monotone, `return_best=True` returns
+the iterate with the smallest runtime eliminated KKT residual. The returned
+physical Gram matrix is then certified independently by recomputing
 
 $$
-\mathcal D(B)-d-v\odot y=0.
+R(B)=\mathcal D^*\!\left[
+\frac{\mathcal D(B)-D^{\mathrm{obs}}}{v}
+\right]-\frac32B^+.
 $$
 
-The second equation, combined with
+Convergence requires
 
 $$
-A=-3B^+,
+\|R(B)\|_F\leq
+\mathrm{atol}+\mathrm{rtol}\max\left(
+\|\nabla F_{\mathrm{data}}\|_F,
+\left\|\frac32B^+\right\|_F
+\right).
 $$
 
-is the HIPPS-DIMES pair stationarity relation
+The default relative tolerance is `1e-5`. `max_iterations` is only a budget;
+exhausting it does not imply convergence. Check `info["converged"]`,
+`info["independent_kkt_converged"]`, and
+`info["relative_eliminated_kkt_residual"]`.
 
-$$
-D_{ij}^{\rm fit}-D_{ij}^{\rm obs}
-=\frac{v_{ij}}{2}A_{ij}.
-$$
+## Public use
 
-Because PDHG objective values need not be monotone, the implementation returns
-the iterate with the smallest dual-eliminated relative KKT residual when
-`return_best=True`. It then independently recomputes the pseudoinverse and
-certificate from that returned Gram matrix. `info["converged"]` is true only
-when the internal stopping conditions and this final certificate pass.
+The established optimizer names are unchanged:
 
-## Use
+- `covariance_optimizer="pdhg"` selects standalone variance-whitened PDHG;
+- `covariance_optimizer="hybrid"` runs the same PDHG to the handoff tolerance
+  and then invokes Newton-CG;
+- `covariance_optimizer="newton"` selects standalone Newton-CG.
 
-The high-level COV interface defaults to the hybrid optimizer. It runs PDHG to
-an independently certified relative KKT residual of `1e-3`, then initializes
-the existing centered Newton-CG solver from that feasible result. The phases
-share one maximum-iteration budget.
+`hybrid` remains the default because Newton refinement is effective for the
+validated smaller systems. For large systems, select PDHG explicitly:
 
 ```python
-results = HippsDimes.run_optimization(
+import hipps_dimes as HD
+
+results = HD.run_optimization(
     input_matrix=target_ddmap,
     input_type="ddmap",
     method="COV",
     gaussian_noise_relative_std=0.10,
-    covariance_optimizer="hybrid",
+    covariance_optimizer="pdhg",
     covariance_relative_tolerance=1e-5,
-    covariance_handoff_relative_tolerance=1e-3,
-    iteration=10000,
+    iteration=20000,
     use_gpu=True,
 )
+
+info = results["covariance_optimization"]
+print(info["converged"])
+print(info["relative_eliminated_kkt_residual"])
+print(info["returned_iteration"])
 ```
 
-The low-level hybrid and standalone PDHG solvers remain available directly:
+The low-level canonical entry point is
+`fit_gaussian_noise_covariance_pdhg(...)`. There are no separate `whitened`,
+`preconditioned`, or legacy PDHG public functions.
 
-```python
-import HippsDimes
+## Large-system Newton warning
 
-fitted_ddmap, gram, connectivity, info = (
-    HippsDimes.fit_gaussian_noise_covariance_hybrid(
-        target_ddmap,
-        relative_noise_std=0.10,
-        initialization="rouse",
-        max_iterations=10000,
-        handoff_relative_tolerance=1e-3,
-        use_gpu=True,
-    )
-)
+For an optimized matrix with `N > 2000`, selecting `hybrid` or `newton` emits
+a runtime warning before expensive work begins. The warning recommends
+standalone PDHG but does not reject the request or change the selected
+optimizer.
 
-pdhg_only = (
-    HippsDimes.fit_gaussian_noise_covariance_pdhg(
-        target_ddmap,
-        relative_noise_std=0.10,
-        initialization="rouse",
-        max_iterations=2000,
-        use_gpu=True,
-    )
-)
-```
+This threshold is operational guidance, not a mathematical restriction on
+Newton. The existing Newton stage forms a dense `(N-1)^2` linear system
+implicitly and uses a diagonal preconditioner. Its equations, CG solver, and
+line search are unchanged.
 
-For homoskedastic errors, pass `noise_variance=<positive scalar>` instead of
-`relative_noise_std`.
+## Diagnostics and tuning
 
-The standalone solvers remain available through
-`covariance_optimizer="pdhg"` and `covariance_optimizer="newton"`. Newton-CG
-is not deleted or replaced; the hybrid path reuses it as its local phase.
+The PDHG history records the objective components, eliminated KKT residual,
+common-space primal and dual components, step sizes, step-ratio adaptations,
+Gram conditioning, and connectivity norm. Additional metadata include:
 
-## Main tuning parameters
+- `weighted_operator_norm` for power-iteration setup diagnostics;
+- `inverse_reconstruction_count` and
+  `inverse_reconstructed_each_iteration`;
+- `pdhg["variance_whitened"]`;
+- `pdhg["inverse_free_runtime_kkt"]`;
+- `pdhg["weighted_residual_balancing"]`.
 
-- `step_safety`: controls the fixed product `tau*sigma`; default `0.99`.
-- `step_ratio`: optional explicit `tau/sigma`. If omitted, a dimensionless,
-  variance-aware value is selected automatically.
-- `adaptive_steps`: balance the two KKT residuals while preserving the safe
-  step-size product.
-- `adaptation_interval`, `adaptation_threshold`, `adaptation_factor`: control
-  residual balancing.
-- `dual_initialization`: `auto`, `zero`, `residual`, or `connectivity`.
-- `theta`: extrapolation coefficient in `[0,1]`; default `1`.
-- `relative_tolerance`: production relative KKT tolerance; default `1e-5`.
-  Explicitly pass `1e-8` for strict small-system validation.
-- `handoff_relative_tolerance`: hybrid PDHG-to-Newton relative KKT threshold;
-  default `1e-3`.
+The main low-level tuning parameters are `step_safety`, `initial_dual_step`,
+`step_ratio`, residual-adaptation controls, and the operator-norm power-iteration
+controls. The high-level API uses the validated defaults.
 
-The history records objective components, primal, dual, and dual-eliminated
-KKT residuals, step sizes, step-ratio adaptations, Gram conditioning, and
-connectivity norm.
+Progress callbacks distinguish `covariance_operator_norm`, the PDHG
+`covariance_optimization` phase, `covariance_preconditioner`, and the Newton
+`covariance_optimization` phase. Operator-norm events report their own relative
+residual and do not contain an objective value.
 
-## Real-data regression
+## Scaling evidence
 
-The test suite includes the processed experimental GM12878 Hi-C contact map
-for `chr1:31,000,000-41,000,000` at 25 kb resolution (`N=400`) and a converged
-reference Gram matrix. The ordinary CPU suite independently reconstructs its
-target squared-distance observations and verifies the COV objective and KKT
-certificate of the full-size reference solution.
+These measurements motivate the replacement and warning but are not runtime
+contracts:
 
-When CuPy and a CUDA GPU are available, the `real_data` test also runs the
-complete default hybrid contact-map workflow from Rouse initialization:
+- On the real GM12878 `N=400` fixture, variance-whitened hybrid reached the
+  `1e-3` handoff after 1,108 PDHG updates and converged after three Newton
+  updates in 24.36 seconds. The former scalar-step hybrid required 3,881 PDHG
+  and two Newton updates in 73.79 seconds. Objectives matched, and the relative
+  Gram-matrix difference was `1.764e-9`.
+- On the chromosome 3 `N=3801` target with 5,567,171 observed pairs, whitened
+  PDHG reached relative KKT values `1.044e-1` at 1,000 updates, `4.861e-3` at
+  5,000, and `1.053e-3` at 9,500. These values document progress, not final
+  `1e-5` convergence.
+- From the same `N=3801` PDHG checkpoint, one-update Newton diagnostics with
+  CG caps from 50 through 500 ended with relative linear residuals from `4.58`
+  to `9.77`, far above the requested `1e-4`. The accepted descent steps lowered
+  the objective but did not improve the KKT certificate.
 
-```bash
-pytest -q -m real_data tests/test_covariance_pdhg.py
-```
-
-CPU-only environments skip this approximately 70-second end-to-end solve but
-still execute the fast full-size objective/KKT regression.
+The test suite protects the objective and independent KKT certificate on the
+real `N=400` fixture. The `N=3801` measurements remain benchmark evidence and
+are not run in ordinary CI.

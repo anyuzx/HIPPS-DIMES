@@ -415,11 +415,13 @@ def test_run_optimization_progress_callback_receives_structured_updates():
         (
             "hybrid",
             [
+                "COV operator norm",
                 "COV PDHG optimization",
                 "COV preconditioner",
                 "COV Newton optimization",
             ],
             {
+                "covariance_operator_norm",
                 "covariance_preconditioner",
                 "covariance_optimization",
             },
@@ -427,8 +429,8 @@ def test_run_optimization_progress_callback_receives_structured_updates():
         ),
         (
             "pdhg",
-            ["COV PDHG optimization"],
-            {"covariance_optimization"},
+            ["COV operator norm", "COV PDHG optimization"],
+            {"covariance_operator_norm", "covariance_optimization"},
             False,
         ),
         (
@@ -532,6 +534,10 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
     assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
     assert results["covariance_optimization"]["converged"]
     assert results["covariance_optimization"]["algorithm"] == "hybrid"
+    assert results["covariance_optimization"]["pdhg"]["variance_whitened"]
+    assert results["covariance_optimization"]["pdhg"][
+        "inverse_free_runtime_kkt"
+    ]
     assert results["covariance_optimization"]["handoff"]["reached"]
     assert results["covariance_optimization"]["phase_iterations"]["pdhg"] > 0
     assert results["covariance_optimization"]["phase_iterations"]["newton"] > 0
@@ -855,6 +861,8 @@ def test_cli_routes_cov_to_pdhg_with_configurable_tolerance(tmp_path):
         payload = pickle.load(fin)
     info = payload["covariance_optimization"]
     assert info["algorithm"] == "pdhg"
+    assert info["pdhg"]["variance_whitened"]
+    assert info["pdhg"]["inverse_free_runtime_kkt"]
     assert info["converged"]
     assert info["relative_eliminated_kkt_residual"] <= 1e-5
 

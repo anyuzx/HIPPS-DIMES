@@ -167,7 +167,10 @@ This script will generate several files:
   together with `--lamd`.
 - `--gaussian-noise-variance`: Positive scalar absolute variance on squared-distance constraints. COV only.
 - `--gaussian-noise-relative-std`: Positive scalar relative standard deviation `sigma_ij / Dobs_ij`. COV converts it to pair variance `(value * Dobs_ij)^2` after preprocessing. Mutually exclusive with `--gaussian-noise-variance`.
-- `--covariance-optimizer`: COV optimizer: `hybrid` (default), `pdhg`, or `newton`.
+- `--covariance-optimizer`: COV optimizer: `hybrid` (default), `pdhg`, or
+  `newton`. PDHG is variance-whitened and inverse-free during its runtime KKT
+  checks. For optimized matrices with `N > 2000`, select `pdhg`; requesting
+  `hybrid` or `newton` emits a scalability warning and continues unchanged.
 - `--covariance-relative-tolerance`: Relative COV KKT tolerance. Default: `1e-5`.
 - `--covariance-absolute-tolerance`: Absolute internal COV KKT tolerance. Default: `1e-10`.
 - `--covariance-handoff-relative-tolerance`: Relative KKT threshold for the
@@ -232,14 +235,29 @@ python -m hipps_dimes observed_ddmap.npy cov_fit \
   --use-gpu --iteration 10000 --no-xyzs --save-pickle
 ```
 
-The default hybrid optimizer starts from a calibrated Rouse model, runs PDHG,
-and hands off to Newton refinement. It stops automatically when the built-in
-KKT convergence criterion is met or the requested iteration limit is reached.
+The default hybrid optimizer starts from a calibrated Rouse model, runs
+variance-whitened PDHG, and hands off to Newton refinement. It stops
+automatically when the built-in KKT convergence criterion is met or the
+requested iteration limit is reached. For a large system, avoid the Newton
+stage explicitly:
+
+```bash
+python -m hipps_dimes observed_ddmap.npy cov_fit \
+  --input-type ddmap --input-format npy \
+  --method COV --gaussian-noise-relative-std 0.1 \
+  --covariance-optimizer pdhg \
+  --use-gpu --iteration 20000 --no-xyzs --save-pickle
+```
+
+An iteration limit is only a budget. A returned COV model is converged only
+when its independently recomputed KKT certificate passes the requested
+tolerance.
 
 See [Noise-aware covariance optimization](doc/NOTE_ON_NOISE.md) for the noise
 model, initialization, and scientific interpretation. See
-[PDHG and hybrid COV solver](doc/COV_PDHG.md) for solver details, convergence
-diagnostics, and advanced tuning.
+[Variance-whitened PDHG and hybrid COV optimization](doc/COV_PDHG.md) for
+solver details, convergence diagnostics, large-system guidance, and advanced
+tuning.
 
 ### Examples
 
@@ -384,12 +402,16 @@ level supplied by the user. Either of the implemented noise models may be used:
   deviation, `sigma_ij / Dobs_ij`; the resulting pair variances are
   heteroskedastic.
 
-COV has a well-defined objective and built-in convergence tests. The default
-hybrid PDHG-to-Newton solver stops automatically only after the independently
-recomputed KKT residual meets the requested tolerance. For COV, `--iteration`
-therefore sets a maximum update budget rather than a recommended stopping
-iteration. If the budget is exhausted first, the returned convergence status
-is false and the user should not describe the result as converged. Inspect
+COV has a well-defined objective and built-in convergence tests. Its sole PDHG
+implementation uses variance whitening and inverse-free runtime KKT checks.
+The default hybrid PDHG-to-Newton solver stops automatically only after the
+independently recomputed KKT residual meets the requested tolerance. For
+optimized matrices with `N > 2000`, use standalone PDHG; hybrid and Newton
+requests emit a warning because the current Newton-CG stage can be
+impractically slow at that size. For COV, `--iteration` therefore sets a
+maximum update budget rather than a recommended stopping iteration. If the
+budget is exhausted first, the returned convergence status is false and the
+user should not describe the result as converged. Inspect
 `results['covariance_optimization']['converged']`, `status`, and
 `relative_eliminated_kkt_residual` for the final certificate.
 

@@ -11,3 +11,6 @@ from .covariance_pdhg_whitened import (  # noqa: F401
     fit_gaussian_noise_covariance_pdhg_whitened,
     fit_gaussian_noise_covariance_preconditioned_pdhg,
 )
+from .covariance_pdhg_whitened_hybrid import (  # noqa: F401
+    fit_gaussian_noise_covariance_hybrid_whitened,
+)

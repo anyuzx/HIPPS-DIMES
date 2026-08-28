@@ -1995,6 +1995,26 @@ def _squared_distances_from_gram(B, array_module=np):
 
 
 _COVARIANCE_PRECONDITIONER_PAIR_BLOCK_SIZE = 4096
+_COVARIANCE_NEWTON_WARNING_SIZE = 2000
+
+
+def _warn_large_covariance_newton(n, optimizer):
+    """Emit the large-system Newton warning even under legacy filters."""
+    if int(n) <= _COVARIANCE_NEWTON_WARNING_SIZE:
+        return
+    message = (
+        f"COV optimizer '{optimizer}' for N={int(n):,} invokes Newton-CG, "
+        f"which may be impractically slow above N={_COVARIANCE_NEWTON_WARNING_SIZE:,}. "
+        "For large systems, use covariance_optimizer='pdhg' (CLI: "
+        "--covariance-optimizer pdhg). The requested optimizer will continue."
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", RuntimeWarning)
+        warnings.warn(
+            message,
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _centered_orthonormal_basis(n):
@@ -2624,6 +2644,7 @@ def fit_gaussian_noise_covariance(
     cg_max_iterations=None,
     save_steps=None,
     progress_callback=None,
+    _warn_large_system=True,
 ):
     """Fit Gaussian-noisy squared distances inside the covariance cone.
 
@@ -2656,6 +2677,8 @@ def fit_gaussian_noise_covariance(
     ) = _validate_gaussian_covariance_inputs(
         squared_distances, noise_variance, relative_noise_std
     )
+    if _warn_large_system:
+        _warn_large_covariance_newton(observed.shape[0], "newton")
 
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")

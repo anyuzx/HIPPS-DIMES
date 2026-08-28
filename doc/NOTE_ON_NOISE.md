@@ -125,15 +125,25 @@ the scale and the COV objective before and after calibration.
 
 ## COV optimizers and convergence
 
-The default `covariance_optimizer="hybrid"` uses PDHG to robustly traverse the
-covariance cone from the calibrated Rouse start. Once the independently
-recomputed relative KKT residual reaches `1e-3`, it passes the feasible
-connectivity matrix to the existing centered Newton-CG solver for local
-refinement. Both phases optimize the same objective, and their update counts
-share the single `iteration` budget. Standalone PDHG and Newton-CG remain
-available with `covariance_optimizer="pdhg"` and `"newton"`.
+The sole PDHG implementation uses the variance-whitened operator
+$\mathcal A=V^{-1/2}\mathcal D$, so every observed-pair dual coordinate has
+unit quadratic curvature. Its runtime eliminated KKT residual follows from
+proximal optimality and does not require reconstructing the inverse Gram matrix
+at every iteration.
 
-PDHG monitors its primal and dual KKT equations during iteration. Before a
+The default `covariance_optimizer="hybrid"` uses this PDHG implementation to
+traverse the covariance cone from the calibrated Rouse start. Once the
+independently recomputed relative KKT residual reaches `1e-3`, it passes the
+feasible connectivity matrix to the existing centered Newton-CG solver for
+local refinement. Both phases optimize the same objective, and their update
+counts share the single `iteration` budget. Standalone PDHG and Newton-CG
+remain available with `covariance_optimizer="pdhg"` and `"newton"`.
+
+For an optimized matrix with more than 2000 loci, standalone PDHG is
+recommended. Selecting hybrid or Newton emits a scalability warning before
+expensive work begins but does not reject the request or switch optimizers.
+
+PDHG monitors the dual-eliminated KKT equation during iteration. Before a
 returned solution is marked converged, the implementation discards the cached
 dual for certification, reconstructs
 
@@ -149,7 +159,9 @@ $$
 
 The final default relative tolerance is $10^{-5}$ and the default hybrid
 handoff tolerance is $10^{-3}$; both are configurable. A stricter final
-$10^{-8}$ value remains available for small, well-conditioned tests.
+$10^{-8}$ value remains available for small, well-conditioned tests. The
+iteration argument is only a maximum update budget and is never itself a
+convergence criterion.
 
 ## CPU and GPU backends
 
@@ -172,8 +184,9 @@ The pair sum is accumulated in blocks of 4096, which bounds the temporary
 pair-vector storage. This expensive data-Hessian setup is performed once per
 fit and reused at every Newton iteration; a separate fit rebuilds it. The
 diagonal contribution from the entropy Hessian is inexpensive and is updated
-at each Newton step. Blocking avoids materializing all pair vectors at once, but
-the exact construction still has $O(N^4)$ total arithmetic for a dense set of
-pairs. Its measured wall time is reported as
-`preconditioner_setup_seconds`; systems substantially beyond the intended
-$N\lesssim3000$ range may eventually require an approximate preconditioner.
+at each Newton step. Blocking avoids materializing all pair vectors at once,
+but the exact construction still has $O(N^4)$ total arithmetic for a dense set
+of pairs. Its measured wall time is reported as
+`preconditioner_setup_seconds`. At large $N$, the more important observed
+bottleneck is the poorly conditioned inner Newton-CG solve; the current
+large-system warning therefore begins at `N > 2000`.

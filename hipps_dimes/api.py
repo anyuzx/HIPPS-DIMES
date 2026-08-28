@@ -18,6 +18,7 @@ from .numerics import *  # noqa: F401,F403
 from .numerics import _optimize_contact_threshold
 
 _COVARIANCE_PROGRESS_STAGES = {
+    'covariance_operator_norm': ('COV operator norm', 'iteration'),
     'covariance_preconditioner': ('COV preconditioner', 'block'),
 }
 
@@ -68,6 +69,13 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
         if stage == 'covariance_preconditioner':
             progress_bar.set_postfix(
                 pairs=f"{event['pairs_completed']}/{event['pair_count']}",
+                refresh=False,
+            )
+        elif stage == 'covariance_operator_norm':
+            progress_bar.set_postfix(
+                relative_residual=(
+                    f"{event['operator_norm_relative_residual']:.3e}"
+                ),
                 refresh=False,
             )
         else:
@@ -366,9 +374,11 @@ def run_optimization(input_path=None,
         COV converts it to ``variance_ij = (value * Dobs_ij)**2`` after input
         conversion and missing-data handling.
     covariance_optimizer : {'hybrid', 'pdhg', 'newton'}, default='hybrid'
-        Optimizer used for the Gaussian COV objective. The hybrid default uses
-        PDHG globally and Newton-CG locally. Both component solvers remain
-        separately selectable.
+        Optimizer used for the Gaussian COV objective. PDHG is
+        variance-whitened and uses inverse-free runtime KKT diagnostics. The
+        hybrid default uses PDHG globally and Newton-CG locally. For optimized
+        matrices with more than 2000 loci, hybrid and Newton emit a scalability
+        warning and standalone PDHG is recommended.
     covariance_relative_tolerance : float, default=1e-5
         Relative COV KKT tolerance. Hybrid and PDHG results must pass a
         freshly recomputed dual-eliminated KKT certificate at this tolerance

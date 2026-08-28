@@ -168,6 +168,52 @@ def test_pcg_reports_progress_and_obeys_hard_cap():
     assert "cg_relative_residual" in events[-1]
 
 
+def test_physical_residual_recovery_inverts_whitened_congruence():
+    rng = np.random.default_rng(20260901)
+    raw = rng.normal(size=(6, 6))
+    gram = raw @ raw.T + np.eye(6)
+    cholesky = np.linalg.cholesky(gram)
+    residual = rng.normal(size=(6, 6))
+    residual = 0.5 * (residual + residual.T)
+    transformed = -cholesky.T @ residual @ cholesky
+
+    recovered = newton._physical_residual_from_transformed(
+        transformed, cholesky, np
+    )
+
+    assert np.allclose(recovered, residual, rtol=5e-13, atol=5e-13)
+
+
+def test_model_globalization_allows_known_transient_kkt_growth():
+    accepted = newton._trial_is_acceptable(
+        objective=10.0,
+        trial_objective=9.0,
+        directional_derivative=-2.0,
+        step_size=1.0,
+        predicted_reduction=1.2,
+        model_ratio=1.0 / 1.2,
+        minimum_model_ratio=0.1,
+        relative_kkt=1e-3,
+        trial_relative_kkt=4.396e-3,
+        maximum_kkt_growth=10.0,
+    )
+    rejected_as_catastrophic = newton._trial_is_acceptable(
+        objective=10.0,
+        trial_objective=9.0,
+        directional_derivative=-2.0,
+        step_size=1.0,
+        predicted_reduction=1.2,
+        model_ratio=1.0 / 1.2,
+        minimum_model_ratio=0.1,
+        relative_kkt=1e-3,
+        trial_relative_kkt=13e-3,
+        maximum_kkt_growth=10.0,
+    )
+
+    assert accepted
+    assert not rejected_as_catastrophic
+
+
 def test_direct_gram_handoff_skips_scalar_calibration():
     target, gram = _rouse_target(5, 1.1)
     with pytest.warns(RuntimeWarning, match="without satisfying"):
@@ -205,7 +251,9 @@ def test_failed_readiness_direction_returns_untouched_handoff(monkeypatch):
         return np.zeros_like(right_hand_side), {
             "iterations": 1,
             "relative_residual": 1.0,
+            "final_relative_residual": 1.0,
             "best_relative_residual": 1.0,
+            "returned_best_iterate": False,
             "converged": False,
             "termination_reason": "maximum_iterations",
             "hessian_actions": 1,
@@ -230,7 +278,7 @@ def test_failed_readiness_direction_returns_untouched_handoff(monkeypatch):
     assert np.allclose(returned_gram, gram, rtol=2e-12, atol=2e-12)
 
 
-def test_whitened_newton_never_accepts_a_kkt_increase():
+def test_whitened_newton_returns_best_kkt_checkpoint():
     target, gram = _rouse_target(6, 1.2)
     target = target.copy()
     target[0, 5] *= 0.85
@@ -251,10 +299,17 @@ def test_whitened_newton_never_accepts_a_kkt_increase():
         )
 
     history = info["history"]
+    assert not info["newton"]["relative_kkt_is_monotone_requirement"]
     if len(history["iteration"]):
-        assert np.all(history["kkt_after"] <= history["kkt_before"])
+        assert np.all(history["actual_reduction"] > 0.0)
+        assert np.all(history["predicted_reduction"] > 0.0)
+        assert np.all(history["model_ratio"] >= 0.05)
+        best_recorded = min(
+            info["initialization"]["relative_kkt"],
+            float(np.min(history["kkt_after"])),
+        )
         assert info["relative_eliminated_kkt_residual"] <= (
-            info["initialization"]["relative_kkt"]
+            best_recorded * (1.0 + 1e-9) + 1e-12
         )
     else:
         assert info["status"] == "newton_readiness_failed"

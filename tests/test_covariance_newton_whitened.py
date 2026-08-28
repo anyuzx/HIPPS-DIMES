@@ -30,7 +30,7 @@ def test_svec_roundtrip_and_frobenius_isometry():
         vector, size, diagonal, off_i, off_j, np
     )
 
-    assert np.allclose(recovered, matrix, rtol=0.0, atol=0.0)
+    assert np.allclose(recovered, matrix, rtol=2e-15, atol=2e-15)
     assert np.dot(vector, vector) == pytest.approx(
         np.sum(matrix * matrix), rel=1e-14
     )

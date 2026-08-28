@@ -19,7 +19,6 @@ from .numerics import _optimize_contact_threshold
 
 _COVARIANCE_PROGRESS_STAGES = {
     'covariance_operator_norm': ('COV operator norm', 'iteration'),
-    'covariance_preconditioner': ('COV preconditioner', 'block'),
 }
 
 
@@ -48,7 +47,7 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
             description = (
                 'COV PDHG optimization'
                 if phase == 'pdhg'
-                else 'COV Newton optimization'
+                else 'COV FISTA optimization'
             )
             unit = 'iteration'
         elif stage in _COVARIANCE_PROGRESS_STAGES:
@@ -66,12 +65,7 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
             )
             current_stage = stage_key
 
-        if stage == 'covariance_preconditioner':
-            progress_bar.set_postfix(
-                pairs=f"{event['pairs_completed']}/{event['pair_count']}",
-                refresh=False,
-            )
-        elif stage == 'covariance_operator_norm':
+        if stage == 'covariance_operator_norm':
             progress_bar.set_postfix(
                 relative_residual=(
                     f"{event['operator_norm_relative_residual']:.3e}"
@@ -83,8 +77,6 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
                 'objective': f"{event['objective']:.3e}",
                 'relative_kkt': f"{event['relative_gradient_norm']:.3e}",
             }
-            if 'cg_iterations' in event:
-                postfix['cg_iterations'] = int(event['cg_iterations'])
             progress_bar.set_postfix(**postfix, refresh=False)
 
         completed = int(event['iteration'])
@@ -315,7 +307,7 @@ def run_optimization(input_path=None,
                      covariance_optimizer='hybrid',
                      covariance_relative_tolerance=1e-5,
                      covariance_absolute_tolerance=1e-10,
-                     covariance_handoff_relative_tolerance=1e-3,
+                     covariance_handoff_relative_tolerance=1e-2,
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -373,12 +365,11 @@ def run_optimization(input_path=None,
         Positive shared relative standard deviation ``sigma_ij / Dobs_ij``.
         COV converts it to ``variance_ij = (value * Dobs_ij)**2`` after input
         conversion and missing-data handling.
-    covariance_optimizer : {'hybrid', 'pdhg', 'newton'}, default='hybrid'
+    covariance_optimizer : {'hybrid', 'pdhg'}, default='hybrid'
         Optimizer used for the Gaussian COV objective. PDHG is
         variance-whitened and uses inverse-free runtime KKT diagnostics. The
-        hybrid default uses PDHG globally and Newton-CG locally. For optimized
-        matrices with more than 2000 loci, hybrid and Newton emit a scalability
-        warning and standalone PDHG is recommended.
+        hybrid default uses PDHG globally and direct-Gram monotone FISTA for
+        refinement.
     covariance_relative_tolerance : float, default=1e-5
         Relative COV KKT tolerance. Hybrid and PDHG results must pass a
         freshly recomputed dual-eliminated KKT certificate at this tolerance
@@ -386,11 +377,11 @@ def run_optimization(input_path=None,
     covariance_absolute_tolerance : float, default=1e-10
         Absolute tolerance used by the selected COV optimizer's internal KKT
         checks.
-    covariance_handoff_relative_tolerance : float, default=1e-3
+    covariance_handoff_relative_tolerance : float, default=1e-2
         Relative KKT threshold at which the hybrid optimizer switches from
-        PDHG to Newton-CG. Ignored by the standalone optimizers.
+        PDHG to FISTA. Ignored by standalone PDHG.
     iteration : int, default=10000
-        Maximum optimization iterations. Hybrid PDHG and Newton updates share
+        Maximum optimization iterations. Hybrid PDHG and FISTA updates share
         this single total budget.
     learning_rate : float, default=10.0
         Learning rate for optimization
@@ -404,10 +395,8 @@ def run_optimization(input_path=None,
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
         If True, use CuPy GPU acceleration. All COV optimizers use float64
-        throughout. Newton-CG additionally builds its exact data-Hessian
-        diagonal preconditioner once in bounded pair blocks. COV fails clearly
-        if no CUDA GPU is accessible. Legacy IS/GD retain their existing
-        behavior.
+        throughout and fail clearly if no CUDA GPU is accessible. Legacy
+        IS/GD retain their existing behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -459,8 +448,8 @@ def run_optimization(input_path=None,
         iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
     show_progress : bool, default=True
         Whether to render solver progress bars. COV reports the selected
-        optimizer and Newton preconditioner construction separately. Set to
-        False when consuming progress_callback programmatically.
+        optimizer phases and operator-norm estimation separately. Set to False
+        when consuming progress_callback programmatically.
         
     Returns
     -------
@@ -495,7 +484,7 @@ def run_optimization(input_path=None,
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
     - All COV optimizers run GPU matrix operations in float64
-    - COV Newton builds the exact blockwise data-Hessian diagonal once per fit
+    - Hybrid COV hands the physical centered PDHG Gram directly to FISTA
     - For small matrices, CPU may be faster due to GPU setup overhead
     - Install CuPy: conda install -c conda-forge cupy
     
@@ -579,9 +568,9 @@ def run_optimization(input_path=None,
             raise ValueError(
                 "gaussian_noise_relative_std must be a positive finite scalar"
             )
-    if covariance_optimizer not in {'hybrid', 'pdhg', 'newton'}:
+    if covariance_optimizer not in {'hybrid', 'pdhg'}:
         raise ValueError(
-            "covariance_optimizer must be 'hybrid', 'pdhg', or 'newton'"
+            "covariance_optimizer must be 'hybrid' or 'pdhg'"
         )
     covariance_tolerances = {
         'covariance_relative_tolerance': covariance_relative_tolerance,
@@ -683,7 +672,7 @@ def run_optimization(input_path=None,
                 "covariance convergence tolerances are supported only with "
                 "method='COV'"
             )
-        if covariance_handoff_relative_tolerance != 1e-3:
+        if covariance_handoff_relative_tolerance != 1e-2:
             raise ValueError(
                 "covariance_handoff_relative_tolerance is supported only "
                 "with method='COV'"
@@ -1136,7 +1125,7 @@ def run_optimization(input_path=None,
                 )
                 if covariance_optimizer == 'hybrid':
                     opt_table.add_row(
-                        "PDHG-to-Newton Handoff",
+                        "PDHG-to-FISTA Handoff",
                         f"{covariance_handoff_relative_tolerance:.3e}",
                     )
         
@@ -1197,7 +1186,6 @@ def run_optimization(input_path=None,
         covariance_solver = {
             'hybrid': fit_gaussian_noise_covariance_hybrid,
             'pdhg': fit_gaussian_noise_covariance_pdhg,
-            'newton': fit_gaussian_noise_covariance,
         }[covariance_optimizer]
         covariance_progress_callback, close_covariance_progress = (
             _make_covariance_progress_callback(progress_callback, show_progress)
@@ -1354,7 +1342,7 @@ def run_optimization(input_path=None,
             covariance_optimizer if method == 'COV' else None
         ),
         'covariance_optimizer_resolved': (
-            covariance_optimization_info.get('algorithm', 'newton')
+            covariance_optimization_info['algorithm']
             if covariance_optimization_info is not None
             else None
         ),
@@ -1436,18 +1424,23 @@ def run_optimization(input_path=None,
             if covariance_optimization_info is not None
             else None
         ),
-        'covariance_preconditioner_pair_block_size': (
-            covariance_optimization_info.get('preconditioner_pair_block_size')
+        'covariance_fista_initial_step_size': (
+            covariance_optimization_info.get('initial_step_size')
             if covariance_optimization_info is not None
             else None
         ),
-        'covariance_preconditioner_setup_seconds': (
-            covariance_optimization_info.get('preconditioner_setup_seconds')
+        'covariance_fista_final_step_size': (
+            covariance_optimization_info.get('final_step_size')
             if covariance_optimization_info is not None
             else None
         ),
-        'covariance_preconditioner_data_setup_count': (
-            covariance_optimization_info.get('preconditioner_data_setup_count')
+        'covariance_fista_backtracking_reductions': (
+            covariance_optimization_info.get('backtracking_reductions')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_fista_restart_count': (
+            covariance_optimization_info.get('restart_count')
             if covariance_optimization_info is not None
             else None
         ),

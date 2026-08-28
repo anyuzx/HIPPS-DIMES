@@ -167,14 +167,15 @@ This script will generate several files:
   together with `--lamd`.
 - `--gaussian-noise-variance`: Positive scalar absolute variance on squared-distance constraints. COV only.
 - `--gaussian-noise-relative-std`: Positive scalar relative standard deviation `sigma_ij / Dobs_ij`. COV converts it to pair variance `(value * Dobs_ij)^2` after preprocessing. Mutually exclusive with `--gaussian-noise-variance`.
-- `--covariance-optimizer`: COV optimizer: `hybrid` (default), `pdhg`, or
-  `newton`. PDHG is variance-whitened and inverse-free during its runtime KKT
-  checks. For optimized matrices with `N > 2000`, select `pdhg`; requesting
-  `hybrid` or `newton` emits a scalability warning and continues unchanged.
+- `--covariance-optimizer`: COV optimizer: `hybrid` (default) or `pdhg`.
+  PDHG is variance-whitened and inverse-free during its runtime KKT checks.
+  The hybrid runs PDHG globally, then refines the same physical Gram matrix
+  with direct-Gram monotone FISTA. Both phases support CPU and float64 GPU
+  execution.
 - `--covariance-relative-tolerance`: Relative COV KKT tolerance. Default: `1e-5`.
 - `--covariance-absolute-tolerance`: Absolute internal COV KKT tolerance. Default: `1e-10`.
 - `--covariance-handoff-relative-tolerance`: Relative KKT threshold for the
-  default PDHG-to-Newton handoff. Default: `1e-3`.
+  default PDHG-to-FISTA handoff. Default: `1e-2`.
 - `-i, --iteration`: Maximum optimizer iterations. Default: 10000.
 - `--learning-rate`: Learning rate for IS or GD. Typical IS values are 1–30;
   GD generally requires a much smaller value, such as `1e-8`. Default: `10.0`.
@@ -236,10 +237,12 @@ python -m hipps_dimes observed_ddmap.npy cov_fit \
 ```
 
 The default hybrid optimizer starts from a calibrated Rouse model, runs
-variance-whitened PDHG, and hands off to Newton refinement. It stops
+variance-whitened PDHG, and hands the exact physical Gram matrix to monotone
+FISTA for direct-Gram refinement. It stops
 automatically when the built-in KKT convergence criterion is met or the
-requested iteration limit is reached. For a large system, avoid the Newton
-stage explicitly:
+requested iteration limit is reached. Standalone PDHG remains available for
+controlled comparisons or cases where its inverse-free iterations are
+preferred:
 
 ```bash
 python -m hipps_dimes observed_ddmap.npy cov_fit \
@@ -404,11 +407,12 @@ level supplied by the user. Either of the implemented noise models may be used:
 
 COV has a well-defined objective and built-in convergence tests. Its sole PDHG
 implementation uses variance whitening and inverse-free runtime KKT checks.
-The default hybrid PDHG-to-Newton solver stops automatically only after the
-independently recomputed KKT residual meets the requested tolerance. For
-optimized matrices with `N > 2000`, use standalone PDHG; hybrid and Newton
-requests emit a warning because the current Newton-CG stage can be
-impractically slow at that size. For COV, `--iteration` therefore sets a
+The default hybrid PDHG-to-FISTA solver switches at relative KKT `1e-2`, uses
+the PDHG Gram matrix directly without scalar recalibration, and stops
+automatically only after the independently recomputed KKT residual meets the
+requested tolerance. Direct-Gram FISTA uses dense centered matrices and a
+matrix-free observed-pair operator, so its storage grows quadratically rather
+than through a higher-order linear-system workspace. For COV, `--iteration` sets a
 maximum update budget rather than a recommended stopping iteration. If the
 budget is exhausted first, the returned convergence status is false and the
 user should not describe the result as converged. Inspect

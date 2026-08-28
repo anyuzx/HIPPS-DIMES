@@ -410,49 +410,33 @@ def test_run_optimization_progress_callback_receives_structured_updates():
 
 
 @pytest.mark.parametrize(
-    "optimizer, expected_descriptions, expected_stages, expects_cg",
+    "optimizer, expected_descriptions, expected_stages",
     [
         (
             "hybrid",
             [
                 "COV operator norm",
                 "COV PDHG optimization",
-                "COV preconditioner",
-                "COV Newton optimization",
+                "COV operator norm",
+                "COV FISTA optimization",
             ],
             {
                 "covariance_operator_norm",
-                "covariance_preconditioner",
                 "covariance_optimization",
             },
-            True,
         ),
         (
             "pdhg",
             ["COV operator norm", "COV PDHG optimization"],
             {"covariance_operator_norm", "covariance_optimization"},
-            False,
-        ),
-        (
-            "newton",
-            [
-                "COV preconditioner",
-                "COV Newton optimization",
-            ],
-            {
-                "covariance_preconditioner",
-                "covariance_optimization",
-            },
-            True,
         ),
     ],
 )
-def test_cov_progress_distinguishes_pdhg_and_newton(
+def test_cov_progress_distinguishes_pdhg_and_fista(
     monkeypatch,
     optimizer,
     expected_descriptions,
     expected_stages,
-    expects_cg,
 ):
     """COV should render solver-specific stages and preserve callbacks."""
 
@@ -504,7 +488,7 @@ def test_cov_progress_distinguishes_pdhg_and_newton(
     assert all(bar.closed and bar.n > 0 for bar in bars)
     assert {update["stage"] for update in updates} == expected_stages
     optimization_bar = bars[-1]
-    assert ("cg_iterations" in optimization_bar.postfix) is expects_cg
+    assert "cg_iterations" not in optimization_bar.postfix
     assert "relative_kkt" in optimization_bar.postfix
     assert results["covariance_optimization"]["converged"]
 
@@ -540,7 +524,7 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
     ]
     assert results["covariance_optimization"]["handoff"]["reached"]
     assert results["covariance_optimization"]["phase_iterations"]["pdhg"] > 0
-    assert results["covariance_optimization"]["phase_iterations"]["newton"] > 0
+    assert results["covariance_optimization"]["phase_iterations"]["fista"] > 0
     assert (
         results["covariance_optimization"][
             "relative_eliminated_kkt_residual"
@@ -561,10 +545,11 @@ def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix(
     assert parameters["covariance_absolute_tolerance"] == pytest.approx(1e-10)
     assert parameters[
         "covariance_handoff_relative_tolerance"
-    ] == pytest.approx(1e-3)
-    assert json.loads(parameters["covariance_phase_iterations"])["newton"] > 0
+    ] == pytest.approx(1e-2)
+    assert json.loads(parameters["covariance_phase_iterations"])["fista"] > 0
     assert bool(parameters["covariance_independent_kkt_converged"])
-    assert parameters["covariance_preconditioner_setup_seconds"] >= 0.0
+    assert parameters["covariance_fista_initial_step_size"] > 0.0
+    assert parameters["covariance_fista_final_step_size"] > 0.0
 
 
 def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
@@ -667,9 +652,9 @@ def test_run_optimization_cov_uses_gpu_backend():
         input_type="dmap",
         input_format="text",
         method="COV",
-        covariance_optimizer="newton",
+        covariance_optimizer="hybrid",
         gaussian_noise_variance=0.05,
-        iteration=30,
+        iteration=500,
         use_gpu=True,
         no_xyzs=True,
         verbose=False,
@@ -692,9 +677,9 @@ def test_run_optimization_cov_uses_gpu_backend():
     assert parameters["covariance_dtype"] == "float64"
     assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()
     assert parameters["covariance_cupy_version"] == numerics.cp.__version__
-    assert parameters["covariance_optimizer_resolved"] == "newton"
-    assert parameters["covariance_preconditioner_setup_seconds"] >= 0.0
-    assert parameters["covariance_preconditioner_data_setup_count"] == 1
+    assert parameters["covariance_optimizer_resolved"] == "hybrid"
+    assert parameters["covariance_fista_initial_step_size"] > 0.0
+    assert parameters["covariance_fista_final_step_size"] > 0.0
 
 
 @pytest.mark.parametrize("method", ["IS", "GD", "DI"])
@@ -737,6 +722,20 @@ def test_run_optimization_rejects_gaussian_noise_outside_cov(method):
         ),
         (
             {"gaussian_noise_variance": 0.1, "covariance_optimizer": "bad"},
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_optimizer": "newton",
+            },
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_optimizer": "fista",
+            },
             "covariance_optimizer",
         ),
         (
@@ -785,7 +784,7 @@ def test_run_optimization_rejects_covariance_solver_options_outside_cov():
             input_matrix=target,
             input_type="ddmap",
             method="IS",
-            covariance_optimizer="newton",
+            covariance_optimizer="pdhg",
             no_xyzs=True,
             verbose=False,
         )
@@ -819,6 +818,13 @@ def test_cli_help_exposes_cov_solver_and_noise_contract():
         if parameter.name == "covariance_optimizer"
     )
     assert optimizer_parameter.default == "hybrid"
+    assert set(optimizer_parameter.type.choices) == {"hybrid", "pdhg"}
+    handoff_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "covariance_handoff_relative_tolerance"
+    )
+    assert handoff_parameter.default == pytest.approx(1e-2)
 
 
 def test_cli_routes_cov_to_pdhg_with_configurable_tolerance(tmp_path):

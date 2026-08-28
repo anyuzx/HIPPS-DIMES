@@ -133,15 +133,13 @@ at every iteration.
 
 The default `covariance_optimizer="hybrid"` uses this PDHG implementation to
 traverse the covariance cone from the calibrated Rouse start. Once the
-independently recomputed relative KKT residual reaches `1e-3`, it passes the
-feasible connectivity matrix to the existing centered Newton-CG solver for
-local refinement. Both phases optimize the same objective, and their update
-counts share the single `iteration` budget. Standalone PDHG and Newton-CG
-remain available with `covariance_optimizer="pdhg"` and `"newton"`.
-
-For an optimized matrix with more than 2000 loci, standalone PDHG is
-recommended. Selecting hybrid or Newton emits a scalability warning before
-expensive work begins but does not reject the request or switch optimizers.
+independently recomputed relative KKT residual reaches `1e-2`, it passes the
+physical centered Gram matrix directly to monotone FISTA for local refinement.
+There is no connectivity round trip and no second scalar calibration at the
+handoff. Both phases optimize the same objective, and their update counts share
+the single `iteration` budget. Standalone PDHG remains available with
+`covariance_optimizer="pdhg"`; the only other public choice is the default
+`"hybrid"`.
 
 PDHG monitors the dual-eliminated KKT equation during iteration. Before a
 returned solution is marked converged, the implementation discards the cached
@@ -158,35 +156,23 @@ $$
 $$
 
 The final default relative tolerance is $10^{-5}$ and the default hybrid
-handoff tolerance is $10^{-3}$; both are configurable. A stricter final
+handoff tolerance is $10^{-2}$; both are configurable. A stricter final
 $10^{-8}$ value remains available for small, well-conditioned tests. The
 iteration argument is only a maximum update budget and is never itself a
 convergence criterion.
 
 ## CPU and GPU backends
 
-The CPU and GPU backends optimize the same objective. The GPU path uses float64
-for PDHG and Newton-CG matrix operations. It requires CuPy and an accessible
-CUDA GPU and does not silently fall back to the CPU. Rouse initialization is
-computed on the CPU. Final fitted matrices and saved checkpoints are NumPy
-arrays.
+The CPU and GPU backends optimize the same objective. The GPU path uses
+float64 for both PDHG and FISTA matrix operations. It requires CuPy and an
+accessible CUDA GPU and does not silently fall back to the CPU. Rouse
+initialization is computed on the CPU. Final fitted matrices and saved
+checkpoints are NumPy arrays.
 
-When Newton is selected, both backends construct the exact diagonal of the
-Gaussian data Hessian as its preconditioner. For pair vector
-$z_{ij}=Q_i-Q_j$ in the internal basis $Q$, this diagonal is
-
-$$
-P_{ab}^{\mathrm{data}}
-=\sum_{i<j}\frac{z_{ij,a}^2z_{ij,b}^2}{v_{ij}}.
-$$
-
-The pair sum is accumulated in blocks of 4096, which bounds the temporary
-pair-vector storage. This expensive data-Hessian setup is performed once per
-fit and reused at every Newton iteration; a separate fit rebuilds it. The
-diagonal contribution from the entropy Hessian is inexpensive and is updated
-at each Newton step. Blocking avoids materializing all pair vectors at once,
-but the exact construction still has $O(N^4)$ total arithmetic for a dense set
-of pairs. Its measured wall time is reported as
-`preconditioner_setup_seconds`. At large $N$, the more important observed
-bottleneck is the poorly conditioned inner Newton-CG solve; the current
-large-system warning therefore begins at `N > 2000`.
+The FISTA data gradient uses the same matrix-free observed-pair operator as
+PDHG, and its entropy proximal map is evaluated by eigendecomposition in the
+centered internal subspace. It does not form a Hessian, run an inner linear
+solver, or allocate an $(N-1)^2$ linear-system workspace. Dense matrix storage
+therefore grows as $O(N^2)$, although the per-update eigendecomposition keeps
+the arithmetic cost cubic in $N$. This is why PDHG is retained as the global
+phase and FISTA is used only after the independently certified handoff.

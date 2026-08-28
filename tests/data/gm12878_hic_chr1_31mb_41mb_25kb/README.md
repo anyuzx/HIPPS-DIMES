@@ -15,17 +15,22 @@ synthetic proxy.
 On a machine with CuPy and an accessible CUDA GPU, the test marked `real_data`
 additionally runs the complete public contact-map workflow with the default
 hybrid optimizer: Rouse initialization, PDHG to a relative KKT residual of
-`1e-3`, then Newton-CG to the final `1e-5` certificate. The PDHG phase is the
-canonical variance-whitened, inverse-free implementation.
+`1e-2`, then direct-Gram monotone FISTA to the final `1e-5` certificate. The
+PDHG phase is the canonical variance-whitened, inverse-free implementation;
+FISTA uses its physical Gram matrix directly without recalibration.
 
 ```bash
 pytest -q -m real_data tests/test_covariance_pdhg.py
 ```
 
-On an NVIDIA GeForce RTX 4070, the variance-whitened hybrid reached handoff
-after 1,108 PDHG updates and converged after three Newton updates in about
-24.36 seconds. The historical scalar-step hybrid required 3,881 PDHG updates,
-two Newton updates, and about 73.79 seconds. Both reached the same trusted
-objective; their Gram matrices differed by `1.764e-9` in relative Frobenius
-norm. On CPU-only systems the end-to-end test is skipped, while the fast
-full-size objective/KKT regression still runs.
+On an NVIDIA GeForce RTX 4070, the direct-Gram `1e-2` hybrid reached an
+independent KKT residual of `9.972e-6` with a 27.046-second median wall time;
+continued PDHG required 34.364 seconds in the matched experiment. Relative
+errors against the stored solution were `9.230e-10` for the objective,
+`2.382e-5` for the Gram matrix, and `1.609e-5` for connectivity. Both paths
+reserved 52.50 MiB in the CuPy memory pool. On CPU-only systems the end-to-end
+test is skipped, while the fast full-size objective/KKT regression still runs.
+
+Historical provenance: the previous public hybrid used a `1e-3` PDHG handoff
+and Newton-CG refinement. Those measurements describe the removed optimizer
+and are not the current workflow.

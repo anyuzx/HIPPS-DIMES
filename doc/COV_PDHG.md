@@ -1,7 +1,8 @@
-# Variance-whitened PDHG and hybrid COV optimization
+# Variance-whitened PDHG and direct-Gram FISTA COV optimization
 
-`fit_gaussian_noise_covariance_pdhg` is the sole PDHG implementation for the
-Gaussian noise-aware COV objective,
+`fit_gaussian_noise_covariance_pdhg` is the sole PDHG implementation and
+`fit_gaussian_noise_covariance_hybrid` is the public PDHG-to-FISTA workflow for
+the Gaussian noise-aware COV objective,
 
 $$
 F(B)=-\frac32\log\det{}'B
@@ -108,17 +109,41 @@ exhausting it does not imply convergence. Check `info["converged"]`,
 `info["independent_kkt_converged"]`, and
 `info["relative_eliminated_kkt_residual"]`.
 
+## Direct-Gram monotone FISTA refinement
+
+At the hybrid handoff, FISTA receives PDHG's centered physical Gram matrix
+directly. The handoff does not invert through a connectivity matrix and does
+not repeat the scalar initialization calibration. For the smooth data term
+
+$$
+h(B)=\frac12\|V^{-1/2}[\mathcal D(B)-d]\|_2^2,
+$$
+
+the gradient is evaluated with the same matrix-free weighted distance
+operator and adjoint used by PDHG. The nonsmooth-side proximal map is the
+closed-form positive-definite update for $-3\log\det'(B)/2$, applied only to
+the centered internal modes. FISTA estimates the weighted operator norm,
+uses backtracking when needed, and restarts acceleration whenever an
+extrapolated step would violate monotonic objective descent.
+
+The direct FISTA function is an internal low-level implementation. It is not
+exported from `HippsDimes` and is not a standalone CLI optimizer. This keeps
+the supported user contract narrow: FISTA is entered only after a certified
+PDHG handoff.
+
 ## Public use
 
-The established optimizer names are unchanged:
+The supported optimizer names are:
 
-- `covariance_optimizer="pdhg"` selects standalone variance-whitened PDHG;
-- `covariance_optimizer="hybrid"` runs the same PDHG to the handoff tolerance
-  and then invokes Newton-CG;
-- `covariance_optimizer="newton"` selects standalone Newton-CG.
+- `covariance_optimizer="hybrid"` (default), which runs variance-whitened
+  PDHG to the independently certified handoff tolerance and then direct-Gram
+  monotone FISTA;
+- `covariance_optimizer="pdhg"`, which continues standalone PDHG to the final
+  tolerance or update budget.
 
-`hybrid` remains the default because Newton refinement is effective for the
-validated smaller systems. For large systems, select PDHG explicitly:
+The default handoff tolerance is `1e-2`; the default final relative KKT
+tolerance is `1e-5`. Both phases share the single `iteration` budget. A
+standalone PDHG run can be selected for controlled solver comparisons:
 
 ```python
 import hipps_dimes as HD
@@ -144,17 +169,20 @@ The low-level canonical entry point is
 `fit_gaussian_noise_covariance_pdhg(...)`. There are no separate `whitened`,
 `preconditioned`, or legacy PDHG public functions.
 
-## Large-system Newton warning
+## Scaling and memory
 
-For an optimized matrix with `N > 2000`, selecting `hybrid` or `newton` emits
-a runtime warning before expensive work begins. The warning recommends
-standalone PDHG but does not reject the request or change the selected
-optimizer.
+Both phases store dense centered matrices, so matrix storage is $O(N^2)$.
+Observed pairs are represented by index and value vectors, and neither phase
+materializes a dense Hessian or an $(N-1)^2$ linear-system workspace. FISTA
+does reconstruct the inverse Gram matrix and perform an internal dense
+eigendecomposition for every accepted update, so its arithmetic remains
+cubic in $N$ even though its memory growth is quadratic. PDHG avoids that
+inverse reconstruction during ordinary iterations and can therefore remain
+the cheaper phase far from the solution.
 
-This threshold is operational guidance, not a mathematical restriction on
-Newton. The existing Newton stage forms a dense `(N-1)^2` linear system
-implicitly and uses a diagonal preconditioner. Its equations, CG solver, and
-line search are unchanged.
+CPU and GPU backends execute the same float64 algorithm. A requested GPU run
+requires CuPy and an accessible CUDA device; it fails clearly instead of
+silently falling back to CPU.
 
 ## Diagnostics and tuning
 
@@ -169,34 +197,53 @@ Gram conditioning, and connectivity norm. Additional metadata include:
 - `pdhg["inverse_free_runtime_kkt"]`;
 - `pdhg["weighted_residual_balancing"]`.
 
+The hybrid history uses one global accepted-update axis and labels each row
+with `phase` and `phase_iteration`. FISTA rows additionally report the
+accepted step size, backtracking count, momentum coefficient, restart flag,
+and objective decrease. Hybrid metadata include:
+
+- `phase_iterations` and `phase_wall_seconds` for `pdhg` and `fista`;
+- `fista_weighted_operator_norm`;
+- `initial_step_size`, `final_step_size`, `backtracking_reductions`, and
+  `restart_count`;
+- `handoff["physical_gram_used_directly"] = True` and
+  `handoff["scalar_recalibration"] = None`.
+
 The main low-level tuning parameters are `step_safety`, `initial_dual_step`,
 `step_ratio`, residual-adaptation controls, and the operator-norm power-iteration
 controls. The high-level API uses the validated defaults.
 
-Progress callbacks distinguish `covariance_operator_norm`, the PDHG
-`covariance_optimization` phase, `covariance_preconditioner`, and the Newton
-`covariance_optimization` phase. Operator-norm events report their own relative
-residual and do not contain an objective value.
+Progress callbacks distinguish `covariance_operator_norm` and
+`covariance_optimization`, with `phase` set to `pdhg` or `fista` in hybrid
+runs. Operator-norm events report their own relative residual and do not
+contain an objective value.
 
 ## Scaling evidence
 
-These measurements motivate the replacement and warning but are not runtime
-contracts:
+These measurements are descriptive rather than runtime contracts:
 
-- On the real GM12878 `N=400` fixture, variance-whitened hybrid reached the
-  `1e-3` handoff after 1,108 PDHG updates and converged after three Newton
-  updates in 24.36 seconds. The former scalar-step hybrid required 3,881 PDHG
-  and two Newton updates in 73.79 seconds. Objectives matched, and the relative
-  Gram-matrix difference was `1.764e-9`.
-- On the chromosome 3 `N=3801` target with 5,567,171 observed pairs, whitened
-  PDHG reached relative KKT values `1.044e-1` at 1,000 updates, `4.861e-3` at
-  5,000, and `1.053e-3` at 9,500. These values document progress, not final
-  `1e-5` convergence.
-- From the same `N=3801` PDHG checkpoint, one-update Newton diagnostics with
-  CG caps from 50 through 500 ended with relative linear residuals from `4.58`
-  to `9.77`, far above the requested `1e-4`. The accepted descent steps lowered
-  the objective but did not improve the KKT certificate.
+- On the trusted real GM12878 `N=400` fixture, the `1e-2` hybrid reached the
+  final independent KKT `9.972e-6` in a 27.046-second median wall time, versus
+  34.364 seconds for continued PDHG. Its objective relative error against the
+  stored trusted solution was `9.230e-10`; relative differences in squared
+  distance, distance, Gram, and connectivity were respectively `9.818e-6`,
+  `3.923e-6`, `2.382e-5`, and `1.609e-5`. Peak CuPy pool reservation was
+  52.50 MiB for both paths.
+- On the GM12878 whole-chromosome-3 `N=991` fixture, the public default hybrid
+  reached independent KKT `9.99924e-6` in 8,784 total updates and 477.70
+  seconds. PDHG reached the `1e-2` handoff after 1,046 updates and 54.79
+  seconds; FISTA used 7,738 updates and 421.81 seconds. The minimum internal
+  Gram eigenvalue was `3.186e-3`, maximum absolute Gram and connectivity row
+  sums were `6.82e-13` and `1.06e-13`, and the retained CuPy pool reservation
+  was 301.23 MiB.
 
-The test suite protects the objective and independent KKT certificate on the
-real `N=400` fixture. The `N=3801` measurements remain benchmark evidence and
-are not run in ordinary CI.
+Historical replacement evidence: the removed Newton implementation used 3,214
+PDHG updates plus 20 refinement steps, took 474.7 seconds, returned KKT
+`3.14e-4`, and reported globalization failure on the same `N=991` case. This
+value is retained only to explain the replacement; Newton is no longer a
+supported optimizer or code path.
+
+The test suite protects the objective, independent KKT certificate, stored
+solution agreement, SPD/centering invariants, and GPU workflow on the real
+`N=400` fixture. The larger measurement remains benchmark evidence and is not
+run in ordinary CI.

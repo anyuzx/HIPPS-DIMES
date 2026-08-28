@@ -40,7 +40,7 @@
     "initialization": "rouse",
     "relative_tolerance": 1e-5,
     "absolute_tolerance": 1e-10,
-    "handoff_relative_tolerance": 1e-3,
+    "handoff_relative_tolerance": 1e-2,
     "maximum_iterations": 8000,
     "dtype": "float64",
     "reference_gpu": "NVIDIA GeForce RTX 4070",

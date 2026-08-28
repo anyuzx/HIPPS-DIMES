@@ -1,4 +1,4 @@
-"""Variance-whitened PDHG solvers for the noise-aware COV objective.
+"""Variance-whitened first-order solvers for the noise-aware COV objective.
 
 The solver minimizes
 
@@ -8,8 +8,13 @@ on centered Gram matrices that are positive definite on the internal subspace.
 Writing ``A = V^-1/2 D`` and ``b = V^-1/2 d`` gives a dual problem with unit
 quadratic curvature for every observed pair. Runtime KKT diagnostics follow
 from proximal optimality without reconstructing ``B^-1`` at every iteration.
-Unlike Newton--CG, each PDHG iteration has no inner linear solve and cannot
-leave the valid covariance cone.
+Each PDHG iteration has no inner linear solve and cannot leave the valid
+covariance cone.
+
+The module also contains the low-level direct-Gram monotone FISTA refinement
+used by the public hybrid solver. It deliberately remains below the public
+``HippsDimes`` and CLI surfaces: users select ``hybrid`` rather than invoking a
+standalone FISTA optimizer.
 """
 
 from __future__ import annotations
@@ -557,6 +562,614 @@ def _connectivity_checkpoint(
     if xp is np:
         return np.asarray(connectivity).copy(), inverse_gram
     return _num.cp.asnumpy(connectivity), inverse_gram
+
+
+def fit_gaussian_noise_covariance_fista(
+    squared_distances,
+    noise_variance=None,
+    *,
+    relative_noise_std=None,
+    initial_gram,
+    use_gpu=False,
+    max_iterations=1000,
+    relative_tolerance=1e-5,
+    absolute_tolerance=1e-10,
+    backtracking_factor=0.5,
+    max_backtracking_steps=80,
+    distance_scale=None,
+    operator_norm_power_iterations=25,
+    operator_norm_tolerance=1e-4,
+    operator_norm_safety=1.10,
+    save_steps=None,
+    progress_callback=None,
+):
+    """Refine a physical centered Gram matrix with monotone FISTA.
+
+    This low-level solver minimizes the same Gaussian COV
+    objective as :func:`fit_gaussian_noise_covariance_pdhg`. ``initial_gram``
+    is used directly, without a connectivity round trip or scalar calibration.
+    The function is intentionally not re-exported through the package API or
+    CLI; it is the refinement implementation behind the public hybrid solver.
+    """
+    if use_gpu and not _num.is_gpu_available():
+        raise RuntimeError(
+            "FISTA GPU optimization was requested, but CuPy and an "
+            "accessible CUDA GPU are not available"
+        )
+    (
+        observed,
+        pair_i,
+        pair_j,
+        target_pairs,
+        pair_variance,
+        noise_model,
+        noise_parameter,
+    ) = _num._validate_gaussian_covariance_inputs(
+        squared_distances, noise_variance, relative_noise_std
+    )
+    if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
+        raise ValueError("max_iterations must be a positive integer")
+    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
+        raise ValueError("convergence tolerances must be nonnegative")
+    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
+        raise ValueError("at least one convergence tolerance must be positive")
+    if not np.isfinite(backtracking_factor) or not (0.0 < backtracking_factor < 1.0):
+        raise ValueError("backtracking_factor must lie strictly between zero and one")
+    if (
+        not isinstance(max_backtracking_steps, (int, np.integer))
+        or max_backtracking_steps <= 0
+    ):
+        raise ValueError("max_backtracking_steps must be a positive integer")
+
+    n = observed.shape[0]
+    n_modes = n - 1
+    save_steps_set = set(save_steps or ())
+    if any(
+        not isinstance(step, (int, np.integer))
+        or step < 1
+        or step > max_iterations
+        for step in save_steps_set
+    ):
+        raise ValueError("save_steps must lie between 1 and max_iterations")
+    physical_initial_gram = np.asarray(initial_gram, dtype=np.float64)
+    if physical_initial_gram.shape != (n, n):
+        raise ValueError("initial_gram must have the same square shape as the target")
+    if not np.all(np.isfinite(physical_initial_gram)):
+        raise ValueError("initial_gram must contain only finite values")
+    gram_norm = max(
+        float(np.linalg.norm(physical_initial_gram, ord="fro")),
+        np.finfo(np.float64).tiny,
+    )
+    symmetry_residual = float(
+        np.linalg.norm(physical_initial_gram - physical_initial_gram.T, ord="fro")
+        / gram_norm
+    )
+    centering_residual = float(
+        np.linalg.norm(np.sum(physical_initial_gram, axis=1)) / gram_norm
+    )
+    if symmetry_residual > 1e-10:
+        raise ValueError("initial_gram must be symmetric to numerical precision")
+    if centering_residual > 1e-10:
+        raise ValueError("initial_gram must be centered to numerical precision")
+    physical_initial_gram = _center(_symmetrize(physical_initial_gram), np)
+
+    if distance_scale is None:
+        distance_scale = float(np.median(target_pairs))
+    if not np.isfinite(distance_scale) or distance_scale <= 0.0:
+        raise ValueError("distance_scale must be positive and finite")
+
+    solver_target_cpu = target_pairs / distance_scale
+    solver_variance_cpu = pair_variance / (distance_scale * distance_scale)
+    inverse_standard_deviation_cpu = 1.0 / np.sqrt(solver_variance_cpu)
+    whitened_target_cpu = solver_target_cpu * inverse_standard_deviation_cpu
+    gram_cpu = physical_initial_gram / distance_scale
+    if use_gpu:
+        xp = _num.cp
+        solver_pair_i = xp.asarray(pair_i, dtype=xp.int32)
+        solver_pair_j = xp.asarray(pair_j, dtype=xp.int32)
+        solver_target = xp.asarray(solver_target_cpu, dtype=xp.float64)
+        solver_variance = xp.asarray(solver_variance_cpu, dtype=xp.float64)
+        inverse_standard_deviation = xp.asarray(
+            inverse_standard_deviation_cpu, dtype=xp.float64
+        )
+        whitened_target = xp.asarray(whitened_target_cpu, dtype=xp.float64)
+        gram = xp.asarray(gram_cpu, dtype=xp.float64)
+    else:
+        xp = np
+        solver_pair_i = pair_i
+        solver_pair_j = pair_j
+        solver_target = solver_target_cpu
+        solver_variance = solver_variance_cpu
+        inverse_standard_deviation = inverse_standard_deviation_cpu
+        whitened_target = whitened_target_cpu
+        gram = gram_cpu
+
+    householder = _householder_vector(n, xp)
+    inverse_gram, logdet, eigenvalues = _internal_inverse_and_logdet(
+        gram, householder, xp
+    )
+    operator_norm_squared, operator_norm_info = (
+        _estimate_weighted_operator_norm_squared(
+            gram,
+            inverse_standard_deviation,
+            n,
+            solver_pair_i,
+            solver_pair_j,
+            xp,
+            max_iterations=operator_norm_power_iterations,
+            relative_tolerance=operator_norm_tolerance,
+            safety_factor=operator_norm_safety,
+            progress_callback=progress_callback,
+        )
+    )
+    step_size = 1.0 / operator_norm_squared
+    initial_step_size = step_size
+    logdet_offset = n_modes * np.log(distance_scale)
+
+    def evaluate(
+        state_gram,
+        state_inverse,
+        state_logdet,
+        state_eigenvalues,
+        whitened_fitted=None,
+    ):
+        if whitened_fitted is None:
+            whitened_fitted = _weighted_distance_operator(
+                state_gram,
+                inverse_standard_deviation,
+                solver_pair_i,
+                solver_pair_j,
+                xp,
+            )
+        standardized_residual = whitened_fitted - whitened_target
+        data_objective = 0.5 * _scalar(
+            xp.sum(standardized_residual * standardized_residual)
+        )
+        fitted = whitened_fitted / inverse_standard_deviation
+        data_residual = fitted - solver_target
+        relative_loss = _scalar(
+            xp.sqrt(xp.mean(xp.square(data_residual / solver_target)))
+        )
+        weighted_rmse = _scalar(
+            xp.sqrt(xp.mean(xp.square(standardized_residual)))
+        )
+        distance_rmse = distance_scale * _scalar(
+            xp.sqrt(xp.mean(xp.square(data_residual)))
+        )
+        kkt = _eliminated_kkt_residuals(
+            state_gram,
+            state_inverse,
+            solver_target,
+            solver_variance,
+            n,
+            solver_pair_i,
+            solver_pair_j,
+            xp,
+            fitted=fitted,
+        )
+        minimum_eigenvalue = _scalar(state_eigenvalues[0])
+        maximum_eigenvalue = _scalar(state_eigenvalues[-1])
+        negative_entropy = -_ENTROPY_COEFFICIENT * (state_logdet + logdet_offset)
+        entropy = state_logdet + logdet_offset - n_modes * np.log(3.0)
+        return {
+            "objective": negative_entropy + data_objective,
+            "negative_entropy_objective": negative_entropy,
+            "data_objective": data_objective,
+            "loss": relative_loss,
+            "entropy": entropy,
+            "weighted_rmse": weighted_rmse,
+            "distance_rmse": distance_rmse,
+            "relative_eliminated_kkt_residual": kkt[2],
+            "stationarity_residual_norm": kkt[0],
+            "stationarity_residual_scale": kkt[1],
+            "minimum_internal_gram_eigenvalue": (distance_scale * minimum_eigenvalue),
+            "maximum_internal_gram_eigenvalue": (distance_scale * maximum_eigenvalue),
+            "gram_condition_number": maximum_eigenvalue / minimum_eigenvalue,
+        }
+
+    current = evaluate(gram, inverse_gram, logdet, eigenvalues)
+    initial_objective = float(current["objective"])
+    initial_relative_kkt = float(current["relative_eliminated_kkt_residual"])
+    history = {
+        "iteration": [],
+        "objective": [],
+        "negative_entropy_objective": [],
+        "data_objective": [],
+        "loss": [],
+        "entropy": [],
+        "weighted_rmse": [],
+        "distance_rmse": [],
+        "relative_eliminated_kkt_residual": [],
+        "relative_gradient_norm": [],
+        "relative_stationarity_residual": [],
+        "stationarity_residual_norm": [],
+        "stationarity_residual_scale": [],
+        "relative_step": [],
+        "step_size": [],
+        "backtracking_steps": [],
+        "momentum_parameter": [],
+        "momentum_coefficient": [],
+        "restarted": [],
+        "objective_decrease": [],
+        "minimum_internal_gram_eigenvalue": [],
+        "maximum_internal_gram_eigenvalue": [],
+        "gram_condition_number": [],
+        "connectivity_offdiagonal_l2": [],
+    }
+    connectivity_at_steps = {}
+    search_gram = gram.copy()
+    search_is_extrapolated = False
+    momentum_parameter = 1.0
+    momentum_coefficient = 0.0
+    restart_count = 0
+    backtracking_reductions = 0
+    converged = current["stationarity_residual_norm"] <= (
+        absolute_tolerance + relative_tolerance * current["stationarity_residual_scale"]
+    )
+    status = "optimality_tolerance" if converged else "max_iterations"
+    message = (
+        "KKT tolerance reached at the provided Gram"
+        if converged
+        else "maximum number of monotone FISTA iterations reached"
+    )
+    start_time = time.perf_counter()
+
+    for iteration in range(1, max_iterations + 1):
+        if converged:
+            break
+        accepted = False
+        restarted = False
+        iteration_backtracking = 0
+        used_momentum_parameter = momentum_parameter
+        used_momentum_coefficient = momentum_coefficient
+
+        for _ in range(max_backtracking_steps):
+            search_fitted = _weighted_distance_operator(
+                search_gram,
+                inverse_standard_deviation,
+                solver_pair_i,
+                solver_pair_j,
+                xp,
+            )
+            search_residual = search_fitted - whitened_target
+            search_data_objective = 0.5 * _scalar(
+                xp.sum(search_residual * search_residual)
+            )
+            search_data_gradient = _weighted_distance_adjoint(
+                search_residual,
+                inverse_standard_deviation,
+                n,
+                solver_pair_i,
+                solver_pair_j,
+                xp,
+            )
+            (
+                candidate,
+                candidate_logdet,
+                candidate_eigenvalues,
+                candidate_eigenvectors,
+            ) = _prox_centered_negative_logdet_inverse_free(
+                search_gram - step_size * search_data_gradient,
+                step_size,
+                householder,
+                xp,
+            )
+            candidate_fitted = _weighted_distance_operator(
+                candidate,
+                inverse_standard_deviation,
+                solver_pair_i,
+                solver_pair_j,
+                xp,
+            )
+            candidate_residual = candidate_fitted - whitened_target
+            candidate_data_objective = 0.5 * _scalar(
+                xp.sum(candidate_residual * candidate_residual)
+            )
+            delta = candidate - search_gram
+            quadratic_upper_bound = (
+                search_data_objective
+                + _scalar(xp.sum(search_data_gradient * delta))
+                + 0.5 * _scalar(xp.sum(delta * delta)) / step_size
+            )
+            majorization_tolerance = 1e-12 * max(
+                1.0,
+                abs(search_data_objective),
+                abs(candidate_data_objective),
+            )
+            if candidate_data_objective > (
+                quadratic_upper_bound + majorization_tolerance
+            ):
+                step_size *= backtracking_factor
+                iteration_backtracking += 1
+                backtracking_reductions += 1
+                continue
+
+            candidate_objective = (
+                -_ENTROPY_COEFFICIENT * (candidate_logdet + logdet_offset)
+                + candidate_data_objective
+            )
+            monotonicity_tolerance = 1e-12 * max(
+                1.0, abs(current["objective"]), abs(candidate_objective)
+            )
+            if candidate_objective > (current["objective"] + monotonicity_tolerance):
+                if search_is_extrapolated:
+                    restart_count += 1
+                    restarted = True
+                    search_gram = gram.copy()
+                    search_is_extrapolated = False
+                    momentum_parameter = 1.0
+                    momentum_coefficient = 0.0
+                    used_momentum_parameter = 1.0
+                    used_momentum_coefficient = 0.0
+                else:
+                    step_size *= backtracking_factor
+                    iteration_backtracking += 1
+                    backtracking_reductions += 1
+                continue
+            accepted = True
+            break
+
+        if not accepted:
+            status = "backtracking_failed"
+            message = "monotone FISTA backtracking failed"
+            break
+
+        candidate_inverse = _inverse_from_internal_spectrum(
+            candidate_eigenvalues,
+            candidate_eigenvectors,
+            householder,
+            xp,
+        )
+        candidate_metric = evaluate(
+            candidate,
+            candidate_inverse,
+            candidate_logdet,
+            candidate_eigenvalues,
+            candidate_fitted,
+        )
+        previous_gram = gram
+        objective_decrease = current["objective"] - candidate_metric["objective"]
+        relative_step = _norm(candidate - previous_gram, xp) / max(
+            _norm(previous_gram, xp), np.finfo(np.float64).tiny
+        )
+        gram = candidate
+        inverse_gram = candidate_inverse
+        current = candidate_metric
+
+        history["iteration"].append(iteration)
+        for key in (
+            "objective",
+            "negative_entropy_objective",
+            "data_objective",
+            "loss",
+            "entropy",
+            "weighted_rmse",
+            "distance_rmse",
+            "relative_eliminated_kkt_residual",
+            "stationarity_residual_norm",
+            "stationarity_residual_scale",
+            "minimum_internal_gram_eigenvalue",
+            "maximum_internal_gram_eigenvalue",
+            "gram_condition_number",
+        ):
+            history[key].append(current[key])
+        history["relative_gradient_norm"].append(
+            current["relative_eliminated_kkt_residual"]
+        )
+        history["relative_stationarity_residual"].append(
+            current["relative_eliminated_kkt_residual"]
+        )
+        history["relative_step"].append(relative_step)
+        history["step_size"].append(step_size)
+        history["backtracking_steps"].append(iteration_backtracking)
+        history["momentum_parameter"].append(used_momentum_parameter)
+        history["momentum_coefficient"].append(used_momentum_coefficient)
+        history["restarted"].append(restarted)
+        history["objective_decrease"].append(max(objective_decrease, 0.0))
+        history["connectivity_offdiagonal_l2"].append(np.nan)
+
+        if iteration in save_steps_set:
+            checkpoint = _connectivity_from_scaled_inverse(
+                candidate_inverse, distance_scale, xp
+            )
+            if xp is np:
+                checkpoint = np.asarray(checkpoint).copy()
+            else:
+                checkpoint = _num.cp.asnumpy(checkpoint)
+            connectivity_at_steps[iteration] = checkpoint
+            offdiagonal = checkpoint[np.triu_indices(n, k=1)]
+            history["connectivity_offdiagonal_l2"][-1] = float(
+                np.linalg.norm(offdiagonal)
+            )
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "stage": "covariance_optimization",
+                    "phase": "fista",
+                    "iteration": iteration,
+                    "total": max_iterations,
+                    "objective": current["objective"],
+                    "relative_gradient_norm": current[
+                        "relative_eliminated_kkt_residual"
+                    ],
+                    "relative_eliminated_kkt_residual": current[
+                        "relative_eliminated_kkt_residual"
+                    ],
+                    "relative_stationarity_residual": current[
+                        "relative_eliminated_kkt_residual"
+                    ],
+                    "step_size": step_size,
+                    "backtracking_steps": iteration_backtracking,
+                    "restarted": restarted,
+                    "noisy": True,
+                    "use_gpu": bool(use_gpu),
+                    "method": "COV-FISTA",
+                    "general_method": "covariance_optimization",
+                }
+            )
+
+        converged = current["stationarity_residual_norm"] <= (
+            absolute_tolerance
+            + relative_tolerance * current["stationarity_residual_scale"]
+        )
+        if converged:
+            status = "optimality_tolerance"
+            message = "monotone FISTA KKT tolerance reached"
+            break
+
+        next_momentum_parameter = 0.5 * (
+            1.0 + np.sqrt(1.0 + 4.0 * momentum_parameter**2)
+        )
+        next_momentum_coefficient = (momentum_parameter - 1.0) / next_momentum_parameter
+        search_gram = _center(
+            gram + next_momentum_coefficient * (gram - previous_gram), xp
+        )
+        search_is_extrapolated = next_momentum_coefficient > 0.0
+        momentum_parameter = next_momentum_parameter
+        momentum_coefficient = next_momentum_coefficient
+
+    optimization_wall_seconds = time.perf_counter() - start_time
+    full_gram = distance_scale * gram
+    full_fitted = _num._squared_distances_from_gram(full_gram, array_module=xp)
+    connectivity = _connectivity_from_scaled_inverse(inverse_gram, distance_scale, xp)
+    if use_gpu:
+        full_fitted = _num.cp.asnumpy(full_fitted)
+        full_gram = _num.cp.asnumpy(full_gram)
+        connectivity = _num.cp.asnumpy(connectivity)
+    else:
+        full_fitted = np.asarray(full_fitted)
+        full_gram = np.asarray(full_gram)
+        connectivity = np.asarray(connectivity)
+
+    independent = _independent_eliminated_kkt_residuals(
+        full_gram, target_pairs, pair_variance, pair_i, pair_j
+    )
+    (
+        independent_norm,
+        independent_scale,
+        independent_relative,
+        _,
+        independent_residual,
+    ) = independent
+    independent_converged = independent_norm <= (
+        absolute_tolerance + relative_tolerance * independent_scale
+    )
+    runtime_converged = current["stationarity_residual_norm"] <= (
+        absolute_tolerance + relative_tolerance * current["stationarity_residual_scale"]
+    )
+    converged = bool(runtime_converged and independent_converged)
+    if converged:
+        status = "optimality_tolerance"
+        message = "monotone FISTA and independent KKT tolerance reached"
+    elif status == "optimality_tolerance":
+        status = "independent_kkt_failed"
+        message = (
+            "runtime FISTA KKT tolerance was reached, but the returned Gram "
+            "failed the independent certificate"
+        )
+
+    fitted_pairs = full_fitted[pair_i, pair_j]
+    pair_stationarity = (
+        fitted_pairs - target_pairs - 0.5 * pair_variance * connectivity[pair_i, pair_j]
+    )
+    pair_stationarity_norm = float(np.linalg.norm(pair_stationarity))
+    pair_stationarity_scale = max(
+        1.0,
+        float(np.linalg.norm(fitted_pairs - target_pairs)),
+        float(np.linalg.norm(0.5 * pair_variance * connectivity[pair_i, pair_j])),
+    )
+    for key, values in history.items():
+        if key in {"iteration", "backtracking_steps"}:
+            history[key] = np.asarray(values, dtype=np.int64)
+        elif key == "restarted":
+            history[key] = np.asarray(values, dtype=bool)
+        else:
+            history[key] = np.asarray(values, dtype=np.float64)
+    iterations = int(history["iteration"][-1]) if len(history["iteration"]) else 0
+    info = {
+        "converged": converged,
+        "status": status,
+        "message": message,
+        "iterations": iterations,
+        "returned_iteration": iterations,
+        "objective": float(current["objective"]),
+        "initial_objective": initial_objective,
+        "initial_relative_eliminated_kkt_residual": initial_relative_kkt,
+        "relative_gradient_norm": float(independent_relative),
+        "relative_eliminated_kkt_residual": float(independent_relative),
+        "runtime_relative_eliminated_kkt_residual": float(
+            current["relative_eliminated_kkt_residual"]
+        ),
+        "stationarity_residual_norm": float(independent_norm),
+        "stationarity_residual_scale": float(independent_scale),
+        "relative_stationarity_residual": float(independent_relative),
+        "maximum_absolute_stationarity_residual": float(
+            np.max(np.abs(independent_residual))
+        ),
+        "pair_stationarity_residual_norm": pair_stationarity_norm,
+        "relative_pair_stationarity_residual": (
+            pair_stationarity_norm / pair_stationarity_scale
+        ),
+        "maximum_absolute_pair_stationarity_residual": float(
+            np.max(np.abs(pair_stationarity), initial=0.0)
+        ),
+        "termination_internal_kkt_converged": bool(runtime_converged),
+        "independent_kkt_converged": bool(independent_converged),
+        "independent_kkt_recomputed_from_returned_gram": True,
+        "relative_tolerance": float(relative_tolerance),
+        "absolute_tolerance": float(absolute_tolerance),
+        "observed_pair_count": len(target_pairs),
+        "noise_model": noise_model,
+        "noise_parameter": noise_parameter,
+        "noise_variance_minimum": float(np.min(pair_variance)),
+        "noise_variance_median": float(np.median(pair_variance)),
+        "noise_variance_maximum": float(np.max(pair_variance)),
+        "initialization": {
+            "kind": "provided_gram",
+            "scalar_calibration": None,
+            "physical_gram_used_directly": True,
+            "input_symmetry_relative_residual": symmetry_residual,
+            "input_centering_relative_residual": centering_residual,
+        },
+        "algorithm": "direct_b_monotone_fista",
+        "coordinate_parameterization": "centered_householder",
+        "backend": "gpu" if use_gpu else "cpu",
+        "dtype": "float64",
+        "gpu_device": _num.get_gpu_name() if use_gpu else None,
+        "cupy_version": _num.cp.__version__ if use_gpu else None,
+        "distance_scale": float(distance_scale),
+        "weighted_operator_norm": operator_norm_info,
+        "initial_step_size": float(initial_step_size),
+        "final_step_size": float(step_size),
+        "backtracking_factor": float(backtracking_factor),
+        "maximum_backtracking_steps": int(max_backtracking_steps),
+        "backtracking_reductions": int(backtracking_reductions),
+        "restart_count": int(restart_count),
+        "accelerated": True,
+        "monotone_restart": True,
+        "history": history,
+        "connectivity_matrix_at_steps": connectivity_at_steps,
+        "inverse_reconstruction_count": iterations + 1,
+        "inverse_reconstructed_each_iteration": True,
+        "wall_seconds": optimization_wall_seconds,
+        "objective_definition": (
+            "-1.5*logdet(B_internal) + " "0.5*||V^(-1/2)*(D(B)-D_obs)||^2"
+        ),
+        "stationarity_definition": (
+            "D_adjoint((D(B)-D_obs)/noise_variance)-1.5*B_pseudoinverse"
+        ),
+        "pair_stationarity_definition": ("D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"),
+        "logged_metric_timing": "post-update accepted monotone FISTA iterate",
+    }
+    if not converged:
+        warnings.warn(
+            "fit_gaussian_noise_covariance_fista stopped without satisfying "
+            f"the independent KKT tolerance (status={status})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return full_fitted, full_gram, connectivity, info
 
 
 def fit_gaussian_noise_covariance_pdhg(
@@ -1270,38 +1883,36 @@ def fit_gaussian_noise_covariance_pdhg(
     return full_fitted, full_gram, connectivity, info
 
 
-def _combine_hybrid_histories(pdhg_history, newton_history):
+def _combine_hybrid_histories(pdhg_history, fista_history):
     """Combine phase histories on one global accepted-update axis."""
     pdhg_count = len(pdhg_history["iteration"])
-    newton_count = len(newton_history["iteration"])
+    fista_count = len(fista_history["iteration"])
     combined = {
         "iteration": np.arange(
-            1, pdhg_count + newton_count + 1, dtype=np.int64
+            1, pdhg_count + fista_count + 1, dtype=np.int64
         ),
         "phase": np.asarray(
-            ["pdhg"] * pdhg_count + ["newton"] * newton_count
+            ["pdhg"] * pdhg_count + ["fista"] * fista_count
         ),
         "phase_iteration": np.concatenate(
             (
                 np.asarray(pdhg_history["iteration"], dtype=np.int64),
-                np.asarray(newton_history["iteration"], dtype=np.int64),
+                np.asarray(fista_history["iteration"], dtype=np.int64),
             )
         ),
     }
     history_keys = (
-        set(pdhg_history) | set(newton_history)
+        set(pdhg_history) | set(fista_history)
     ) - {"iteration"}
     for key in sorted(history_keys):
         pdhg_values = pdhg_history.get(key)
-        newton_values = newton_history.get(key)
-        if key == "relative_eliminated_kkt_residual" and newton_values is None:
-            newton_values = newton_history.get("relative_gradient_norm")
+        fista_values = fista_history.get(key)
         if pdhg_values is None:
             pdhg_values = np.full(pdhg_count, np.nan)
-        if newton_values is None:
-            newton_values = np.full(newton_count, np.nan)
+        if fista_values is None:
+            fista_values = np.full(fista_count, np.nan)
         combined[key] = np.concatenate(
-            (np.asarray(pdhg_values), np.asarray(newton_values))
+            (np.asarray(pdhg_values), np.asarray(fista_values))
         )
     return combined
 
@@ -1316,24 +1927,22 @@ def fit_gaussian_noise_covariance_hybrid(
     max_iterations=1000,
     relative_tolerance=1e-5,
     absolute_tolerance=1e-10,
-    handoff_relative_tolerance=1e-3,
+    handoff_relative_tolerance=1e-2,
     save_steps=None,
     progress_callback=None,
 ):
-    """Fit COV globally with PDHG and finish locally with Newton-CG.
+    """Fit COV globally with PDHG and finish with direct-Gram FISTA.
 
     PDHG starts from a Rouse chain or an explicitly supplied connectivity
     matrix and runs until its independently certified KKT residual reaches
-    ``handoff_relative_tolerance``. The returned PDHG connectivity then
-    initializes the existing centered Newton-CG solver. ``max_iterations`` is
-    a single total update budget shared by both phases. The final returned
-    Gram matrix is independently certified against ``relative_tolerance``.
+    ``handoff_relative_tolerance``. The returned physical Gram matrix is handed
+    directly to monotone FISTA without a connectivity round trip or scalar
+    recalibration. ``max_iterations`` is a single total accepted-update budget
+    shared by both phases. The final returned Gram matrix is independently
+    certified against ``relative_tolerance``.
     """
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")
-    shape = np.shape(squared_distances)
-    if len(shape) == 2 and shape[0] == shape[1]:
-        _num._warn_large_covariance_newton(int(shape[0]), "hybrid")
     if (
         isinstance(handoff_relative_tolerance, (bool, np.bool_))
         or not np.isscalar(handoff_relative_tolerance)
@@ -1440,11 +2049,11 @@ def fit_gaussian_noise_covariance_hybrid(
                 "handoff": handoff,
                 "phase_iterations": {
                     "pdhg": pdhg_iterations,
-                    "newton": 0,
+                    "fista": 0,
                 },
                 "phase_wall_seconds": {
                     "pdhg": pdhg_wall_seconds,
-                    "newton": 0.0,
+                    "fista": 0.0,
                 },
                 "history": _combine_hybrid_histories(
                     pdhg_info["history"],
@@ -1454,37 +2063,45 @@ def fit_gaussian_noise_covariance_hybrid(
             }
         )
         warnings.warn(
-            "fit_gaussian_noise_covariance_hybrid stopped before Newton "
+            "fit_gaussian_noise_covariance_hybrid stopped before FISTA "
             f"refinement (status={status})",
             RuntimeWarning,
             stacklevel=2,
         )
         return fitted, gram, connectivity, info
 
-    newton_save_steps = sorted(
+    fista_save_steps = sorted(
         step - pdhg_iterations
         for step in save_steps_set
         if step > pdhg_iterations
     )
-    newton_start_time = time.perf_counter()
-    newton_result = _num.fit_gaussian_noise_covariance(
-        squared_distances,
-        noise_variance,
-        relative_noise_std=relative_noise_std,
-        initial_connectivity=connectivity,
-        use_gpu=use_gpu,
-        max_iterations=remaining_iterations,
-        relative_tolerance=relative_tolerance,
-        absolute_tolerance=absolute_tolerance,
-        save_steps=newton_save_steps,
-        progress_callback=phase_progress_callback(
-            "newton", pdhg_iterations
-        ),
-        _warn_large_system=False,
-    )
-    newton_wall_seconds = time.perf_counter() - newton_start_time
-    fitted, gram, connectivity, newton_info = newton_result
-    newton_iterations = int(newton_info["iterations"])
+    fista_start_time = time.perf_counter()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                "fit_gaussian_noise_covariance_fista stopped without "
+                "satisfying.*"
+            ),
+            category=RuntimeWarning,
+        )
+        fista_result = fit_gaussian_noise_covariance_fista(
+            squared_distances,
+            noise_variance,
+            relative_noise_std=relative_noise_std,
+            initial_gram=gram,
+            use_gpu=use_gpu,
+            max_iterations=remaining_iterations,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+            save_steps=fista_save_steps,
+            progress_callback=phase_progress_callback(
+                "fista", pdhg_iterations
+            ),
+        )
+    fista_wall_seconds = time.perf_counter() - fista_start_time
+    fitted, gram, connectivity, fista_info = fista_result
+    fista_iterations = int(fista_info["iterations"])
 
     (
         _,
@@ -1511,34 +2128,31 @@ def fit_gaussian_noise_covariance_hybrid(
         _,
         independent_residual,
     ) = independent_residuals
-    if relative_tolerance > 0.0:
-        independent_kkt_converged = (
-            independent_relative <= relative_tolerance
-        )
-    else:
-        independent_kkt_converged = (
-            independent_norm <= absolute_tolerance
-        )
-    internal_kkt_converged = bool(newton_info["converged"])
+    independent_kkt_converged = independent_norm <= (
+        absolute_tolerance + relative_tolerance * independent_scale
+    )
+    internal_kkt_converged = bool(
+        fista_info["termination_internal_kkt_converged"]
+    )
     converged = internal_kkt_converged and independent_kkt_converged
     if converged:
         status = "optimality_tolerance"
         message = (
-            "PDHG handoff, Newton refinement, and independent final KKT "
+            "PDHG handoff, FISTA refinement, and independent final KKT "
             "certificate reached"
         )
     elif internal_kkt_converged:
         status = "independent_kkt_failed"
         message = (
-            "Newton reached its internal tolerance, but the returned Gram "
+            "FISTA reached its internal tolerance, but the returned Gram "
             "matrix failed the independent eliminated KKT certificate"
         )
     else:
-        status = f"newton_{newton_info['status']}"
-        message = f"Newton refinement stopped: {newton_info['message']}"
+        status = f"fista_{fista_info['status']}"
+        message = f"FISTA refinement stopped: {fista_info['message']}"
 
     combined_history = _combine_hybrid_histories(
-        pdhg_info["history"], newton_info["history"]
+        pdhg_info["history"], fista_info["history"]
     )
     connectivity_at_steps = dict(
         pdhg_info["connectivity_matrix_at_steps"]
@@ -1546,25 +2160,25 @@ def fit_gaussian_noise_covariance_hybrid(
     connectivity_at_steps.update(
         {
             pdhg_iterations + int(step): matrix
-            for step, matrix in newton_info[
+            for step, matrix in fista_info[
                 "connectivity_matrix_at_steps"
             ].items()
         }
     )
-    info = dict(newton_info)
+    info = dict(fista_info)
     info.update(
         {
             "converged": bool(converged),
             "status": status,
             "message": message,
-            "iterations": pdhg_iterations + newton_iterations,
-            "returned_iteration": pdhg_iterations + newton_iterations,
+            "iterations": pdhg_iterations + fista_iterations,
+            "returned_iteration": pdhg_iterations + fista_iterations,
             "relative_gradient_norm": float(independent_relative),
             "relative_eliminated_kkt_residual": float(
                 independent_relative
             ),
             "runtime_relative_eliminated_kkt_residual": float(
-                newton_info["relative_gradient_norm"]
+                fista_info["runtime_relative_eliminated_kkt_residual"]
             ),
             "stationarity_residual_norm": float(independent_norm),
             "stationarity_residual_scale": float(independent_scale),
@@ -1573,13 +2187,13 @@ def fit_gaussian_noise_covariance_hybrid(
                 np.max(np.abs(independent_residual))
             ),
             "pair_stationarity_residual_norm": float(
-                newton_info["stationarity_residual_norm"]
+                fista_info["pair_stationarity_residual_norm"]
             ),
             "relative_pair_stationarity_residual": float(
-                newton_info["relative_stationarity_residual"]
+                fista_info["relative_pair_stationarity_residual"]
             ),
             "maximum_absolute_pair_stationarity_residual": float(
-                newton_info["maximum_absolute_stationarity_residual"]
+                fista_info["maximum_absolute_pair_stationarity_residual"]
             ),
             "termination_internal_kkt_converged": internal_kkt_converged,
             "independent_kkt_converged": bool(independent_kkt_converged),
@@ -1587,14 +2201,18 @@ def fit_gaussian_noise_covariance_hybrid(
             "relative_tolerance": float(relative_tolerance),
             "absolute_tolerance": float(absolute_tolerance),
             "handoff_relative_tolerance": handoff_relative_tolerance,
-            "handoff": handoff,
+            "handoff": {
+                **handoff,
+                "physical_gram_used_directly": True,
+                "scalar_recalibration": None,
+            },
             "phase_iterations": {
                 "pdhg": pdhg_iterations,
-                "newton": newton_iterations,
+                "fista": fista_iterations,
             },
             "phase_wall_seconds": {
                 "pdhg": pdhg_wall_seconds,
-                "newton": newton_wall_seconds,
+                "fista": fista_wall_seconds,
             },
             "initialization": pdhg_info["initialization"],
             "algorithm": "hybrid",
@@ -1606,9 +2224,13 @@ def fit_gaussian_noise_covariance_hybrid(
             "weighted_operator_norm": pdhg_info[
                 "weighted_operator_norm"
             ],
-            "inverse_reconstruction_count": pdhg_info[
-                "inverse_reconstruction_count"
+            "fista_weighted_operator_norm": fista_info[
+                "weighted_operator_norm"
             ],
+            "inverse_reconstruction_count": (
+                pdhg_info["inverse_reconstruction_count"]
+                + fista_info["inverse_reconstruction_count"]
+            ),
             "inverse_reconstructed_each_iteration": False,
             "stationarity_definition": pdhg_info[
                 "stationarity_definition"
@@ -1617,7 +2239,7 @@ def fit_gaussian_noise_covariance_hybrid(
                 "pair_stationarity_definition"
             ],
             "logged_metric_timing": (
-                "post-update PDHG then Newton iterates on one global axis; "
+                "post-update PDHG then FISTA iterates on one global axis; "
                 "final certificate recomputed from returned Gram matrix"
             ),
         }

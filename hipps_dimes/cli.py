@@ -28,7 +28,7 @@ def _parse_save_steps(save_steps_str):
 @click.argument('output-prefix', nargs=1)
 @click.option('--input-type', required=True, type=click.Choice(['cmap', 'dmap', 'ddmap'], case_sensitive=False), help='Specify the type of the input. cmap: contact map, dmap: mean distance map, or ddmap: mean squared distance map')
 @click.option('--input-format', required=True, type=click.Choice(['text', 'npy', 'cooler', 'hic'], case_sensitive=False), help='Format of input: text, npy, cooler, or hic')
-@click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Maximum optimizer updates, not a convergence declaration. Hybrid COV shares this budget across PDHG and Newton.')
+@click.option('-i', '--iteration', type=int, default=10000, show_default=True, help='Maximum optimizer updates, not a convergence declaration. Hybrid COV shares this budget across PDHG and FISTA.')
 @click.option('-k', '--connectivity-matrix', type=str, required=False, help='Use provided connectivity matrix as initialization. Useful when restart from previous run')
 @click.option('-e', '--ensemble', type=int, default=1000, show_default=True, help='specify the number of conformations generated')
 @click.option('-a', '--alpha', type=float, default=4.0, show_default=True, help='specify the value of cmap-to-dmap conversion exponent')
@@ -38,10 +38,10 @@ def _parse_save_steps(save_steps_str):
 @click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
 @click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Positive homoskedastic variance on squared-distance constraints. Supported only with --method COV and mutually exclusive with --gaussian-noise-relative-std.')
 @click.option('--gaussian-noise-relative-std', type=click.FloatRange(0, max=None), default=None, help='Positive shared relative standard deviation sigma_ij / Dobs_ij. COV converts this after input preprocessing to variance_ij=(value*Dobs_ij)^2.')
-@click.option('--covariance-optimizer', type=click.Choice(['hybrid', 'pdhg', 'newton'], case_sensitive=True), default='hybrid', show_default=True, help='Optimizer for method COV. PDHG is variance-whitened and inverse-free during runtime KKT checks. Hybrid remains the default; use standalone PDHG for N > 2000.')
+@click.option('--covariance-optimizer', type=click.Choice(['hybrid', 'pdhg'], case_sensitive=True), default='hybrid', show_default=True, help='Optimizer for method COV. PDHG is variance-whitened and inverse-free during runtime KKT checks. Hybrid runs PDHG followed by direct-Gram monotone FISTA.')
 @click.option('--covariance-relative-tolerance', type=click.FloatRange(0, max=None), default=1e-5, show_default=True, help='Relative KKT convergence tolerance for method COV.')
 @click.option('--covariance-absolute-tolerance', type=click.FloatRange(0, max=None), default=1e-10, show_default=True, help='Absolute internal KKT convergence tolerance for method COV.')
-@click.option('--covariance-handoff-relative-tolerance', type=click.FloatRange(0, min_open=True, max=None), default=1e-3, show_default=True, help='Relative KKT threshold at which the hybrid COV optimizer switches from PDHG to Newton-CG.')
+@click.option('--covariance-handoff-relative-tolerance', type=click.FloatRange(0, min_open=True, max=None), default=1e-2, show_default=True, help='Relative KKT threshold at which the hybrid COV optimizer switches from PDHG to direct-Gram FISTA.')
 @click.option('--learning-rate', type=float, default=10.0, show_default=True, help='Learning rate. This hyperparameter controls the speed of convergence. If its value is too small, then convergence is very slow. If its value is too large, the program may never converge. Typically, learning rate can be set to be 1-30 if use Iterative scaling method. It should be a very small value (such as 1e-8) when using gradient descent optimization')
 @click.option('--momentum', type=click.FloatRange(0, 1), default=0.0, show_default=True, help='Momentum coefficient for IS method. RECOMMENDED: Use 0.95 with --nesterov for fastest convergence (~50%% faster). Use 0.9 for conservative settings. Only applies when method=IS.')
 @click.option('--nesterov', is_flag=True, default=False, show_default=True, help='Use Nesterov Accelerated Gradient (NAG). Enables higher momentum (0.95) without divergence. RECOMMENDED: Use with --momentum 0.95 for fastest convergence.')
@@ -52,7 +52,6 @@ def _parse_save_steps(save_steps_str):
     show_default=True,
     help=(
         'Use GPU acceleration via CuPy. All COV optimizers run in float64; '
-        'Newton builds its exact blockwise data-Hessian diagonal once per fit. '
         'Requires an accessible CUDA GPU; there is no silent CPU fallback.'
     ),
 )

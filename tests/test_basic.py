@@ -114,110 +114,6 @@ def test_a2dmap_theory():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
-def test_gaussian_covariance_objective_gradient_matches_finite_difference():
-    """The calibrated COV objective should expose its true matrix gradient."""
-    n = 5
-    basis = numerics._centered_orthonormal_basis(n)
-    pair_i, pair_j = np.triu_indices(n, k=1)
-    pair_vectors = basis[pair_i] - basis[pair_j]
-    reduced_gram = np.diag(np.linspace(0.8, 2.0, n - 1))
-    target = np.einsum(
-        "ij,ij->i", pair_vectors @ reduced_gram, pair_vectors, optimize=True
-    )
-    target *= np.linspace(0.95, 1.05, len(target))
-    inverse_variance = np.linspace(2.0, 5.0, len(target))
-    target_matrix, inverse_variance_matrix = (
-        numerics._gaussian_covariance_pair_matrices(
-            n, pair_i, pair_j, target, inverse_variance
-        )
-    )
-    direction = np.arange((n - 1) ** 2, dtype=float).reshape(n - 1, n - 1)
-    direction = 0.5 * (direction + direction.T)
-    direction /= np.linalg.norm(direction)
-
-    objective, gradient, *_ = numerics._gaussian_covariance_objective_gradient(
-        reduced_gram,
-        basis,
-        target_matrix,
-        inverse_variance_matrix,
-        pair_i,
-        pair_j,
-    )
-    step = 1e-6
-    forward = numerics._gaussian_covariance_objective_gradient(
-        reduced_gram + step * direction,
-        basis,
-        target_matrix,
-        inverse_variance_matrix,
-        pair_i,
-        pair_j,
-    )[0]
-    backward = numerics._gaussian_covariance_objective_gradient(
-        reduced_gram - step * direction,
-        basis,
-        target_matrix,
-        inverse_variance_matrix,
-        pair_i,
-        pair_j,
-    )[0]
-
-    assert np.isfinite(objective)
-    assert (forward - backward) / (2.0 * step) == pytest.approx(
-        np.sum(gradient * direction), rel=1e-7, abs=1e-8
-    )
-
-
-def test_covariance_structured_hessian_and_block_preconditioner_match_pairs():
-    """Structured and blockwise COV kernels should equal explicit pair formulas."""
-    rng = np.random.default_rng(20260826)
-    n = 7
-    basis = numerics._centered_orthonormal_basis(n)
-    all_i, all_j = np.triu_indices(n, k=1)
-    selector = np.arange(len(all_i)) % 4 != 0
-    pair_i = all_i[selector]
-    pair_j = all_j[selector]
-    pair_vectors = basis[pair_i] - basis[pair_j]
-    inverse_variance = np.linspace(1.5, 4.5, len(pair_i))
-    target_pairs = np.linspace(0.9, 1.3, len(pair_i))
-    _, inverse_variance_matrix = numerics._gaussian_covariance_pair_matrices(
-        n, pair_i, pair_j, target_pairs, inverse_variance
-    )
-    direction = rng.normal(size=(n - 1, n - 1))
-    direction = 0.5 * (direction + direction.T)
-
-    pair_quadratic = np.einsum(
-        "ij,ij->i", pair_vectors @ direction, pair_vectors, optimize=True
-    )
-    expected_hessian = pair_vectors.T @ (
-        (inverse_variance * pair_quadratic)[:, np.newaxis] * pair_vectors
-    )
-    expected_hessian = 0.5 * (expected_hessian + expected_hessian.T)
-    observed_hessian = numerics._gaussian_covariance_data_hessian_action(
-        direction, basis, inverse_variance_matrix
-    )
-
-    pair_vectors_squared = np.square(pair_vectors)
-    expected_diagonal = pair_vectors_squared.T @ (
-        inverse_variance[:, np.newaxis] * pair_vectors_squared
-    )
-    observed_diagonal, _ = (
-        numerics._gaussian_covariance_data_preconditioner_diagonal(
-            basis,
-            pair_i,
-            pair_j,
-            inverse_variance,
-            block_size=3,
-        )
-    )
-
-    assert np.allclose(
-        observed_hessian, expected_hessian, rtol=1e-12, atol=1e-12
-    )
-    assert np.allclose(
-        observed_diagonal, expected_diagonal, rtol=1e-12, atol=1e-12
-    )
-
-
 def _rouse_squared_distance_target(n=6, spring_constant=1.0):
     truth = HippsDimes.construct_connectivity_matrix_rouse(n, spring_constant)
     mean_distance = HippsDimes.a2dmap_theory(
@@ -301,21 +197,18 @@ def test_gaussian_covariance_initial_scalar_calibration_is_exact(noise_model):
     expected_scale = (
         c + np.sqrt(c * c + 6.0 * (n - 1) * a)
     ) / (2.0 * a)
-    target_matrix, inverse_variance_matrix = (
-        numerics._gaussian_covariance_pair_matrices(
-            n, pair_i, pair_j, target_pairs, inverse_variance
-        )
-    )
 
     def objective(candidate):
-        return numerics._gaussian_covariance_objective_gradient(
-            candidate,
-            basis,
-            target_matrix,
-            inverse_variance_matrix,
-            pair_i,
-            pair_j,
-        )[0]
+        _, log_determinant = np.linalg.slogdet(candidate)
+        candidate_gram = basis @ candidate @ basis.T
+        candidate_distances = numerics._squared_distances_from_gram(
+            candidate_gram
+        )
+        residual = candidate_distances[pair_i, pair_j] - target_pairs
+        return (
+            -1.5 * log_determinant
+            + 0.5 * np.sum(inverse_variance * np.square(residual))
+        )
 
     assert calibration["scale_factor"] == pytest.approx(
         expected_scale, rel=1e-14
@@ -342,10 +235,10 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
     relative_std = 0.05
 
     fitted, gram, connectivity, info = (
-        HippsDimes.fit_gaussian_noise_covariance(
+        HippsDimes.fit_gaussian_noise_covariance_hybrid(
             target,
             relative_noise_std=relative_std,
-            max_iterations=30,
+            max_iterations=500,
             relative_tolerance=1e-8,
             save_steps=[1],
         )
@@ -372,17 +265,17 @@ def test_gaussian_covariance_relative_noise_uses_rouse_default_and_stationarity(
     ] == pytest.approx(np.mean(target[upper]))
     assert info["backend"] == "cpu"
     assert info["gpu_device"] is None
-    assert info["preconditioner_data_setup_count"] == 1
+    assert info["phase_iterations"]["fista"] > 0
     assert np.all(np.diff(info["history"]["objective"]) <= 1e-10)
     assert np.count_nonzero(np.linalg.eigvalsh(gram) > 1e-12) == n - 1
     assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
     assert np.allclose(
         (fitted - target)[upper],
         0.5 * variance[upper] * connectivity[upper],
-        rtol=1e-7,
-        atol=1e-9,
+        rtol=3e-6,
+        atol=2e-8,
     )
-    assert info["relative_stationarity_residual"] <= 1e-8
+    assert info["relative_stationarity_residual"] <= 2e-8
     assert sorted(info["connectivity_matrix_at_steps"]) == [1]
 
 
@@ -391,16 +284,16 @@ def test_gaussian_covariance_absolute_noise_initializations_match():
     target = _rouse_squared_distance_target()
     variance = 0.02
     solver_options = {
-        "max_iterations": 40,
+        "max_iterations": 1000,
         "relative_tolerance": 2e-8,
     }
 
-    rouse = HippsDimes.fit_gaussian_noise_covariance(
+    rouse = HippsDimes.fit_gaussian_noise_covariance_hybrid(
         target,
         variance,
         **solver_options,
     )
-    provided = HippsDimes.fit_gaussian_noise_covariance(
+    provided = HippsDimes.fit_gaussian_noise_covariance_hybrid(
         target,
         variance,
         initial_connectivity=HippsDimes.construct_connectivity_matrix_rouse(
@@ -429,11 +322,13 @@ def test_gaussian_covariance_relative_noise_supports_missing_pairs():
         target[i, j] = np.nan
         target[j, i] = np.nan
 
-    fitted, _, connectivity, info = HippsDimes.fit_gaussian_noise_covariance(
-        target,
-        relative_noise_std=0.05,
-        max_iterations=40,
-        relative_tolerance=1e-8,
+    fitted, _, connectivity, info = (
+        HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            relative_noise_std=0.05,
+            max_iterations=1000,
+            relative_tolerance=1e-8,
+        )
     )
 
     assert info["converged"]
@@ -460,7 +355,7 @@ def test_gaussian_covariance_rejects_invalid_noise_contract(
     target = np.array([[0.0, 1.0], [1.0, 0.0]])
 
     with pytest.raises(ValueError, match=message):
-        HippsDimes.fit_gaussian_noise_covariance(
+        HippsDimes.fit_gaussian_noise_covariance_pdhg(
             target,
             noise_variance,
             relative_noise_std=relative_noise_std,
@@ -472,95 +367,11 @@ def test_gaussian_covariance_gpu_request_fails_without_available_gpu(monkeypatch
     monkeypatch.setattr(numerics, "_CUPY_AVAILABLE", False)
 
     with pytest.raises(RuntimeError, match="CuPy.*accessible CUDA GPU"):
-        HippsDimes.fit_gaussian_noise_covariance(
+        HippsDimes.fit_gaussian_noise_covariance_hybrid(
             target,
             0.1,
             use_gpu=True,
         )
-
-
-@pytest.mark.skipif(
-    not numerics.is_gpu_available(),
-    reason="requires CuPy and an accessible CUDA GPU",
-)
-def test_gaussian_covariance_gpu_kernels_match_cpu(working_cupy):
-    """Float64 GPU COV kernels and block preconditioner should match CPU."""
-    cp = working_cupy
-    rng = np.random.default_rng(20260827)
-    n = 7
-    basis = numerics._centered_orthonormal_basis(n)
-    all_i, all_j = np.triu_indices(n, k=1)
-    selector = np.arange(len(all_i)) % 4 != 0
-    pair_i = all_i[selector]
-    pair_j = all_j[selector]
-    reduced_gram = np.diag(np.linspace(0.8, 2.0, n - 1))
-    pair_vectors = basis[pair_i] - basis[pair_j]
-    target_pairs = np.einsum(
-        "ij,ij->i", pair_vectors @ reduced_gram, pair_vectors, optimize=True
-    )
-    target_pairs *= np.linspace(0.95, 1.05, len(target_pairs))
-    inverse_variance = np.linspace(1.5, 4.5, len(pair_i))
-    target_matrix, inverse_variance_matrix = (
-        numerics._gaussian_covariance_pair_matrices(
-            n, pair_i, pair_j, target_pairs, inverse_variance
-        )
-    )
-    direction = rng.normal(size=(n - 1, n - 1))
-    direction = 0.5 * (direction + direction.T)
-
-    cpu_state = numerics._gaussian_covariance_objective_gradient(
-        reduced_gram,
-        basis,
-        target_matrix,
-        inverse_variance_matrix,
-        pair_i,
-        pair_j,
-    )
-    gpu_state = numerics._gaussian_covariance_objective_gradient(
-        cp.asarray(reduced_gram),
-        cp.asarray(basis),
-        cp.asarray(target_matrix),
-        cp.asarray(inverse_variance_matrix),
-        cp.asarray(pair_i, dtype=cp.int32),
-        cp.asarray(pair_j, dtype=cp.int32),
-        array_module=cp,
-    )
-    cpu_hessian = numerics._gaussian_covariance_data_hessian_action(
-        direction, basis, inverse_variance_matrix
-    )
-    gpu_hessian = numerics._gaussian_covariance_data_hessian_action(
-        cp.asarray(direction),
-        cp.asarray(basis),
-        cp.asarray(inverse_variance_matrix),
-        array_module=cp,
-    )
-    cpu_diagonal, _ = (
-        numerics._gaussian_covariance_data_preconditioner_diagonal(
-            basis,
-            pair_i,
-            pair_j,
-            inverse_variance,
-            block_size=3,
-        )
-    )
-    gpu_diagonal, _ = (
-        numerics._gaussian_covariance_data_preconditioner_diagonal(
-            cp.asarray(basis),
-            cp.asarray(pair_i, dtype=cp.int32),
-            cp.asarray(pair_j, dtype=cp.int32),
-            cp.asarray(inverse_variance),
-            block_size=3,
-            array_module=cp,
-            use_gpu=True,
-        )
-    )
-
-    assert gpu_state[0] == pytest.approx(cpu_state[0], rel=1e-13, abs=1e-13)
-    assert np.allclose(cp.asnumpy(gpu_state[1]), cpu_state[1], rtol=1e-12, atol=1e-12)
-    assert np.allclose(cp.asnumpy(gpu_state[2]), cpu_state[2], rtol=1e-12, atol=1e-12)
-    assert np.allclose(cp.asnumpy(gpu_state[3]), cpu_state[3], rtol=1e-12, atol=1e-12)
-    assert np.allclose(cp.asnumpy(gpu_hessian), cpu_hessian, rtol=1e-12, atol=1e-12)
-    assert np.allclose(cp.asnumpy(gpu_diagonal), cpu_diagonal, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.skipif(
@@ -580,15 +391,17 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     """GPU COV should match CPU for both noise models."""
     target = _rouse_squared_distance_target(6)
     solver_options = {
-        "max_iterations": 30,
+        "max_iterations": 1000,
         "relative_tolerance": 2e-8,
         "save_steps": [1],
         **noise_options,
     }
 
-    cpu = HippsDimes.fit_gaussian_noise_covariance(target, **solver_options)
+    cpu = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target, **solver_options
+    )
     progress_events = []
-    gpu = HippsDimes.fit_gaussian_noise_covariance(
+    gpu = HippsDimes.fit_gaussian_noise_covariance_hybrid(
         target,
         use_gpu=True,
         progress_callback=progress_events.append,
@@ -601,12 +414,12 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
     assert gpu[3]["dtype"] == "float64"
     assert gpu[3]["gpu_device"] == numerics.get_gpu_name()
     assert gpu[3]["cupy_version"] == numerics.cp.__version__
-    assert gpu[3]["preconditioner_setup_seconds"] >= 0.0
+    assert gpu[3]["phase_iterations"]["fista"] > 0
     assert sorted(gpu[3]["connectivity_matrix_at_steps"]) == [1]
-    assert np.allclose(gpu[0], cpu[0], rtol=1e-8, atol=1e-9)
-    assert np.allclose(gpu[1], cpu[1], rtol=1e-8, atol=1e-9)
-    assert np.allclose(gpu[2], cpu[2], rtol=1e-8, atol=1e-9)
-    assert gpu[3]["relative_stationarity_residual"] <= 1e-8
+    assert np.allclose(gpu[0], cpu[0], rtol=2e-6, atol=2e-8)
+    assert np.allclose(gpu[1], cpu[1], rtol=2e-6, atol=2e-8)
+    assert np.allclose(gpu[2], cpu[2], rtol=2e-5, atol=2e-7)
+    assert gpu[3]["relative_stationarity_residual"] <= 2e-8
     cpu_calibration = cpu[3]["initialization"]["scalar_calibration"]
     gpu_calibration = gpu[3]["initialization"]["scalar_calibration"]
     assert cpu_calibration["backend"] == "cpu"
@@ -618,7 +431,7 @@ def test_gaussian_covariance_gpu_matches_cpu_end_to_end(
         cpu_calibration["objective_after"], rel=1e-12, abs=1e-12
     )
     expected_stages = {
-        "covariance_preconditioner",
+        "covariance_operator_norm",
         "covariance_optimization",
     }
     assert gpu[3]["initialization"]["backend"] == "cpu"

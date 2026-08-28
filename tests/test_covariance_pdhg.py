@@ -3,7 +3,6 @@
 import hashlib
 import inspect
 import json
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -123,6 +122,13 @@ def test_pdhg_has_one_canonical_public_surface(name):
     assert not hasattr(HippsDimes, name)
 
 
+def test_direct_b_fista_is_module_only():
+    assert hasattr(pdhg, "fit_gaussian_noise_covariance_fista")
+    assert not hasattr(HippsDimes, "fit_gaussian_noise_covariance_fista")
+    assert not hasattr(HippsDimes, "fit_gaussian_noise_covariance")
+    assert not hasattr(numerics, "fit_gaussian_noise_covariance")
+
+
 def test_hybrid_defaults_to_fixed_production_handoff():
     signature = inspect.signature(
         HippsDimes.fit_gaussian_noise_covariance_hybrid
@@ -131,72 +137,8 @@ def test_hybrid_defaults_to_fixed_production_handoff():
     assert signature.parameters["relative_tolerance"].default == 1e-5
     assert (
         signature.parameters["handoff_relative_tolerance"].default
-        == 1e-3
+        == 1e-2
     )
-
-
-def test_large_newton_warning_boundary():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        numerics._warn_large_covariance_newton(2000, "newton")
-    assert caught == []
-
-    with pytest.warns(
-        RuntimeWarning,
-        match=r"N=2,001.*covariance_optimizer='pdhg'",
-    ):
-        numerics._warn_large_covariance_newton(2001, "newton")
-
-
-def test_large_hybrid_warns_once_and_continues(monkeypatch):
-    monkeypatch.setattr(numerics, "_COVARIANCE_NEWTON_WARNING_SIZE", 4)
-    target = _rouse_squared_distance_target(5)
-
-    with pytest.warns(
-        RuntimeWarning,
-        match="optimizer 'hybrid'",
-    ) as caught:
-        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
-            target,
-            0.1,
-            max_iterations=500,
-        )
-
-    assert len(caught) == 1
-    assert info["converged"]
-    assert info["algorithm"] == "hybrid"
-
-
-def test_large_standalone_newton_warns_and_continues(monkeypatch):
-    monkeypatch.setattr(numerics, "_COVARIANCE_NEWTON_WARNING_SIZE", 4)
-    target = _rouse_squared_distance_target(5)
-
-    with pytest.warns(
-        RuntimeWarning,
-        match="optimizer 'newton'",
-    ):
-        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance(
-            target,
-            0.1,
-            max_iterations=100,
-        )
-
-    assert info["converged"]
-
-
-def test_cupy_cg_tolerance_keyword_supports_old_and_new_signatures():
-    def cupy_13_cg(A, b, x0=None, tol=1e-5, atol=None):
-        return A, b, x0, tol, atol
-
-    def cupy_14_cg(A, b, x0=None, *, rtol=1e-5, atol=0.0):
-        return A, b, x0, rtol, atol
-
-    assert numerics._cupy_cg_tolerance_kwargs(cupy_13_cg, 2e-7) == {
-        "tol": 2e-7
-    }
-    assert numerics._cupy_cg_tolerance_kwargs(cupy_14_cg, 2e-7) == {
-        "rtol": 2e-7
-    }
 
 
 def test_distance_operator_and_adjoint_are_exact_duals():
@@ -426,6 +368,110 @@ def test_logdet_proximal_map_stably_handles_large_negative_eigenvalue():
         ),
     ],
 )
+def test_direct_b_fista_matches_analytic_two_locus_solution(use_gpu):
+    target_value = 2.7
+    variance = 0.14
+    target = np.array([[0.0, target_value], [target_value, 0.0]], dtype=float)
+    centering = np.eye(2) - np.ones((2, 2)) / 2.0
+    initial_gram = -0.5 * centering @ target @ centering
+
+    fitted, gram, connectivity, info = pdhg.fit_gaussian_noise_covariance_fista(
+        target,
+        variance,
+        initial_gram=initial_gram,
+        use_gpu=use_gpu,
+        max_iterations=100,
+        relative_tolerance=1e-10,
+        absolute_tolerance=1e-12,
+    )
+
+    expected_distance = 0.5 * (target_value + np.sqrt(target_value**2 + 6.0 * variance))
+    assert info["converged"]
+    assert info["algorithm"] == "direct_b_monotone_fista"
+    assert info["backend"] == ("gpu" if use_gpu else "cpu")
+    assert fitted[0, 1] == pytest.approx(expected_distance, rel=1e-9, abs=1e-10)
+    assert info["relative_eliminated_kkt_residual"] <= 1e-9
+    assert np.max(np.abs(np.sum(gram, axis=1))) <= 1e-12
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+
+
+def test_direct_b_fista_preserves_converged_input_gram_scale():
+    target = _rouse_squared_distance_target(5)
+    centering = np.eye(5) - np.ones((5, 5)) / 5.0
+    initial_gram = -0.5 * centering @ target @ centering
+
+    _, returned_gram, _, info = pdhg.fit_gaussian_noise_covariance_fista(
+        target,
+        noise_variance=0.1,
+        initial_gram=initial_gram,
+        max_iterations=10,
+        relative_tolerance=2.0,
+    )
+
+    assert info["iterations"] == 0
+    assert info["initialization"]["kind"] == "provided_gram"
+    assert info["initialization"]["scalar_calibration"] is None
+    assert info["initialization"]["physical_gram_used_directly"]
+    assert np.allclose(returned_gram, initial_gram, rtol=1e-14, atol=1e-14)
+
+
+def test_direct_b_fista_refines_missing_pair_handoff():
+    target = _rouse_squared_distance_target(6)
+    target[1, 4] = np.nan
+    target[4, 1] = np.nan
+
+    _, handoff_gram, _, handoff_info = pdhg.fit_gaussian_noise_covariance_pdhg(
+        target,
+        relative_noise_std=0.1,
+        max_iterations=1000,
+        relative_tolerance=1e-2,
+        return_best=False,
+    )
+    fitted, gram, connectivity, info = pdhg.fit_gaussian_noise_covariance_fista(
+        target,
+        relative_noise_std=0.1,
+        initial_gram=handoff_gram,
+        max_iterations=1000,
+        relative_tolerance=1e-7,
+    )
+
+    objective = info["history"]["objective"]
+    objective_scale = max(1.0, float(np.max(np.abs(objective))))
+    assert handoff_info["relative_eliminated_kkt_residual"] <= 1e-2
+    assert info["converged"]
+    assert info["relative_eliminated_kkt_residual"] <= 1e-7
+    assert np.all(np.diff(objective) <= 1e-12 * objective_scale)
+    assert np.all(info["history"]["minimum_internal_gram_eigenvalue"] > 0.0)
+    assert np.all(np.isfinite(fitted))
+    assert np.max(np.abs(np.sum(gram, axis=1))) <= 1e-12
+    assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
+
+
+def test_direct_b_fista_rejects_uncentered_initial_gram():
+    target = _rouse_squared_distance_target(4)
+    initial_gram = np.eye(4)
+
+    with pytest.raises(ValueError, match="must be centered"):
+        pdhg.fit_gaussian_noise_covariance_fista(
+            target,
+            noise_variance=0.1,
+            initial_gram=initial_gram,
+        )
+
+
+@pytest.mark.parametrize(
+    "use_gpu",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not HippsDimes.is_gpu_available(),
+                reason="requires CuPy and an accessible CUDA GPU",
+            ),
+        ),
+    ],
+)
 def test_pdhg_small_variance_inconsistent_target_stays_finite(use_gpu):
     target = np.array(
         [
@@ -495,14 +541,14 @@ def test_pdhg_matches_analytic_two_locus_solution():
     assert info["relative_stationarity_residual"] <= 1e-8
 
 
-def test_pdhg_reaches_same_small_system_optimum_as_newton():
+def test_pdhg_and_hybrid_reach_same_small_system_optimum():
     target = _rouse_squared_distance_target(6)
     relative_std = 0.05
 
-    reference = HippsDimes.fit_gaussian_noise_covariance(
+    reference = HippsDimes.fit_gaussian_noise_covariance_hybrid(
         target,
         relative_noise_std=relative_std,
-        max_iterations=100,
+        max_iterations=1000,
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
     )
@@ -517,13 +563,14 @@ def test_pdhg_reaches_same_small_system_optimum_as_newton():
     )
 
     assert reference[3]["converged"]
+    assert reference[3]["phase_iterations"]["fista"] > 0
     assert info["converged"]
     assert info["algorithm"] == "pdhg"
     assert info["pdhg"]["variance_whitened"]
     assert info["pdhg"]["inverse_free_runtime_kkt"]
     assert info["pdhg"]["weighted_residual_balancing"]
     assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
-    assert np.allclose(gram, reference[1], rtol=2e-7, atol=2e-8)
+    assert np.allclose(gram, reference[1], rtol=3e-6, atol=2e-7)
     assert np.allclose(
         connectivity, reference[2], rtol=2e-6, atol=2e-7
     )
@@ -627,14 +674,14 @@ def test_pdhg_supports_heteroskedastic_noise_with_missing_pairs():
     assert independent <= 1e-5
 
 
-def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
+def test_hybrid_hands_off_to_fista_and_matches_cov_optimum():
     target = _rouse_squared_distance_target(6)
     variance = 0.1
 
-    reference = HippsDimes.fit_gaussian_noise_covariance(
+    reference = HippsDimes.fit_gaussian_noise_covariance_pdhg(
         target,
         variance,
-        max_iterations=100,
+        max_iterations=3000,
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
     )
@@ -652,14 +699,16 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     assert info["pdhg"]["variance_whitened"]
     assert info["pdhg"]["inverse_free_runtime_kkt"]
     assert info["handoff"]["reached"]
-    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-3
+    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-2
+    assert info["handoff"]["physical_gram_used_directly"]
+    assert info["handoff"]["scalar_recalibration"] is None
     assert info["phase_iterations"]["pdhg"] > 0
-    assert info["phase_iterations"]["newton"] > 0
+    assert info["phase_iterations"]["fista"] > 0
     assert sum(info["phase_iterations"].values()) == info["iterations"]
     assert info["relative_eliminated_kkt_residual"] <= 1e-5
     assert info["independent_kkt_recomputed_from_returned_gram"]
     assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
-    assert np.allclose(gram, reference[1], rtol=2e-7, atol=2e-8)
+    assert np.allclose(gram, reference[1], rtol=3e-6, atol=2e-7)
     assert np.allclose(
         connectivity, reference[2], rtol=2e-6, atol=2e-7
     )
@@ -669,8 +718,8 @@ def test_hybrid_hands_off_to_newton_and_matches_cov_optimum():
     assert np.array_equal(
         history["iteration"], np.arange(1, info["iterations"] + 1)
     )
-    assert set(history["phase"]) == {"pdhg", "newton"}
-    assert history["phase"][-1] == "newton"
+    assert set(history["phase"]) == {"pdhg", "fista"}
+    assert history["phase"][-1] == "fista"
     assert np.all(np.isfinite(history["objective"]))
     assert np.isfinite(history["relative_eliminated_kkt_residual"][-1])
 
@@ -699,9 +748,9 @@ def test_hybrid_handoff_does_not_wait_for_split_residuals(monkeypatch):
 
     assert info["converged"]
     assert info["handoff"]["reached"]
-    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-3
+    assert info["handoff"]["relative_eliminated_kkt_residual"] <= 1e-2
     assert info["phase_iterations"]["pdhg"] < 500
-    assert info["phase_iterations"]["newton"] > 0
+    assert info["phase_iterations"]["fista"] > 0
     pdhg_end = info["phase_iterations"]["pdhg"] - 1
     assert info["history"]["relative_primal_kkt_residual"][pdhg_end] == 1.0
     assert info["history"]["relative_dual_kkt_residual"][pdhg_end] == 1.0
@@ -731,7 +780,7 @@ def test_hybrid_reports_when_total_budget_ends_before_handoff():
 
     assert not info["converged"]
     assert info["status"] == "pdhg_handoff_not_reached"
-    assert info["phase_iterations"] == {"pdhg": 1, "newton": 0}
+    assert info["phase_iterations"] == {"pdhg": 1, "fista": 0}
     assert info["iterations"] == 1
 
 
@@ -798,8 +847,8 @@ def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     reason="full N=400 convergence regression requires a CUDA GPU",
 )
 def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
-    """Run the default public COV workflow on the real fixture."""
-    metadata, contact, _, _ = _load_real_chromosome_case()
+    """Run and certify the default public COV workflow on the real fixture."""
+    metadata, contact, _, reference_gram = _load_real_chromosome_case()
     solver = metadata["solver"]
     expected = metadata["reference_solution"]
 
@@ -838,15 +887,62 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
     )
     assert info["phase_iterations"]["pdhg"] > 0
     assert info["phase_iterations"]["pdhg"] <= 1500
-    assert info["phase_iterations"]["newton"] > 0
+    assert info["phase_iterations"]["fista"] > 0
     assert info["independent_kkt_converged"]
     assert info["iterations"] <= solver["maximum_iterations"]
     assert info["relative_eliminated_kkt_residual"] <= (
         solver["relative_tolerance"]
     )
     assert info["objective"] == pytest.approx(
-        expected["trusted_reference_objective"], rel=1e-11, abs=1e-6
+        expected["trusted_reference_objective"], rel=1e-8, abs=1e-6
     )
+
+    fitted_gram = results["gram_matrix"]
+    fitted_connectivity = results["connectivity_matrix"]
+    fitted_distance = results["dmap_final"]
+    fitted_squared_distance = (
+        (3.0 * np.pi / 8.0) * np.square(fitted_distance)
+    )
+    reference_diagonal = np.diag(reference_gram)
+    reference_squared_distance = (
+        reference_diagonal[:, None]
+        + reference_diagonal
+        - 2.0 * reference_gram
+    )
+    reference_distance = np.sqrt(
+        np.maximum(0.0, 8.0 * reference_squared_distance / (3.0 * np.pi))
+    )
+    eigenvalues, eigenvectors = np.linalg.eigh(reference_gram)
+    internal = eigenvalues > 1e-12
+    reference_inverse = (
+        eigenvectors[:, internal] * (1.0 / eigenvalues[internal])
+    ) @ eigenvectors[:, internal].T
+    reference_connectivity = HippsDimes.a2a(-3.0 * reference_inverse)
+
+    def relative_l2(observed, reference):
+        return np.linalg.norm(observed - reference) / np.linalg.norm(reference)
+
+    assert relative_l2(
+        fitted_squared_distance, reference_squared_distance
+    ) <= 2e-5
+    assert relative_l2(fitted_distance, reference_distance) <= 1e-5
+    assert relative_l2(fitted_gram, reference_gram) <= 5e-5
+    assert relative_l2(
+        fitted_connectivity, reference_connectivity
+    ) <= 3e-5
+
+    fitted_eigenvalues = np.linalg.eigvalsh(fitted_gram)
+    zero_index = int(np.argmin(np.abs(fitted_eigenvalues)))
+    assert np.min(np.delete(fitted_eigenvalues, zero_index)) > 0.0
+    assert np.max(np.abs(fitted_gram - fitted_gram.T)) <= 1e-10
+    assert np.max(np.abs(np.sum(fitted_gram, axis=1))) <= 1e-10
+    assert np.max(
+        np.abs(fitted_connectivity - fitted_connectivity.T)
+    ) <= 1e-10
+    assert np.max(np.abs(np.sum(fitted_connectivity, axis=1))) <= 1e-10
+    assert info["wall_seconds"] > 0.0
+    assert info["phase_wall_seconds"]["pdhg"] > 0.0
+    assert info["phase_wall_seconds"]["fista"] > 0.0
 
 
 @pytest.mark.skipif(

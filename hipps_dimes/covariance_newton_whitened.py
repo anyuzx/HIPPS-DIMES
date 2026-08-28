@@ -1,4 +1,4 @@
-"""Entropy-whitened Newton-CG for the Gaussian noise-aware COV objective.
+"""Entropy-whitened Newton-PCG for the Gaussian noise-aware COV objective.
 
 The solver minimizes
 
@@ -7,12 +7,11 @@ The solver minimizes
 on the positive-definite internal Gram matrix. Newton directions are written
 as ``delta_B = L X L.T`` for ``B = L L.T``. In the variable ``X`` the
 entropy Hessian is exactly ``3/2 I``; the remaining data curvature is applied
-matrix-free. PCG operates on the orthonormal symmetric ``svec`` coordinates
-and uses the exact diagonal of the whitened data Hessian.
+matrix-free. PCG operates on orthonormal symmetric ``svec`` coordinates.
 
-This module is intentionally separate from the legacy Newton implementation so
-large-system handoff behavior can be benchmarked without changing the existing
-COV solver.
+Globalization is objective/model based. The relative KKT residual is retained
+as the final convergence certificate and as a catastrophic-step guard, but it
+is deliberately not required to decrease at every accepted Newton step.
 """
 
 from __future__ import annotations
@@ -60,13 +59,7 @@ def _forcing_tolerance(
     maximum: float,
     coefficient: float,
 ) -> float:
-    """Return an inexact-Newton forcing tolerance.
-
-    ``minimum`` is the final linear-solve accuracy, while ``maximum`` permits
-    inexpensive solves far from the solution. This intentionally does not use
-    the legacy ``min(cg_relative_tolerance, adaptive_value)`` rule, which made
-    every solve at least as strict as the final tolerance.
-    """
+    """Return an inexact-Newton forcing tolerance."""
     proposed = coefficient * np.sqrt(max(float(relative_kkt), 0.0))
     return float(min(maximum, max(minimum, proposed)))
 
@@ -133,34 +126,57 @@ def _pcg_svec(
     max_iterations,
     *,
     xp,
+    initial_solution=None,
     progress_callback=None,
     progress_interval=25,
     true_residual_interval=50,
     outer_iteration=1,
 ):
-    """Preconditioned CG with explicit progress and a hard iteration cap."""
-    solution = xp.zeros_like(right_hand_side)
-    residual = right_hand_side.copy()
+    """Preconditioned CG with progress, warm starts, and best-iterate return."""
+    if initial_solution is None:
+        solution = xp.zeros_like(right_hand_side)
+        residual = right_hand_side.copy()
+        hessian_actions = 0
+    else:
+        solution = initial_solution.copy()
+        residual = right_hand_side - operator(solution)
+        hessian_actions = 1
     right_norm = _norm(right_hand_side, xp)
     if right_norm == 0.0:
         return solution, {
             "iterations": 0,
             "relative_residual": 0.0,
+            "final_relative_residual": 0.0,
             "best_relative_residual": 0.0,
+            "returned_best_iterate": False,
             "converged": True,
             "termination_reason": "zero_right_hand_side",
-            "hessian_actions": 0,
+            "hessian_actions": hessian_actions,
             "wall_seconds": 0.0,
         }
 
     tolerance = float(relative_tolerance) * right_norm
+    initial_relative = _norm(residual, xp) / right_norm
+    if initial_relative <= relative_tolerance:
+        return solution, {
+            "iterations": 0,
+            "relative_residual": float(initial_relative),
+            "final_relative_residual": float(initial_relative),
+            "best_relative_residual": float(initial_relative),
+            "returned_best_iterate": False,
+            "converged": True,
+            "termination_reason": "initial_solution_tolerance",
+            "hessian_actions": hessian_actions,
+            "wall_seconds": 0.0,
+        }
+
     preconditioned = residual / preconditioner_diagonal
     direction = preconditioned.copy()
     residual_product = _scalar(xp.sum(residual * preconditioned))
-    best_relative = 1.0
+    best_solution = solution.copy()
+    best_relative = float(initial_relative)
     converged = False
     termination_reason = "maximum_iterations"
-    hessian_actions = 0
     iteration = 0
     start_time = time.perf_counter()
 
@@ -188,7 +204,7 @@ def _pcg_svec(
             }
         )
 
-    emit(1.0, force=True)
+    emit(initial_relative, force=True)
     for iteration in range(1, int(max_iterations) + 1):
         operator_direction = operator(direction)
         hessian_actions += 1
@@ -211,7 +227,9 @@ def _pcg_svec(
 
         residual_norm = _norm(residual, xp)
         relative_residual = residual_norm / right_norm
-        best_relative = min(best_relative, relative_residual)
+        if relative_residual < best_relative:
+            best_relative = float(relative_residual)
+            best_solution = solution.copy()
         emit(relative_residual)
         if residual_norm <= tolerance:
             converged = True
@@ -232,15 +250,27 @@ def _pcg_svec(
             )
         residual_product = next_product
 
-    residual = right_hand_side - operator(solution)
+    final_residual = right_hand_side - operator(solution)
     hessian_actions += 1
-    relative_residual = _norm(residual, xp) / right_norm
-    best_relative = min(best_relative, relative_residual)
+    final_relative = _norm(final_residual, xp) / right_norm
+    if final_relative < best_relative:
+        best_relative = float(final_relative)
+        best_solution = solution.copy()
+    returned_best = (not converged) and best_relative < final_relative
+    if returned_best:
+        solution = best_solution
+        returned_residual = right_hand_side - operator(solution)
+        hessian_actions += 1
+        relative_residual = _norm(returned_residual, xp) / right_norm
+    else:
+        relative_residual = final_relative
     emit(relative_residual, force=True)
     return solution, {
         "iterations": int(iteration),
         "relative_residual": float(relative_residual),
+        "final_relative_residual": float(final_relative),
         "best_relative_residual": float(best_relative),
+        "returned_best_iterate": bool(returned_best),
         "converged": bool(converged),
         "termination_reason": termination_reason,
         "hessian_actions": int(hessian_actions),
@@ -248,12 +278,7 @@ def _pcg_svec(
     }
 
 
-def _provided_gram_initialization(
-    initial_gram,
-    solver_basis,
-    *,
-    xp,
-):
+def _provided_gram_initialization(initial_gram, solver_basis, *, xp):
     """Project one physical centered Gram matrix into the internal basis."""
     n = solver_basis.shape[0]
     gram_cpu = np.asarray(initial_gram, dtype=np.float64)
@@ -358,6 +383,81 @@ def _build_whitened_preconditioner(
     return whitened_basis, svec_diagonal, float(setup_seconds)
 
 
+def _physical_residual_from_transformed(
+    transformed_residual, cholesky_factor, xp
+):
+    """Recover the physical Newton residual from ``-L.T r L``."""
+    matrix = _symmetrize(transformed_residual)
+    if xp is np:
+        left = _num.scipy.linalg.solve_triangular(
+            cholesky_factor.T,
+            matrix,
+            lower=False,
+            check_finite=False,
+        )
+        physical = -_num.scipy.linalg.solve_triangular(
+            cholesky_factor.T,
+            left.T,
+            lower=False,
+            check_finite=False,
+        ).T
+    else:
+        left = _num.cupyx_scipy_linalg.solve_triangular(
+            cholesky_factor.T,
+            matrix,
+            lower=False,
+            check_finite=False,
+        )
+        physical = -_num.cupyx_scipy_linalg.solve_triangular(
+            cholesky_factor.T,
+            left.T,
+            lower=False,
+            check_finite=False,
+        ).T
+    return _symmetrize(physical)
+
+
+def _trial_is_acceptable(
+    *,
+    objective,
+    trial_objective,
+    directional_derivative,
+    step_size,
+    predicted_reduction,
+    model_ratio,
+    minimum_model_ratio,
+    relative_kkt,
+    trial_relative_kkt,
+    maximum_kkt_growth,
+):
+    """Objective/model globalization with only a catastrophic KKT guard."""
+    if not np.isfinite(trial_objective) or not np.isfinite(model_ratio):
+        return False
+    armijo = trial_objective <= (
+        objective + 1e-4 * step_size * directional_derivative
+    )
+    return bool(
+        armijo
+        and predicted_reduction > 0.0
+        and model_ratio >= minimum_model_ratio
+        and trial_relative_kkt <= maximum_kkt_growth * relative_kkt
+    )
+
+
+def _readiness_targets(primary, forcing_target, progressive_targets):
+    values = [max(float(primary), float(forcing_target))]
+    for value in progressive_targets:
+        value = float(value)
+        if value <= 0.0 or value >= 1.0:
+            raise ValueError("readiness_cg_targets must lie in (0, 1)")
+        values.append(max(value, forcing_target))
+    unique = []
+    for value in sorted(set(values), reverse=True):
+        if not unique or value < unique[-1]:
+            unique.append(value)
+    return tuple(unique)
+
+
 def fit_gaussian_noise_covariance_newton_whitened(
     squared_distances,
     noise_variance=None,
@@ -374,27 +474,31 @@ def fit_gaussian_noise_covariance_newton_whitened(
     relative_tolerance=1e-5,
     absolute_tolerance=1e-10,
     cg_forcing_min=1e-6,
-    cg_forcing_max=0.1,
-    cg_forcing_coefficient=0.1,
+    cg_forcing_max=0.2,
+    cg_forcing_coefficient=0.5,
     cg_max_iterations=None,
     cg_progress_interval=25,
     cg_true_residual_interval=50,
     readiness_probe=True,
     readiness_cg_tolerance=0.1,
+    readiness_cg_targets=(0.03, 0.01, 0.003),
     readiness_cg_max_iterations=200,
-    readiness_kkt_reduction=0.95,
-    truncated_kkt_reduction=0.9,
-    maximum_kkt_growth=1.0,
+    minimum_model_ratio=0.1,
+    readiness_minimum_model_ratio=0.05,
+    maximum_kkt_growth=10.0,
+    readiness_kkt_reduction=None,
+    truncated_kkt_reduction=None,
     line_search_max_iterations=40,
+    return_best=True,
     save_steps=None,
     progress_callback=None,
 ):
     """Fit the COV objective with centered entropy-whitened Newton-PCG.
 
-    When ``initial_gram`` is supplied it is handed to Newton directly and is
-    *not* scalar calibrated by default. This is the intended PDHG-to-Newton
-    path. The first Krylov solve can be capped as a readiness probe; failure to
-    produce a KKT-improving step returns the untouched handoff point quickly.
+    A supplied ``initial_gram`` is handed to Newton directly and is not scalar
+    calibrated by default. Objective decrease and agreement with the local
+    quadratic model globalize Newton. Relative KKT is a stopping certificate
+    and catastrophic-step guard, not a monotone line-search merit function.
     """
     if use_gpu and not _num.is_gpu_available():
         raise RuntimeError(
@@ -416,8 +520,8 @@ def fit_gaussian_noise_covariance_newton_whitened(
         ("cg_forcing_max", cg_forcing_max),
         ("cg_forcing_coefficient", cg_forcing_coefficient),
         ("readiness_cg_tolerance", readiness_cg_tolerance),
-        ("readiness_kkt_reduction", readiness_kkt_reduction),
-        ("truncated_kkt_reduction", truncated_kkt_reduction),
+        ("minimum_model_ratio", minimum_model_ratio),
+        ("readiness_minimum_model_ratio", readiness_minimum_model_ratio),
         ("maximum_kkt_growth", maximum_kkt_growth),
     ):
         if not np.isfinite(value) or value <= 0.0:
@@ -428,10 +532,24 @@ def fit_gaussian_noise_covariance_newton_whitened(
         raise ValueError("cg_forcing_min must not exceed cg_forcing_max")
     if readiness_cg_tolerance >= 1.0:
         raise ValueError("readiness_cg_tolerance must be below one")
-    if readiness_kkt_reduction > 1.0 or truncated_kkt_reduction > 1.0:
-        raise ValueError("KKT reduction factors must not exceed one")
+    if minimum_model_ratio >= 1.0 or readiness_minimum_model_ratio >= 1.0:
+        raise ValueError("minimum model ratios must lie below one")
     if maximum_kkt_growth < 1.0:
         raise ValueError("maximum_kkt_growth must be at least one")
+    if readiness_kkt_reduction is not None:
+        warnings.warn(
+            "readiness_kkt_reduction is deprecated and ignored; readiness is "
+            "now objective/model based",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if truncated_kkt_reduction is not None:
+        warnings.warn(
+            "truncated_kkt_reduction is deprecated and ignored; truncated "
+            "directions use the model-ratio globalization",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     (
         observed,
@@ -568,16 +686,11 @@ def fit_gaussian_noise_covariance_newton_whitened(
         objective_mismatch = abs(
             initial_objective - float(expected_initial_objective)
         ) / max(1.0, abs(float(expected_initial_objective)))
-        initialization_info["expected_objective"] = float(
-            expected_initial_objective
-        )
-        initialization_info["relative_objective_mismatch"] = float(
-            objective_mismatch
-        )
+        initialization_info["expected_objective"] = float(expected_initial_objective)
+        initialization_info["relative_objective_mismatch"] = float(objective_mismatch)
         if objective_mismatch > handoff_objective_relative_tolerance:
             raise RuntimeError(
-                "Newton direct-Gram handoff does not reproduce the PDHG "
-                "objective"
+                "Newton direct-Gram handoff does not reproduce the PDHG objective"
             )
     if expected_initial_relative_kkt is not None:
         initialization_info["expected_relative_kkt"] = float(
@@ -604,17 +717,24 @@ def fit_gaussian_noise_covariance_newton_whitened(
         "relative_step": [],
         "step_size": [],
         "line_search_backtracks": [],
+        "actual_reduction": [],
+        "predicted_reduction": [],
+        "model_ratio": [],
         "kkt_before": [],
         "kkt_after": [],
         "kkt_reduction_factor": [],
         "cg_iterations": [],
         "cg_relative_residual": [],
+        "cg_final_relative_residual": [],
         "cg_best_relative_residual": [],
+        "cg_physical_relative_residual": [],
         "cg_target": [],
         "cg_converged": [],
         "cg_hessian_actions": [],
         "cg_termination_reason": [],
+        "cg_returned_best_iterate": [],
         "readiness_probe": [],
+        "readiness_stage": [],
         "accepted_truncated_cg": [],
         "preconditioner_setup_seconds": [],
         "minimum_internal_gram_eigenvalue": [],
@@ -630,13 +750,16 @@ def fit_gaussian_noise_covariance_newton_whitened(
     readiness_info = {
         "enabled": bool(readiness_probe),
         "passed": bool(readiness_passed),
-        "cg_target": float(readiness_cg_tolerance),
-        "cg_max_iterations": int(readiness_cg_max_iterations),
+        "stages_attempted": [],
     }
     total_preconditioner_seconds = 0.0
     total_cg_seconds = 0.0
     start_time = time.perf_counter()
     accepted_iterations = 0
+    best_kkt = float(initial_relative_kkt)
+    best_gram = reduced_gram.copy()
+    best_state = current_state
+    best_iteration = 0
 
     for outer_iteration in range(1, max_iterations + 1):
         objective, gradient, _, _, _ = current_state
@@ -699,128 +822,219 @@ def fit_gaussian_noise_covariance_newton_whitened(
             )
             return _svec(result, diagonal, off_i, off_j, xp)
 
+        forcing_target = _forcing_tolerance(
+            relative_kkt,
+            cg_forcing_min,
+            cg_forcing_max,
+            cg_forcing_coefficient,
+        )
         probe_iteration = readiness_probe and not readiness_passed
         if probe_iteration:
-            cg_target = max(
+            targets = _readiness_targets(
                 readiness_cg_tolerance,
-                _forcing_tolerance(
-                    relative_kkt,
-                    cg_forcing_min,
-                    cg_forcing_max,
-                    cg_forcing_coefficient,
-                ),
+                forcing_target,
+                readiness_cg_targets,
             )
-            cg_limit = min(
+            total_cg_budget = min(
                 int(cg_max_iterations), int(readiness_cg_max_iterations)
             )
         else:
-            cg_target = _forcing_tolerance(
-                relative_kkt,
-                cg_forcing_min,
-                cg_forcing_max,
-                cg_forcing_coefficient,
-            )
-            cg_limit = int(cg_max_iterations)
+            targets = (forcing_target,)
+            total_cg_budget = int(cg_max_iterations)
 
-        solution_vector, cg_info = _pcg_svec(
-            hessian_svec,
-            right_hand_side,
-            preconditioner_diagonal,
-            cg_target,
-            cg_limit,
-            xp=xp,
-            progress_callback=progress_callback,
-            progress_interval=cg_progress_interval,
-            true_residual_interval=cg_true_residual_interval,
-            outer_iteration=outer_iteration,
-        )
-        total_cg_seconds += cg_info["wall_seconds"]
-        whitened_direction = _smat(
-            solution_vector, n_modes, diagonal, off_i, off_j, xp
-        )
-        direction = _symmetrize(
-            cholesky_factor
-            @ whitened_direction
-            @ cholesky_factor.T
-        )
-        directional_derivative = _scalar(xp.sum(gradient * direction))
-        if (
-            not np.isfinite(directional_derivative)
-            or directional_derivative >= 0.0
-        ):
-            status = "non_descent_direction"
-            message = "whitened PCG did not produce an objective descent direction"
+        accepted = None
+        warm_solution = None
+        consumed_cg = 0
+        last_cg_info = None
+        last_reason = "no_attempt"
+        for stage_index, cg_target in enumerate(targets, start=1):
+            remaining = total_cg_budget - consumed_cg
+            if remaining <= 0:
+                break
+            remaining_stages = len(targets) - stage_index + 1
+            stage_budget = max(1, remaining // remaining_stages)
+            solution_vector, cg_info = _pcg_svec(
+                hessian_svec,
+                right_hand_side,
+                preconditioner_diagonal,
+                cg_target,
+                stage_budget,
+                xp=xp,
+                initial_solution=warm_solution,
+                progress_callback=progress_callback,
+                progress_interval=cg_progress_interval,
+                true_residual_interval=cg_true_residual_interval,
+                outer_iteration=outer_iteration,
+            )
+            total_cg_seconds += cg_info["wall_seconds"]
+            consumed_cg += cg_info["iterations"]
+            warm_solution = solution_vector
+            last_cg_info = cg_info
+
+            hessian_solution = hessian_svec(solution_vector)
+            transformed_linear_residual = right_hand_side - hessian_solution
+            transformed_residual_matrix = _smat(
+                transformed_linear_residual,
+                n_modes,
+                diagonal,
+                off_i,
+                off_j,
+                xp,
+            )
+            try:
+                physical_residual = _physical_residual_from_transformed(
+                    transformed_residual_matrix, cholesky_factor, xp
+                )
+                physical_relative_residual = _norm(
+                    physical_residual, xp
+                ) / max(gradient_norm, np.finfo(np.float64).tiny)
+            except Exception:
+                physical_relative_residual = np.inf
+
+            whitened_direction = _smat(
+                solution_vector, n_modes, diagonal, off_i, off_j, xp
+            )
+            direction = _symmetrize(
+                cholesky_factor
+                @ whitened_direction
+                @ cholesky_factor.T
+            )
+            directional_derivative = _scalar(xp.sum(gradient * direction))
+            rhs_dot_direction = _scalar(
+                xp.sum(right_hand_side * solution_vector)
+            )
+            direction_curvature = _scalar(
+                xp.sum(solution_vector * hessian_solution)
+            )
+            if (
+                not np.isfinite(directional_derivative)
+                or directional_derivative >= 0.0
+                or not np.isfinite(direction_curvature)
+                or direction_curvature <= 0.0
+            ):
+                last_reason = "non_descent_or_nonpositive_model"
+                if probe_iteration:
+                    readiness_info["stages_attempted"].append(
+                        {
+                            "target": float(cg_target),
+                            "cg": dict(cg_info),
+                            "physical_relative_residual": float(
+                                physical_relative_residual
+                            ),
+                            "accepted": False,
+                            "reason": last_reason,
+                        }
+                    )
+                continue
+
+            minimum_ratio = (
+                readiness_minimum_model_ratio
+                if probe_iteration
+                else minimum_model_ratio
+            )
+            step_size = 1.0
+            for backtracks in range(int(line_search_max_iterations)):
+                predicted_reduction = (
+                    step_size * rhs_dot_direction
+                    - 0.5 * step_size * step_size * direction_curvature
+                )
+                if predicted_reduction <= 0.0:
+                    step_size *= 0.5
+                    continue
+                trial = _symmetrize(reduced_gram + step_size * direction)
+                trial_state = _num._gaussian_covariance_objective_gradient(
+                    trial,
+                    solver_basis,
+                    solver_target_matrix,
+                    solver_inverse_variance_matrix,
+                    solver_pair_i,
+                    solver_pair_j,
+                    array_module=xp,
+                )
+                if np.isfinite(trial_state[0]):
+                    _, _, trial_relative_kkt = _relative_gradient_state(
+                        trial_state, xp
+                    )
+                    actual_reduction = float(objective) - float(
+                        trial_state[0]
+                    )
+                    model_ratio = actual_reduction / predicted_reduction
+                    if _trial_is_acceptable(
+                        objective=float(objective),
+                        trial_objective=float(trial_state[0]),
+                        directional_derivative=directional_derivative,
+                        step_size=step_size,
+                        predicted_reduction=predicted_reduction,
+                        model_ratio=model_ratio,
+                        minimum_model_ratio=minimum_ratio,
+                        relative_kkt=relative_kkt,
+                        trial_relative_kkt=trial_relative_kkt,
+                        maximum_kkt_growth=maximum_kkt_growth,
+                    ):
+                        accepted = {
+                            "gram": trial,
+                            "state": trial_state,
+                            "relative_kkt": float(trial_relative_kkt),
+                            "step_size": float(step_size),
+                            "backtracks": int(backtracks),
+                            "actual_reduction": float(actual_reduction),
+                            "predicted_reduction": float(predicted_reduction),
+                            "model_ratio": float(model_ratio),
+                            "directional_derivative": float(
+                                directional_derivative
+                            ),
+                            "cg_info": dict(cg_info),
+                            "cg_target": float(cg_target),
+                            "physical_relative_residual": float(
+                                physical_relative_residual
+                            ),
+                            "readiness_stage": int(stage_index),
+                        }
+                        break
+                step_size *= 0.5
+            if accepted is not None:
+                last_reason = "accepted"
+            else:
+                last_reason = "globalization_rejected"
             if probe_iteration:
-                status = "newton_readiness_failed"
-                message = "Newton readiness probe produced no descent direction"
-            break
-
-        if probe_iteration:
-            required_kkt_factor = readiness_kkt_reduction
-        elif cg_info["converged"]:
-            required_kkt_factor = maximum_kkt_growth
-        else:
-            required_kkt_factor = truncated_kkt_reduction
-
-        step_size = 1.0
-        candidate = None
-        candidate_state = None
-        candidate_relative_kkt = np.inf
-        backtracks = 0
-        for backtracks in range(int(line_search_max_iterations)):
-            trial = _symmetrize(reduced_gram + step_size * direction)
-            trial_state = _num._gaussian_covariance_objective_gradient(
-                trial,
-                solver_basis,
-                solver_target_matrix,
-                solver_inverse_variance_matrix,
-                solver_pair_i,
-                solver_pair_j,
-                array_module=xp,
-            )
-            if np.isfinite(trial_state[0]):
-                _, _, trial_relative_kkt = _relative_gradient_state(
-                    trial_state, xp
+                readiness_info["stages_attempted"].append(
+                    {
+                        "target": float(cg_target),
+                        "cg": dict(cg_info),
+                        "physical_relative_residual": float(
+                            physical_relative_residual
+                        ),
+                        "accepted": accepted is not None,
+                        "reason": last_reason,
+                    }
                 )
-                objective_ok = float(trial_state[0]) <= (
-                    float(objective)
-                    + 1e-4 * step_size * directional_derivative
-                )
-                kkt_limit = max(
-                    relative_tolerance,
-                    required_kkt_factor * relative_kkt,
-                )
-                kkt_ok = trial_relative_kkt <= kkt_limit
-                if objective_ok and kkt_ok:
-                    candidate = trial
-                    candidate_state = trial_state
-                    candidate_relative_kkt = trial_relative_kkt
-                    break
-            step_size *= 0.5
+            if accepted is not None:
+                break
 
-        if candidate is None:
+        if accepted is None:
             if probe_iteration:
                 status = "newton_readiness_failed"
                 message = (
-                    "Newton readiness probe did not produce an objective- and "
-                    "KKT-improving feasible step"
+                    "progressive Newton readiness solves did not produce an "
+                    "objective/model-consistent feasible step"
                 )
                 readiness_info.update(
                     {
                         "passed": False,
-                        "cg_converged": bool(cg_info["converged"]),
-                        "cg_relative_residual": float(
-                            cg_info["relative_residual"]
-                        ),
+                        "termination_reason": last_reason,
+                        "last_cg": last_cg_info,
                     }
                 )
             else:
-                status = "kkt_safeguard_failed"
+                status = "globalization_failed"
                 message = (
-                    "no feasible Armijo step satisfied the KKT safeguard"
+                    "no feasible objective/model-consistent Newton step was found"
                 )
             break
 
+        candidate = accepted["gram"]
+        candidate_state = accepted["state"]
+        candidate_relative_kkt = accepted["relative_kkt"]
         accepted_delta = candidate - reduced_gram
         relative_step = _norm(accepted_delta, xp) / max(
             _norm(reduced_gram, xp), 1.0
@@ -833,14 +1047,18 @@ def fit_gaussian_noise_covariance_newton_whitened(
             readiness_info.update(
                 {
                     "passed": True,
-                    "cg_converged": bool(cg_info["converged"]),
-                    "cg_relative_residual": float(
-                        cg_info["relative_residual"]
-                    ),
                     "kkt_before": float(relative_kkt),
                     "kkt_after": float(candidate_relative_kkt),
+                    "model_ratio": accepted["model_ratio"],
+                    "readiness_stage": accepted["readiness_stage"],
                 }
             )
+
+        if candidate_relative_kkt < best_kkt:
+            best_kkt = float(candidate_relative_kkt)
+            best_gram = reduced_gram.copy()
+            best_state = current_state
+            best_iteration = accepted_iterations
 
         (
             candidate_objective,
@@ -888,6 +1106,7 @@ def fit_gaussian_noise_covariance_newton_whitened(
             0.0,
         )
         connectivity_norm = float(np.sqrt(offdiagonal_norm_squared))
+        cg_info = accepted["cg_info"]
 
         history["iteration"].append(accepted_iterations)
         history["objective"].append(float(candidate_objective))
@@ -900,41 +1119,51 @@ def fit_gaussian_noise_covariance_newton_whitened(
         history["weighted_rmse"].append(weighted_rmse)
         history["distance_rmse"].append(distance_rmse)
         history["gradient_norm"].append(candidate_gradient_norm)
-        history["relative_gradient_norm"].append(
-            candidate_relative_kkt
-        )
+        history["relative_gradient_norm"].append(candidate_relative_kkt)
         history["relative_eliminated_kkt_residual"].append(
             candidate_relative_kkt
         )
         history["newton_decrement"].append(
-            float(np.sqrt(max(-directional_derivative, 0.0)))
+            float(np.sqrt(max(-accepted["directional_derivative"], 0.0)))
         )
         history["relative_step"].append(relative_step)
-        history["step_size"].append(step_size)
-        history["line_search_backtracks"].append(backtracks)
+        history["step_size"].append(accepted["step_size"])
+        history["line_search_backtracks"].append(accepted["backtracks"])
+        history["actual_reduction"].append(accepted["actual_reduction"])
+        history["predicted_reduction"].append(
+            accepted["predicted_reduction"]
+        )
+        history["model_ratio"].append(accepted["model_ratio"])
         history["kkt_before"].append(relative_kkt)
         history["kkt_after"].append(candidate_relative_kkt)
         history["kkt_reduction_factor"].append(
-            candidate_relative_kkt / max(
-                relative_kkt, np.finfo(np.float64).tiny
-            )
+            candidate_relative_kkt
+            / max(relative_kkt, np.finfo(np.float64).tiny)
         )
         history["cg_iterations"].append(cg_info["iterations"])
         history["cg_relative_residual"].append(
             cg_info["relative_residual"]
         )
+        history["cg_final_relative_residual"].append(
+            cg_info["final_relative_residual"]
+        )
         history["cg_best_relative_residual"].append(
             cg_info["best_relative_residual"]
         )
-        history["cg_target"].append(cg_target)
-        history["cg_converged"].append(cg_info["converged"])
-        history["cg_hessian_actions"].append(
-            cg_info["hessian_actions"]
+        history["cg_physical_relative_residual"].append(
+            accepted["physical_relative_residual"]
         )
+        history["cg_target"].append(accepted["cg_target"])
+        history["cg_converged"].append(cg_info["converged"])
+        history["cg_hessian_actions"].append(cg_info["hessian_actions"])
         history["cg_termination_reason"].append(
             cg_info["termination_reason"]
         )
+        history["cg_returned_best_iterate"].append(
+            cg_info["returned_best_iterate"]
+        )
         history["readiness_probe"].append(probe_iteration)
+        history["readiness_stage"].append(accepted["readiness_stage"])
         history["accepted_truncated_cg"].append(
             not cg_info["converged"]
         )
@@ -952,9 +1181,7 @@ def fit_gaussian_noise_covariance_newton_whitened(
         history["gram_condition_number"].append(
             maximum_eigenvalue / minimum_eigenvalue
         )
-        history["connectivity_offdiagonal_l2"].append(
-            connectivity_norm
-        )
+        history["connectivity_offdiagonal_l2"].append(connectivity_norm)
 
         if accepted_iterations in save_steps_set:
             checkpoint_gram = (
@@ -979,15 +1206,19 @@ def fit_gaussian_noise_covariance_newton_whitened(
                     "loss": relative_loss,
                     "entropy": entropy,
                     "relative_gradient_norm": candidate_relative_kkt,
-                    "relative_eliminated_kkt_residual": (
-                        candidate_relative_kkt
-                    ),
-                    "step_size": float(step_size),
+                    "relative_eliminated_kkt_residual": candidate_relative_kkt,
+                    "step_size": accepted["step_size"],
+                    "actual_reduction": accepted["actual_reduction"],
+                    "predicted_reduction": accepted["predicted_reduction"],
+                    "model_ratio": accepted["model_ratio"],
                     "cg_iterations": int(cg_info["iterations"]),
                     "cg_relative_residual": float(
                         cg_info["relative_residual"]
                     ),
-                    "cg_target": float(cg_target),
+                    "cg_physical_relative_residual": accepted[
+                        "physical_relative_residual"
+                    ],
+                    "cg_target": accepted["cg_target"],
                     "cg_converged": bool(cg_info["converged"]),
                     "readiness_probe": bool(probe_iteration),
                     "noisy": True,
@@ -1006,16 +1237,25 @@ def fit_gaussian_noise_covariance_newton_whitened(
             message = "first-order optimality tolerance reached"
             break
 
+    if return_best and best_kkt < _relative_gradient_state(current_state, xp)[2]:
+        reduced_gram = best_gram
+        current_state = best_state
+        returned_iteration = best_iteration
+    else:
+        returned_iteration = accepted_iterations
+
     for key, values in history.items():
         if key in {
             "iteration",
             "line_search_backtracks",
             "cg_iterations",
             "cg_hessian_actions",
+            "readiness_stage",
         }:
             history[key] = np.asarray(values, dtype=np.int64)
         elif key in {
             "cg_converged",
+            "cg_returned_best_iterate",
             "readiness_probe",
             "accepted_truncated_cg",
         }:
@@ -1029,9 +1269,7 @@ def fit_gaussian_noise_covariance_newton_whitened(
         reduced_gram = _num.cp.asnumpy(reduced_gram)
     full_gram = _symmetrize(basis @ reduced_gram @ basis.T)
     fitted_squared_distances = _num._squared_distances_from_gram(full_gram)
-    connectivity = _num._connectivity_from_reduced_gram(
-        reduced_gram, basis
-    )
+    connectivity = _num._connectivity_from_reduced_gram(reduced_gram, basis)
 
     from .covariance_pdhg import _independent_eliminated_kkt_residuals
 
@@ -1095,6 +1333,7 @@ def fit_gaussian_noise_covariance_newton_whitened(
         "status": status,
         "message": message,
         "iterations": int(accepted_iterations),
+        "returned_iteration": int(returned_iteration),
         "objective": float(final_state[0]),
         "relative_gradient_norm": float(independent_relative),
         "relative_eliminated_kkt_residual": float(independent_relative),
@@ -1138,11 +1377,14 @@ def fit_gaussian_noise_covariance_newton_whitened(
             "cg_forcing_max": float(cg_forcing_max),
             "cg_forcing_coefficient": float(cg_forcing_coefficient),
             "cg_max_iterations": int(cg_max_iterations),
-            "kkt_safeguard": True,
-            "maximum_kkt_growth": float(maximum_kkt_growth),
-            "truncated_kkt_reduction": float(
-                truncated_kkt_reduction
+            "objective_model_globalization": True,
+            "minimum_model_ratio": float(minimum_model_ratio),
+            "readiness_minimum_model_ratio": float(
+                readiness_minimum_model_ratio
             ),
+            "maximum_kkt_growth": float(maximum_kkt_growth),
+            "relative_kkt_is_monotone_requirement": False,
+            "return_best": bool(return_best),
             "direct_gram_handoff": bool(initial_gram is not None),
             "scalar_calibration_applied": bool(
                 initialization_info["scalar_calibration_applied"]

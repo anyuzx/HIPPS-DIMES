@@ -571,11 +571,12 @@ def test_dynamics_pairwise_distances():
 
 def test_a2dmap_theory_with_force_applied_smoke():
     """Force-applied dmap computation should return a valid symmetric map."""
-    A = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
-    force = {"loci": [0, 4], "amplitude": 1.0, "direction": [1.0, 0.0, 0.0]}
-    dmap = HippsDimes.a2dmap_theory_with_force_applied(A, force)
+    A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)
+    force = {"loci": [0, 1], "amplitude": 1.0, "direction": [1.0, 0.0, 0.0]}
+    with np.errstate(divide="raise", invalid="raise"):
+        dmap = HippsDimes.a2dmap_theory_with_force_applied(A, force)
 
-    assert dmap.shape == (5, 5)
+    assert dmap.shape == (2, 2)
     assert np.allclose(dmap, dmap.T)
     assert np.allclose(np.diag(dmap), 0.0)
 

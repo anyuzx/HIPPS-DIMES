@@ -1448,7 +1448,8 @@ def a2dmap_theory_with_force_applied(A, force):
     # Compute equilibrium displacement due to force
     # R_eq = A^(-1) * B = V * (V^T * B) / λ
     # For zero eigenvalues, set 1/λ = 0
-    temp_force = 1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp_force = 1.0 / eigvalue
     temp_force[np.abs(temp_force) >= TOL] = 0.0
     temp_force[np.isinf(temp_force)] = 0.0
 

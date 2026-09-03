@@ -26,7 +26,6 @@ import numpy as np
 
 from . import numerics as _num
 
-
 _ENTROPY_COEFFICIENT = 1.5
 
 
@@ -71,9 +70,7 @@ def _householder_congruence(matrix, vector, xp):
 
 
 def _internal_block(centered_matrix, householder_vector, xp):
-    transformed = _householder_congruence(
-        centered_matrix, householder_vector, xp
-    )
+    transformed = _householder_congruence(centered_matrix, householder_vector, xp)
     return _symmetrize(transformed[:-1, :-1])
 
 
@@ -81,9 +78,7 @@ def _full_centered_from_internal(internal_matrix, householder_vector, xp):
     n = internal_matrix.shape[0] + 1
     transformed = xp.zeros((n, n), dtype=xp.float64)
     transformed[:-1, :-1] = internal_matrix
-    return _center(
-        _householder_congruence(transformed, householder_vector, xp), xp
-    )
+    return _center(_householder_congruence(transformed, householder_vector, xp), xp)
 
 
 def _internal_eigh(centered_matrix, householder_vector, xp):
@@ -96,21 +91,15 @@ def _internal_eigh(centered_matrix, householder_vector, xp):
     return eigenvalues, eigenvectors
 
 
-def _internal_inverse_and_logdet(
-    centered_matrix, householder_vector, xp
-):
-    eigenvalues, eigenvectors = _internal_eigh(
-        centered_matrix, householder_vector, xp
-    )
+def _internal_inverse_and_logdet(centered_matrix, householder_vector, xp):
+    eigenvalues, eigenvectors = _internal_eigh(centered_matrix, householder_vector, xp)
     minimum = _scalar(eigenvalues[0])
     if not np.isfinite(minimum) or minimum <= 0.0:
         raise RuntimeError(
             "PDHG requires a Gram matrix that is positive definite on the "
             "internal subspace"
         )
-    inverse_internal = (
-        eigenvectors * (1.0 / eigenvalues)
-    ) @ eigenvectors.T
+    inverse_internal = (eigenvectors * (1.0 / eigenvalues)) @ eigenvectors.T
     inverse_full = _full_centered_from_internal(
         inverse_internal, householder_vector, xp
     )
@@ -120,11 +109,7 @@ def _internal_inverse_and_logdet(
 
 def _distance_operator(gram, pair_i, pair_j, xp):
     diagonal = xp.diag(gram)
-    return (
-        diagonal[pair_i]
-        + diagonal[pair_j]
-        - 2.0 * gram[pair_i, pair_j]
-    )
+    return diagonal[pair_i] + diagonal[pair_j] - 2.0 * gram[pair_i, pair_j]
 
 
 def _distance_adjoint(values, n, pair_i, pair_j, xp):
@@ -154,9 +139,7 @@ def _eliminated_kkt_residuals(
     if fitted is None:
         fitted = _distance_operator(gram, pair_i, pair_j, xp)
     eliminated_dual = (fitted - target) / variance
-    data_gradient = _distance_adjoint(
-        eliminated_dual, n, pair_i, pair_j, xp
-    )
+    data_gradient = _distance_adjoint(eliminated_dual, n, pair_i, pair_j, xp)
     entropy_gradient = _ENTROPY_COEFFICIENT * inverse_gram
     residual = data_gradient - entropy_gradient
     residual_norm = _norm(residual, xp)
@@ -214,19 +197,15 @@ def _independent_eliminated_kkt_residuals(
         np,
     )
 
+
 def _connectivity_from_scaled_inverse(inverse_gram, distance_scale, xp):
     connectivity = -(3.0 / distance_scale) * inverse_gram
     connectivity = _symmetrize(connectivity)
     return _num.a2a(connectivity)
 
 
-def _weighted_distance_operator(
-    gram, inverse_standard_deviation, pair_i, pair_j, xp
-):
-    return (
-        _distance_operator(gram, pair_i, pair_j, xp)
-        * inverse_standard_deviation
-    )
+def _weighted_distance_operator(gram, inverse_standard_deviation, pair_i, pair_j, xp):
+    return _distance_operator(gram, pair_i, pair_j, xp) * inverse_standard_deviation
 
 
 def _weighted_distance_adjoint(
@@ -246,9 +225,7 @@ def _prox_centered_negative_logdet_inverse_free(
 ):
     """Apply the log-determinant proximal map without reconstructing B^-1."""
     matrix = _center(matrix, xp)
-    eigenvalues, eigenvectors = _internal_eigh(
-        matrix, householder_vector, xp
-    )
+    eigenvalues, eigenvectors = _internal_eigh(matrix, householder_vector, xp)
     root = xp.hypot(
         eigenvalues,
         np.sqrt(4.0 * _ENTROPY_COEFFICIENT * step_size),
@@ -258,30 +235,20 @@ def _prox_centered_negative_logdet_inverse_free(
     updated = xp.where(
         eigenvalues >= 0.0,
         0.5 * (nonnegative + root),
-        (2.0 * _ENTROPY_COEFFICIENT * step_size)
-        / (root - nonpositive),
+        (2.0 * _ENTROPY_COEFFICIENT * step_size) / (root - nonpositive),
     )
     internal = (eigenvectors * updated) @ eigenvectors.T
-    gram = _full_centered_from_internal(
-        internal, householder_vector, xp
-    )
+    gram = _full_centered_from_internal(internal, householder_vector, xp)
     logdet = _scalar(xp.sum(xp.log(updated)))
     return gram, logdet, updated, eigenvectors
 
 
-def _inverse_from_internal_spectrum(
-    eigenvalues, eigenvectors, householder_vector, xp
-):
-    inverse_internal = (
-        eigenvectors * (1.0 / eigenvalues)
-    ) @ eigenvectors.T
-    return _full_centered_from_internal(
-        inverse_internal, householder_vector, xp
-    )
+def _inverse_from_internal_spectrum(eigenvalues, eigenvectors, householder_vector, xp):
+    inverse_internal = (eigenvectors * (1.0 / eigenvalues)) @ eigenvectors.T
+    return _full_centered_from_internal(inverse_internal, householder_vector, xp)
 
 
-def _estimate_weighted_operator_norm_squared(
-    initial_gram,
+def _certify_weighted_operator_norm_squared(
     inverse_standard_deviation,
     n,
     pair_i,
@@ -291,9 +258,17 @@ def _estimate_weighted_operator_norm_squared(
     max_iterations,
     relative_tolerance,
     safety_factor,
+    phase,
     progress_callback=None,
 ):
-    """Estimate ``||V^-1/2 D||^2`` by matrix-free power iteration."""
+    """Bound ``||V^-1/2 D||^2`` by edge-space Collatz iteration.
+
+    The edge-space normal operator ``G = A A*`` is entrywise nonnegative.
+    Starting from a strictly positive vector makes the maximum component of
+    ``Gx / x`` a certified upper bound on its Perron eigenvalue.  This avoids
+    the dominant-eigenspace failure possible for an arbitrary Gram-space
+    power-iteration start while retaining matrix-free O(E + N^2) updates.
+    """
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("operator_norm_power_iterations must be positive")
     if not np.isfinite(relative_tolerance) or relative_tolerance <= 0.0:
@@ -301,109 +276,92 @@ def _estimate_weighted_operator_norm_squared(
     if not np.isfinite(safety_factor) or safety_factor <= 1.0:
         raise ValueError("operator_norm_safety must exceed one")
 
-    vector = _center(initial_gram.copy(), xp)
-    vector_norm = _norm(vector, xp)
-    if not np.isfinite(vector_norm) or vector_norm <= 0.0:
-        vector = xp.eye(n, dtype=xp.float64)
-        vector = _center(vector, xp)
-        vector_norm = _norm(vector, xp)
-    vector = vector / vector_norm
-
-    rayleigh = 0.0
-    residual_norm = np.inf
-    relative_residual = np.inf
+    vector = xp.ones(len(pair_i), dtype=xp.float64)
+    vector = vector / _norm(vector, xp)
+    lower_bound = 0.0
+    upper_bound = np.inf
+    first_row_sum_bound = None
+    relative_bound_gap = np.inf
+    bound_tolerance_reached = False
+    used_row_sum_fallback = False
     iteration = 0
     start_time = time.perf_counter()
     for iteration in range(1, int(max_iterations) + 1):
-        transformed = _weighted_distance_operator(
+        adjoint = _weighted_distance_adjoint(
             vector,
-            inverse_standard_deviation,
-            pair_i,
-            pair_j,
-            xp,
-        )
-        normal_vector = _weighted_distance_adjoint(
-            transformed,
             inverse_standard_deviation,
             n,
             pair_i,
             pair_j,
             xp,
         )
-        normal_vector = _center(normal_vector, xp)
-        rayleigh = _scalar(xp.sum(transformed * transformed))
-        residual = normal_vector - rayleigh * vector
-        residual_norm = _norm(residual, xp)
-        relative_residual = residual_norm / max(
-            abs(rayleigh), np.finfo(np.float64).tiny
+        next_vector = _weighted_distance_operator(
+            adjoint,
+            inverse_standard_deviation,
+            pair_i,
+            pair_j,
+            xp,
         )
-        normal_norm = _norm(normal_vector, xp)
-        if not np.isfinite(normal_norm) or normal_norm <= 0.0:
-            raise RuntimeError(
-                "weighted distance operator has a nonpositive power-iteration norm"
-            )
-        vector = normal_vector / normal_norm
+        ratios = next_vector / vector
+        valid_ratios = bool(_scalar(xp.all(xp.isfinite(ratios) & (ratios > 0.0))))
+        if not valid_ratios:
+            if first_row_sum_bound is None:
+                raise RuntimeError(
+                    "weighted distance operator produced invalid Collatz ratios"
+                )
+            upper_bound = first_row_sum_bound
+            lower_bound = 0.0
+            relative_bound_gap = 1.0
+            used_row_sum_fallback = True
+            break
+
+        lower_bound = _scalar(xp.min(ratios))
+        upper_bound = _scalar(xp.max(ratios))
+        if first_row_sum_bound is None:
+            first_row_sum_bound = upper_bound
+        relative_bound_gap = (upper_bound - lower_bound) / max(
+            upper_bound, np.finfo(np.float64).tiny
+        )
         if progress_callback is not None:
             progress_callback(
                 {
                     "stage": "covariance_operator_norm",
-                    "phase": "pdhg",
+                    "phase": phase,
                     "iteration": iteration,
                     "total": int(max_iterations),
-                    "operator_norm_squared_rayleigh": float(rayleigh),
-                    "operator_norm_relative_residual": float(
-                        relative_residual
-                    ),
-                    "method": "COV-PDHG",
+                    "operator_norm_lower_bound": float(lower_bound),
+                    "operator_norm_upper_bound": float(upper_bound),
+                    "operator_norm_relative_bound_gap": float(relative_bound_gap),
+                    "method": "COV-FISTA" if phase == "fista" else "COV-PDHG",
                     "general_method": "covariance_optimization",
                     "use_gpu": bool(xp is not np),
                     "noisy": True,
                 }
             )
-        if iteration >= 3 and relative_residual <= relative_tolerance:
+        if relative_bound_gap <= relative_tolerance:
+            bound_tolerance_reached = True
             break
+        next_norm = _norm(next_vector, xp)
+        if not np.isfinite(next_norm) or next_norm <= 0.0:
+            upper_bound = first_row_sum_bound
+            lower_bound = 0.0
+            relative_bound_gap = 1.0
+            used_row_sum_fallback = True
+            break
+        vector = next_vector / next_norm
 
-    transformed = _weighted_distance_operator(
-        vector,
-        inverse_standard_deviation,
-        pair_i,
-        pair_j,
-        xp,
-    )
-    normal_vector = _weighted_distance_adjoint(
-        transformed,
-        inverse_standard_deviation,
-        n,
-        pair_i,
-        pair_j,
-        xp,
-    )
-    normal_vector = _center(normal_vector, xp)
-    rayleigh = _scalar(xp.sum(transformed * transformed))
-    residual_norm = _norm(normal_vector - rayleigh * vector, xp)
-    relative_residual = residual_norm / max(
-        abs(rayleigh), np.finfo(np.float64).tiny
-    )
-    estimated_upper = max(
-        rayleigh + residual_norm,
-        rayleigh,
-        np.finfo(np.float64).tiny,
-    )
-    safe_estimate = safety_factor * estimated_upper
-    conservative_bound = 2.0 * n * _scalar(
-        xp.max(inverse_standard_deviation**2)
-    )
-    return safe_estimate, {
+    safe_bound = safety_factor * upper_bound
+    return safe_bound, {
+        "method": "edge_space_collatz",
         "iterations": int(iteration),
-        "rayleigh_quotient": float(rayleigh),
-        "residual_norm": float(residual_norm),
-        "relative_residual": float(relative_residual),
-        "estimated_upper_before_safety": float(estimated_upper),
+        "bound_tolerance_reached": bool(bound_tolerance_reached),
+        "lower_bound": float(lower_bound),
+        "certified_upper_bound": float(upper_bound),
+        "relative_bound_gap": float(relative_bound_gap),
+        "first_row_sum_upper_bound": float(first_row_sum_bound),
+        "used_row_sum_fallback": bool(used_row_sum_fallback),
         "safety_factor": float(safety_factor),
-        "safe_operator_norm_squared": float(safe_estimate),
-        "conservative_operator_norm_squared_bound": float(
-            conservative_bound
-        ),
+        "safe_operator_norm_squared": float(safe_bound),
         "wall_seconds": time.perf_counter() - start_time,
     }
 
@@ -414,7 +372,6 @@ def _choose_initial_whitened_dual(
     whitened_target,
     inverse_standard_deviation,
     standard_deviation,
-    n,
     pair_i,
     pair_j,
     xp,
@@ -427,55 +384,19 @@ def _choose_initial_whitened_dual(
         pair_j,
         xp,
     )
-    candidates = {
-        "zero": xp.zeros_like(whitened_target),
-        "residual": fitted - whitened_target,
-        "connectivity": (
-            standard_deviation
-            * (
-                -_ENTROPY_COEFFICIENT
-                * inverse_gram[pair_i, pair_j]
-            )
-        ),
-    }
-    if mode != "auto":
-        if mode not in candidates:
-            raise ValueError(
-                "dual_initialization must be 'auto', 'zero', 'residual', or "
-                "'connectivity'"
-            )
-        chosen = mode
+    if mode == "zero":
+        dual = xp.zeros_like(whitened_target)
+    elif mode == "residual":
+        dual = fitted - whitened_target
+    elif mode == "connectivity":
+        dual = standard_deviation * (
+            -_ENTROPY_COEFFICIENT * inverse_gram[pair_i, pair_j]
+        )
     else:
-        scores = {}
-        entropy_gradient = _ENTROPY_COEFFICIENT * inverse_gram
-        for name, candidate in candidates.items():
-            dual_adjoint = _weighted_distance_adjoint(
-                candidate,
-                inverse_standard_deviation,
-                n,
-                pair_i,
-                pair_j,
-                xp,
-            )
-            primal_residual = dual_adjoint - entropy_gradient
-            dual_residual = fitted - whitened_target - candidate
-            dual_residual_adjoint = _weighted_distance_adjoint(
-                dual_residual,
-                inverse_standard_deviation,
-                n,
-                pair_i,
-                pair_j,
-                xp,
-            )
-            scale = max(
-                _norm(dual_adjoint, xp),
-                _norm(entropy_gradient, xp),
-                np.finfo(np.float64).tiny,
-            )
-            eliminated = primal_residual + dual_residual_adjoint
-            scores[name] = _norm(eliminated, xp) / scale
-        chosen = min(scores, key=scores.get)
-    return candidates[chosen].copy(), chosen
+        raise ValueError(
+            "dual_initialization must be 'zero', 'residual', or 'connectivity'"
+        )
+    return dual.copy(), mode
 
 
 def _inverse_free_residuals(
@@ -556,9 +477,7 @@ def _connectivity_checkpoint(
     inverse_gram = _inverse_from_internal_spectrum(
         eigenvalues, eigenvectors, householder, xp
     )
-    connectivity = _connectivity_from_scaled_inverse(
-        inverse_gram, distance_scale, xp
-    )
+    connectivity = _connectivity_from_scaled_inverse(inverse_gram, distance_scale, xp)
     if xp is np:
         return np.asarray(connectivity).copy(), inverse_gram
     return _num.cp.asnumpy(connectivity), inverse_gram
@@ -580,6 +499,7 @@ def fit_gaussian_noise_covariance_fista(
     operator_norm_power_iterations=25,
     operator_norm_tolerance=1e-4,
     operator_norm_safety=1.10,
+    _precomputed_operator_norm=None,
     save_steps=None,
     progress_callback=None,
 ):
@@ -625,9 +545,7 @@ def fit_gaussian_noise_covariance_fista(
     n_modes = n - 1
     save_steps_set = set(save_steps or ())
     if any(
-        not isinstance(step, (int, np.integer))
-        or step < 1
-        or step > max_iterations
+        not isinstance(step, (int, np.integer)) or step < 1 or step > max_iterations
         for step in save_steps_set
     ):
         raise ValueError("save_steps must lie between 1 and max_iterations")
@@ -688,20 +606,27 @@ def fit_gaussian_noise_covariance_fista(
     inverse_gram, logdet, eigenvalues = _internal_inverse_and_logdet(
         gram, householder, xp
     )
-    operator_norm_squared, operator_norm_info = (
-        _estimate_weighted_operator_norm_squared(
-            gram,
-            inverse_standard_deviation,
-            n,
-            solver_pair_i,
-            solver_pair_j,
-            xp,
-            max_iterations=operator_norm_power_iterations,
-            relative_tolerance=operator_norm_tolerance,
-            safety_factor=operator_norm_safety,
-            progress_callback=progress_callback,
+    if _precomputed_operator_norm is None:
+        operator_norm_squared, operator_norm_info = (
+            _certify_weighted_operator_norm_squared(
+                inverse_standard_deviation,
+                n,
+                solver_pair_i,
+                solver_pair_j,
+                xp,
+                max_iterations=operator_norm_power_iterations,
+                relative_tolerance=operator_norm_tolerance,
+                safety_factor=operator_norm_safety,
+                phase="fista",
+                progress_callback=progress_callback,
+            )
         )
-    )
+    else:
+        operator_norm_squared, operator_norm_info = _precomputed_operator_norm
+        operator_norm_squared = float(operator_norm_squared)
+        if not np.isfinite(operator_norm_squared) or operator_norm_squared <= 0.0:
+            raise ValueError("precomputed operator norm must be positive and finite")
+        operator_norm_info = dict(operator_norm_info)
     step_size = 1.0 / operator_norm_squared
     initial_step_size = step_size
     logdet_offset = n_modes * np.log(distance_scale)
@@ -730,9 +655,7 @@ def fit_gaussian_noise_covariance_fista(
         relative_loss = _scalar(
             xp.sqrt(xp.mean(xp.square(data_residual / solver_target)))
         )
-        weighted_rmse = _scalar(
-            xp.sqrt(xp.mean(xp.square(standardized_residual)))
-        )
+        weighted_rmse = _scalar(xp.sqrt(xp.mean(xp.square(standardized_residual))))
         distance_rmse = distance_scale * _scalar(
             xp.sqrt(xp.mean(xp.square(data_residual)))
         )
@@ -1087,6 +1010,9 @@ def fit_gaussian_noise_covariance_fista(
         else:
             history[key] = np.asarray(values, dtype=np.float64)
     iterations = int(history["iteration"][-1]) if len(history["iteration"]) else 0
+    history["is_returned_iterate"] = np.zeros(iterations, dtype=bool)
+    if iterations:
+        history["is_returned_iterate"][-1] = True
     info = {
         "converged": converged,
         "status": status,
@@ -1094,6 +1020,8 @@ def fit_gaussian_noise_covariance_fista(
         "iterations": iterations,
         "returned_iteration": iterations,
         "objective": float(current["objective"]),
+        "loss": float(current["loss"]),
+        "entropy": float(current["entropy"]),
         "initial_objective": initial_objective,
         "initial_relative_eliminated_kkt_residual": initial_relative_kkt,
         "relative_gradient_norm": float(independent_relative),
@@ -1150,7 +1078,9 @@ def fit_gaussian_noise_covariance_fista(
         "monotone_restart": True,
         "history": history,
         "connectivity_matrix_at_steps": connectivity_at_steps,
-        "inverse_reconstruction_count": iterations + 1,
+        # Initial evaluation, one reconstruction per accepted iterate, and
+        # the independent certificate recomputed from the returned Gram.
+        "inverse_reconstruction_count": iterations + 2,
         "inverse_reconstructed_each_iteration": True,
         "wall_seconds": optimization_wall_seconds,
         "objective_definition": (
@@ -1194,7 +1124,7 @@ def fit_gaussian_noise_covariance_pdhg(
     adaptation_factor=np.sqrt(2.0),
     minimum_step_ratio=1e-16,
     maximum_step_ratio=1e16,
-    dual_initialization="auto",
+    dual_initialization="residual",
     distance_scale=None,
     return_best=True,
     operator_norm_power_iterations=25,
@@ -1259,23 +1189,19 @@ def fit_gaussian_noise_covariance_pdhg(
     n_modes = n - 1
     save_steps_set = set(save_steps or ())
     if any(
-        not isinstance(step, (int, np.integer))
-        or step < 1
-        or step > max_iterations
+        not isinstance(step, (int, np.integer)) or step < 1 or step > max_iterations
         for step in save_steps_set
     ):
         raise ValueError("save_steps must lie between 1 and max_iterations")
 
     basis = _num._centered_orthonormal_basis(n)
     inverse_variance = 1.0 / pair_variance
-    reduced_gram, initialization_info = (
-        _num._initialize_gaussian_reduced_gram(
-            observed,
-            pair_i,
-            pair_j,
-            basis,
-            initial_connectivity,
-        )
+    reduced_gram, initialization_info = _num._initialize_gaussian_reduced_gram(
+        observed,
+        pair_i,
+        pair_j,
+        basis,
+        initial_connectivity,
     )
 
     if use_gpu:
@@ -1284,9 +1210,7 @@ def fit_gaussian_noise_covariance_pdhg(
         solver_pair_i = xp.asarray(pair_i, dtype=xp.int32)
         solver_pair_j = xp.asarray(pair_j, dtype=xp.int32)
         solver_target_pairs = xp.asarray(target_pairs, dtype=xp.float64)
-        solver_inverse_variance = xp.asarray(
-            inverse_variance, dtype=xp.float64
-        )
+        solver_inverse_variance = xp.asarray(inverse_variance, dtype=xp.float64)
         reduced_gram = xp.asarray(reduced_gram, dtype=xp.float64)
     else:
         xp = np
@@ -1318,9 +1242,7 @@ def fit_gaussian_noise_covariance_pdhg(
             * scalar_calibration["connectivity_scale_factor"]
         )
 
-    full_gram = _center(
-        solver_basis @ reduced_gram @ solver_basis.T, xp
-    )
+    full_gram = _center(solver_basis @ reduced_gram @ solver_basis.T, xp)
     if distance_scale is None:
         distance_scale = float(np.median(target_pairs))
     if not np.isfinite(distance_scale) or distance_scale <= 0.0:
@@ -1338,8 +1260,8 @@ def fit_gaussian_noise_covariance_pdhg(
     householder = _householder_vector(n, xp)
 
     inverse_reconstruction_count = 0
-    inverse_gram, logdet, internal_eigenvalues = (
-        _internal_inverse_and_logdet(gram, householder, xp)
+    inverse_gram, logdet, internal_eigenvalues = _internal_inverse_and_logdet(
+        gram, householder, xp
     )
     inverse_reconstruction_count += 1
     dual, chosen_dual_initialization = _choose_initial_whitened_dual(
@@ -1348,26 +1270,23 @@ def fit_gaussian_noise_covariance_pdhg(
         whitened_target,
         inverse_standard_deviation,
         standard_deviation,
-        n,
         solver_pair_i,
         solver_pair_j,
         xp,
         dual_initialization,
     )
 
-    operator_norm_squared, operator_norm_info = (
-        _estimate_weighted_operator_norm_squared(
-            gram,
-            inverse_standard_deviation,
-            n,
-            solver_pair_i,
-            solver_pair_j,
-            xp,
-            max_iterations=operator_norm_power_iterations,
-            relative_tolerance=operator_norm_tolerance,
-            safety_factor=operator_norm_safety,
-            progress_callback=progress_callback,
-        )
+    operator_norm_squared, operator_norm_info = _certify_weighted_operator_norm_squared(
+        inverse_standard_deviation,
+        n,
+        solver_pair_i,
+        solver_pair_j,
+        xp,
+        max_iterations=operator_norm_power_iterations,
+        relative_tolerance=operator_norm_tolerance,
+        safety_factor=operator_norm_safety,
+        phase="pdhg",
+        progress_callback=progress_callback,
     )
     step_product = (step_safety * step_safety) / operator_norm_squared
     if step_ratio is None:
@@ -1437,10 +1356,9 @@ def fit_gaussian_noise_covariance_pdhg(
             solver_pair_j,
             xp,
         )
-        next_dual = (
-            dual
-            + dual_step * (extrapolated_distances - whitened_target)
-        ) / (1.0 + dual_step)
+        next_dual = (dual + dual_step * (extrapolated_distances - whitened_target)) / (
+            1.0 + dual_step
+        )
         weighted_dual_adjoint = _weighted_distance_adjoint(
             next_dual,
             inverse_standard_deviation,
@@ -1465,9 +1383,7 @@ def fit_gaussian_noise_covariance_pdhg(
         primal_change = _norm(next_gram - gram, xp) / max(
             _norm(gram, xp), np.finfo(np.float64).tiny
         )
-        dual_change = _norm(next_dual - dual, xp) / max(
-            _norm(dual, xp), 1.0
-        )
+        dual_change = _norm(next_dual - dual, xp) / max(_norm(dual, xp), 1.0)
         whitened_fitted = _weighted_distance_operator(
             next_gram,
             inverse_standard_deviation,
@@ -1491,37 +1407,22 @@ def fit_gaussian_noise_covariance_pdhg(
         )
         stationarity_score = residuals["eliminated_relative"]
         standardized_data_residual = whitened_fitted - whitened_target
-        data_objective = 0.5 * _scalar(
-            xp.sum(standardized_data_residual**2)
-        )
-        negative_entropy = (
-            -_ENTROPY_COEFFICIENT
-            * (next_logdet + n_modes * np.log(distance_scale))
+        data_objective = 0.5 * _scalar(xp.sum(standardized_data_residual**2))
+        negative_entropy = -_ENTROPY_COEFFICIENT * (
+            next_logdet + n_modes * np.log(distance_scale)
         )
         objective = negative_entropy + data_objective
         fitted_normalized = whitened_fitted * standard_deviation
         data_residual = fitted_normalized - target
-        relative_loss = _scalar(
-            xp.sqrt(xp.mean(xp.square(data_residual / target)))
-        )
-        weighted_rmse = _scalar(
-            xp.sqrt(xp.mean(standardized_data_residual**2))
-        )
-        distance_rmse = distance_scale * _scalar(
-            xp.sqrt(xp.mean(data_residual**2))
-        )
-        entropy = (
-            next_logdet
-            + n_modes * np.log(distance_scale)
-            - n_modes * np.log(3.0)
-        )
+        relative_loss = _scalar(xp.sqrt(xp.mean(xp.square(data_residual / target))))
+        weighted_rmse = _scalar(xp.sqrt(xp.mean(standardized_data_residual**2)))
+        distance_rmse = distance_scale * _scalar(xp.sqrt(xp.mean(data_residual**2)))
+        entropy = next_logdet + n_modes * np.log(distance_scale) - n_modes * np.log(3.0)
         minimum_eigenvalue = _scalar(next_eigenvalues[0])
         maximum_eigenvalue = _scalar(next_eigenvalues[-1])
         condition_number = maximum_eigenvalue / minimum_eigenvalue
         precision_frobenius = (
-            3.0
-            / distance_scale
-            * _scalar(xp.sqrt(xp.sum(1.0 / next_eigenvalues**2)))
+            3.0 / distance_scale * _scalar(xp.sqrt(xp.sum(1.0 / next_eigenvalues**2)))
         )
 
         used_primal_step = primal_step
@@ -1548,26 +1449,14 @@ def fit_gaussian_noise_covariance_pdhg(
         history["entropy"].append(entropy)
         history["weighted_rmse"].append(weighted_rmse)
         history["distance_rmse"].append(distance_rmse)
-        history["relative_primal_kkt_residual"].append(
-            residuals["primal_relative"]
-        )
-        history["relative_dual_kkt_residual"].append(
-            residuals["dual_relative"]
-        )
-        history["relative_eliminated_kkt_residual"].append(
-            stationarity_score
-        )
+        history["relative_primal_kkt_residual"].append(residuals["primal_relative"])
+        history["relative_dual_kkt_residual"].append(residuals["dual_relative"])
+        history["relative_eliminated_kkt_residual"].append(stationarity_score)
         history["relative_gradient_norm"].append(stationarity_score)
-        history["relative_stationarity_residual"].append(
-            stationarity_score
-        )
+        history["relative_stationarity_residual"].append(stationarity_score)
         history["primal_component_norm"].append(primal_component_norm)
-        history["dual_component_primal_norm"].append(
-            dual_component_norm
-        )
-        history["component_balance_ratio"].append(
-            component_balance_ratio
-        )
+        history["dual_component_primal_norm"].append(dual_component_norm)
+        history["component_balance_ratio"].append(component_balance_ratio)
         history["primal_step"].append(used_primal_step)
         history["dual_step"].append(used_dual_step)
         history["step_ratio"].append(used_step_ratio)
@@ -1581,23 +1470,15 @@ def fit_gaussian_noise_covariance_pdhg(
             distance_scale * maximum_eigenvalue
         )
         history["gram_condition_number"].append(condition_number)
-        history["internal_precision_frobenius_norm"].append(
-            precision_frobenius
-        )
+        history["internal_precision_frobenius_norm"].append(precision_frobenius)
         history["connectivity_offdiagonal_l2"].append(np.nan)
 
         if adaptive_steps and iteration % adaptation_interval == 0:
             proposed_ratio = step_ratio
             factor_squared = adaptation_factor * adaptation_factor
-            if (
-                dual_component_norm
-                > adaptation_threshold * primal_component_norm
-            ):
+            if dual_component_norm > adaptation_threshold * primal_component_norm:
                 proposed_ratio = step_ratio / factor_squared
-            elif (
-                primal_component_norm
-                > adaptation_threshold * dual_component_norm
-            ):
+            elif primal_component_norm > adaptation_threshold * dual_component_norm:
                 proposed_ratio = step_ratio * factor_squared
             proposed_ratio = float(
                 np.clip(
@@ -1650,15 +1531,9 @@ def fit_gaussian_noise_covariance_pdhg(
                     "loss": relative_loss,
                     "entropy": entropy,
                     "relative_gradient_norm": stationarity_score,
-                    "relative_primal_kkt_residual": residuals[
-                        "primal_relative"
-                    ],
-                    "relative_dual_kkt_residual": residuals[
-                        "dual_relative"
-                    ],
-                    "relative_eliminated_kkt_residual": (
-                        stationarity_score
-                    ),
+                    "relative_primal_kkt_residual": residuals["primal_relative"],
+                    "relative_dual_kkt_residual": residuals["dual_relative"],
+                    "relative_eliminated_kkt_residual": (stationarity_score),
                     "primal_component_norm": primal_component_norm,
                     "dual_component_primal_norm": dual_component_norm,
                     "component_balance_ratio": component_balance_ratio,
@@ -1675,8 +1550,7 @@ def fit_gaussian_noise_covariance_pdhg(
             )
 
         eliminated_converged = residuals["eliminated_norm"] <= (
-            absolute_tolerance
-            + relative_tolerance * residuals["eliminated_scale"]
+            absolute_tolerance + relative_tolerance * residuals["eliminated_scale"]
         )
         if eliminated_converged:
             stopping_criterion_reached = True
@@ -1696,9 +1570,7 @@ def fit_gaussian_noise_covariance_pdhg(
     else:
         best_iteration = iteration
 
-    final_eigenvalues, final_eigenvectors = _internal_eigh(
-        gram, householder, xp
-    )
+    final_eigenvalues, final_eigenvectors = _internal_eigh(gram, householder, xp)
     inverse_gram = _inverse_from_internal_spectrum(
         final_eigenvalues,
         final_eigenvectors,
@@ -1707,12 +1579,8 @@ def fit_gaussian_noise_covariance_pdhg(
     )
     inverse_reconstruction_count += 1
     full_gram = distance_scale * gram
-    full_fitted = _num._squared_distances_from_gram(
-        full_gram, array_module=xp
-    )
-    connectivity = _connectivity_from_scaled_inverse(
-        inverse_gram, distance_scale, xp
-    )
+    full_fitted = _num._squared_distances_from_gram(full_gram, array_module=xp)
+    connectivity = _connectivity_from_scaled_inverse(inverse_gram, distance_scale, xp)
 
     if use_gpu:
         full_fitted = _num.cp.asnumpy(full_fitted)
@@ -1730,11 +1598,7 @@ def fit_gaussian_noise_covariance_pdhg(
     pair_stationarity_scale = max(
         1.0,
         float(np.linalg.norm(fitted_pairs_cpu - target_pairs)),
-        float(
-            np.linalg.norm(
-                0.5 * pair_variance * connectivity[pair_i, pair_j]
-            )
-        ),
+        float(np.linalg.norm(0.5 * pair_variance * connectivity[pair_i, pair_j])),
     )
 
     for key, values in history.items():
@@ -1744,6 +1608,7 @@ def fit_gaussian_noise_covariance_pdhg(
             history[key] = np.asarray(values, dtype=bool)
         else:
             history[key] = np.asarray(values, dtype=np.float64)
+    history["is_returned_iterate"] = history["iteration"] == int(best_iteration)
 
     independent_residuals = _independent_eliminated_kkt_residuals(
         full_gram,
@@ -1790,6 +1655,8 @@ def fit_gaussian_noise_covariance_pdhg(
         "iterations": int(iteration),
         "returned_iteration": int(best_iteration),
         "objective": float(history["objective"][best_iteration - 1]),
+        "loss": float(history["loss"][best_iteration - 1]),
+        "entropy": float(history["entropy"][best_iteration - 1]),
         "relative_gradient_norm": float(independent_relative),
         "relative_primal_kkt_residual": float(
             history["relative_primal_kkt_residual"][best_iteration - 1]
@@ -1812,9 +1679,7 @@ def fit_gaussian_noise_covariance_pdhg(
         "maximum_absolute_pair_stationarity_residual": float(
             np.max(np.abs(pair_stationarity))
         ),
-        "termination_internal_kkt_converged": bool(
-            stopping_criterion_reached
-        ),
+        "termination_internal_kkt_converged": bool(stopping_criterion_reached),
         "independent_kkt_converged": bool(independent_kkt_converged),
         "independent_kkt_recomputed_from_returned_gram": True,
         "relative_tolerance": float(relative_tolerance),
@@ -1835,9 +1700,7 @@ def fit_gaussian_noise_covariance_pdhg(
         "cupy_version": _num.cp.__version__ if use_gpu else None,
         "distance_scale": float(distance_scale),
         "weighted_operator_norm": operator_norm_info,
-        "inverse_reconstruction_count": int(
-            inverse_reconstruction_count
-        ),
+        "inverse_reconstruction_count": int(inverse_reconstruction_count),
         "inverse_reconstructed_each_iteration": False,
         "history": history,
         "connectivity_matrix_at_steps": connectivity_at_steps,
@@ -1865,9 +1728,7 @@ def fit_gaussian_noise_covariance_pdhg(
         "stationarity_definition": (
             "D_adjoint((D(B)-D_obs)/noise_variance)-1.5*B_pseudoinverse"
         ),
-        "pair_stationarity_definition": (
-            "D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"
-        ),
+        "pair_stationarity_definition": ("D_fit_ij-D_obs_ij-noise_variance_ij*A_ij/2"),
         "logged_metric_timing": (
             "post-update whitened PDHG iterate; runtime KKT obtained from "
             "proximal optimality without B inverse"
@@ -1888,12 +1749,8 @@ def _combine_hybrid_histories(pdhg_history, fista_history):
     pdhg_count = len(pdhg_history["iteration"])
     fista_count = len(fista_history["iteration"])
     combined = {
-        "iteration": np.arange(
-            1, pdhg_count + fista_count + 1, dtype=np.int64
-        ),
-        "phase": np.asarray(
-            ["pdhg"] * pdhg_count + ["fista"] * fista_count
-        ),
+        "iteration": np.arange(1, pdhg_count + fista_count + 1, dtype=np.int64),
+        "phase": np.asarray(["pdhg"] * pdhg_count + ["fista"] * fista_count),
         "phase_iteration": np.concatenate(
             (
                 np.asarray(pdhg_history["iteration"], dtype=np.int64),
@@ -1901,9 +1758,7 @@ def _combine_hybrid_histories(pdhg_history, fista_history):
             )
         ),
     }
-    history_keys = (
-        set(pdhg_history) | set(fista_history)
-    ) - {"iteration"}
+    history_keys = (set(pdhg_history) | set(fista_history)) - {"iteration"}
     for key in sorted(history_keys):
         pdhg_values = pdhg_history.get(key)
         fista_values = fista_history.get(key)
@@ -1943,25 +1798,14 @@ def fit_gaussian_noise_covariance_hybrid(
     """
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")
-    if (
-        isinstance(handoff_relative_tolerance, (bool, np.bool_))
-        or not np.isscalar(handoff_relative_tolerance)
+    if isinstance(handoff_relative_tolerance, (bool, np.bool_)) or not np.isscalar(
+        handoff_relative_tolerance
     ):
-        raise ValueError(
-            "handoff_relative_tolerance must be a positive finite scalar"
-        )
+        raise ValueError("handoff_relative_tolerance must be a positive finite scalar")
     handoff_relative_tolerance = float(handoff_relative_tolerance)
-    if (
-        not np.isfinite(handoff_relative_tolerance)
-        or handoff_relative_tolerance <= 0.0
-    ):
-        raise ValueError(
-            "handoff_relative_tolerance must be a positive finite scalar"
-        )
-    if (
-        relative_tolerance > 0.0
-        and handoff_relative_tolerance < relative_tolerance
-    ):
+    if not np.isfinite(handoff_relative_tolerance) or handoff_relative_tolerance <= 0.0:
+        raise ValueError("handoff_relative_tolerance must be a positive finite scalar")
+    if relative_tolerance > 0.0 and handoff_relative_tolerance < relative_tolerance:
         raise ValueError(
             "handoff_relative_tolerance must not be smaller than the final "
             "relative_tolerance"
@@ -1969,9 +1813,7 @@ def fit_gaussian_noise_covariance_hybrid(
 
     save_steps_set = set(save_steps or ())
     if any(
-        not isinstance(step, (int, np.integer))
-        or step < 1
-        or step > max_iterations
+        not isinstance(step, (int, np.integer)) or step < 1 or step > max_iterations
         for step in save_steps_set
     ):
         raise ValueError("save_steps must lie between 1 and max_iterations")
@@ -2011,41 +1853,55 @@ def fit_gaussian_noise_covariance_hybrid(
     pdhg_wall_seconds = time.perf_counter() - pdhg_start_time
     fitted, gram, connectivity, pdhg_info = pdhg_result
     pdhg_iterations = int(pdhg_info["iterations"])
-    handoff_residual = float(
-        pdhg_info["relative_eliminated_kkt_residual"]
+    handoff_residual = float(pdhg_info["relative_eliminated_kkt_residual"])
+    residual_norm = float(pdhg_info["stationarity_residual_norm"])
+    residual_scale = float(pdhg_info["stationarity_residual_scale"])
+    handoff_reached = residual_norm <= (
+        absolute_tolerance + handoff_relative_tolerance * residual_scale
+    )
+    final_kkt_converged = residual_norm <= (
+        absolute_tolerance + relative_tolerance * residual_scale
     )
     handoff = {
-        "reached": handoff_residual <= handoff_relative_tolerance,
+        "reached": bool(handoff_reached),
         "relative_tolerance": handoff_relative_tolerance,
+        "absolute_tolerance": float(absolute_tolerance),
         "relative_eliminated_kkt_residual": handoff_residual,
         "objective": float(pdhg_info["objective"]),
         "iterations": pdhg_iterations,
         "returned_iteration": int(pdhg_info["returned_iteration"]),
     }
     remaining_iterations = max_iterations - pdhg_iterations
-    if not handoff["reached"] or remaining_iterations <= 0:
-        status = (
-            "pdhg_handoff_not_reached"
-            if not handoff["reached"]
-            else "iteration_budget_exhausted_at_handoff"
+    if final_kkt_converged or not handoff_reached or remaining_iterations <= 0:
+        if final_kkt_converged:
+            status = "optimality_tolerance"
+            message = "PDHG returned Gram passed the final independent KKT tolerance"
+        elif not handoff_reached:
+            status = "pdhg_handoff_not_reached"
+            message = "PDHG did not reach the hybrid handoff tolerance"
+        else:
+            status = "iteration_budget_exhausted_at_handoff"
+            message = "PDHG reached the handoff at the end of the iteration budget"
+        combined_history = _combine_hybrid_histories(
+            pdhg_info["history"],
+            {"iteration": np.asarray([], dtype=np.int64)},
         )
-        message = (
-            "PDHG did not reach the hybrid handoff tolerance"
-            if not handoff["reached"]
-            else "PDHG reached the handoff at the end of the iteration budget"
+        combined_history["is_returned_iterate"] = combined_history["iteration"] == int(
+            pdhg_info["returned_iteration"]
         )
         info = dict(pdhg_info)
         info.update(
             {
                 "algorithm": "hybrid",
                 "coordinate_parameterization": "centered_hybrid",
-                "converged": False,
+                "converged": bool(final_kkt_converged),
                 "status": status,
                 "message": message,
                 "relative_tolerance": float(relative_tolerance),
-                "handoff_relative_tolerance": (
-                    handoff_relative_tolerance
-                ),
+                "absolute_tolerance": float(absolute_tolerance),
+                "termination_internal_kkt_converged": bool(final_kkt_converged),
+                "independent_kkt_converged": bool(final_kkt_converged),
+                "handoff_relative_tolerance": (handoff_relative_tolerance),
                 "handoff": handoff,
                 "phase_iterations": {
                     "pdhg": pdhg_iterations,
@@ -2055,33 +1911,28 @@ def fit_gaussian_noise_covariance_hybrid(
                     "pdhg": pdhg_wall_seconds,
                     "fista": 0.0,
                 },
-                "history": _combine_hybrid_histories(
-                    pdhg_info["history"],
-                    {"iteration": np.asarray([], dtype=np.int64)},
-                ),
+                "history": combined_history,
                 "wall_seconds": time.perf_counter() - start_time,
             }
         )
-        warnings.warn(
-            "fit_gaussian_noise_covariance_hybrid stopped before FISTA "
-            f"refinement (status={status})",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        if not final_kkt_converged:
+            warnings.warn(
+                "fit_gaussian_noise_covariance_hybrid stopped before FISTA "
+                f"refinement (status={status})",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return fitted, gram, connectivity, info
 
     fista_save_steps = sorted(
-        step - pdhg_iterations
-        for step in save_steps_set
-        if step > pdhg_iterations
+        step - pdhg_iterations for step in save_steps_set if step > pdhg_iterations
     )
     fista_start_time = time.perf_counter()
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message=(
-                "fit_gaussian_noise_covariance_fista stopped without "
-                "satisfying.*"
+                "fit_gaussian_noise_covariance_fista stopped without " "satisfying.*"
             ),
             category=RuntimeWarning,
         )
@@ -2094,46 +1945,22 @@ def fit_gaussian_noise_covariance_hybrid(
             max_iterations=remaining_iterations,
             relative_tolerance=relative_tolerance,
             absolute_tolerance=absolute_tolerance,
-            save_steps=fista_save_steps,
-            progress_callback=phase_progress_callback(
-                "fista", pdhg_iterations
+            distance_scale=pdhg_info["distance_scale"],
+            _precomputed_operator_norm=(
+                pdhg_info["weighted_operator_norm"]["safe_operator_norm_squared"],
+                pdhg_info["weighted_operator_norm"],
             ),
+            save_steps=fista_save_steps,
+            progress_callback=phase_progress_callback("fista", pdhg_iterations),
         )
     fista_wall_seconds = time.perf_counter() - fista_start_time
     fitted, gram, connectivity, fista_info = fista_result
     fista_iterations = int(fista_info["iterations"])
-
-    (
-        _,
-        pair_i,
-        pair_j,
-        target_pairs,
-        pair_variance,
-        _,
-        _,
-    ) = _num._validate_gaussian_covariance_inputs(
-        squared_distances, noise_variance, relative_noise_std
-    )
-    independent_residuals = _independent_eliminated_kkt_residuals(
-        gram,
-        target_pairs,
-        pair_variance,
-        pair_i,
-        pair_j,
-    )
-    (
-        independent_norm,
-        independent_scale,
-        independent_relative,
-        _,
-        independent_residual,
-    ) = independent_residuals
-    independent_kkt_converged = independent_norm <= (
-        absolute_tolerance + relative_tolerance * independent_scale
-    )
-    internal_kkt_converged = bool(
-        fista_info["termination_internal_kkt_converged"]
-    )
+    independent_norm = float(fista_info["stationarity_residual_norm"])
+    independent_scale = float(fista_info["stationarity_residual_scale"])
+    independent_relative = float(fista_info["relative_eliminated_kkt_residual"])
+    independent_kkt_converged = bool(fista_info["independent_kkt_converged"])
+    internal_kkt_converged = bool(fista_info["termination_internal_kkt_converged"])
     converged = internal_kkt_converged and independent_kkt_converged
     if converged:
         status = "optimality_tolerance"
@@ -2154,15 +1981,15 @@ def fit_gaussian_noise_covariance_hybrid(
     combined_history = _combine_hybrid_histories(
         pdhg_info["history"], fista_info["history"]
     )
-    connectivity_at_steps = dict(
-        pdhg_info["connectivity_matrix_at_steps"]
+    returned_iteration = pdhg_iterations + fista_iterations
+    combined_history["is_returned_iterate"] = (
+        combined_history["iteration"] == returned_iteration
     )
+    connectivity_at_steps = dict(pdhg_info["connectivity_matrix_at_steps"])
     connectivity_at_steps.update(
         {
             pdhg_iterations + int(step): matrix
-            for step, matrix in fista_info[
-                "connectivity_matrix_at_steps"
-            ].items()
+            for step, matrix in fista_info["connectivity_matrix_at_steps"].items()
         }
     )
     info = dict(fista_info)
@@ -2172,11 +1999,11 @@ def fit_gaussian_noise_covariance_hybrid(
             "status": status,
             "message": message,
             "iterations": pdhg_iterations + fista_iterations,
-            "returned_iteration": pdhg_iterations + fista_iterations,
+            "returned_iteration": returned_iteration,
+            "loss": float(fista_info["loss"]),
+            "entropy": float(fista_info["entropy"]),
             "relative_gradient_norm": float(independent_relative),
-            "relative_eliminated_kkt_residual": float(
-                independent_relative
-            ),
+            "relative_eliminated_kkt_residual": float(independent_relative),
             "runtime_relative_eliminated_kkt_residual": float(
                 fista_info["runtime_relative_eliminated_kkt_residual"]
             ),
@@ -2184,7 +2011,7 @@ def fit_gaussian_noise_covariance_hybrid(
             "stationarity_residual_scale": float(independent_scale),
             "relative_stationarity_residual": float(independent_relative),
             "maximum_absolute_stationarity_residual": float(
-                np.max(np.abs(independent_residual))
+                fista_info["maximum_absolute_stationarity_residual"]
             ),
             "pair_stationarity_residual_norm": float(
                 fista_info["pair_stationarity_residual_norm"]
@@ -2221,23 +2048,14 @@ def fit_gaussian_noise_covariance_hybrid(
             "connectivity_matrix_at_steps": connectivity_at_steps,
             "wall_seconds": time.perf_counter() - start_time,
             "pdhg": pdhg_info["pdhg"],
-            "weighted_operator_norm": pdhg_info[
-                "weighted_operator_norm"
-            ],
-            "fista_weighted_operator_norm": fista_info[
-                "weighted_operator_norm"
-            ],
+            "weighted_operator_norm": pdhg_info["weighted_operator_norm"],
             "inverse_reconstruction_count": (
                 pdhg_info["inverse_reconstruction_count"]
                 + fista_info["inverse_reconstruction_count"]
             ),
             "inverse_reconstructed_each_iteration": False,
-            "stationarity_definition": pdhg_info[
-                "stationarity_definition"
-            ],
-            "pair_stationarity_definition": pdhg_info[
-                "pair_stationarity_definition"
-            ],
+            "stationarity_definition": pdhg_info["stationarity_definition"],
+            "pair_stationarity_definition": pdhg_info["pair_stationarity_definition"],
             "logged_metric_timing": (
                 "post-update PDHG then FISTA iterates on one global axis; "
                 "final certificate recomputed from returned Gram matrix"

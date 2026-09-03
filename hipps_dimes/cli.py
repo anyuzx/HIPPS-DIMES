@@ -37,7 +37,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('-l', '--lamd', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Specify the weight for the regularization.')
 @click.option('-r', '--reg', type=click.Choice(['L1', 'L2'], case_sensitive=True), default='L2', show_default=True, required=False, help='specify the type of regularization. Currently support L1 and L2 regularization. Note that this option should be used together with option -l')
 @click.option('--gaussian-noise-variance', type=click.FloatRange(0, max=None), default=0.0, show_default=True, help='Positive homoskedastic variance on squared-distance constraints. Supported only with --method COV and mutually exclusive with --gaussian-noise-relative-std.')
-@click.option('--gaussian-noise-relative-std', type=click.FloatRange(0, max=None), default=None, help='Positive shared relative standard deviation sigma_ij / Dobs_ij. COV converts this after input preprocessing to variance_ij=(value*Dobs_ij)^2.')
+@click.option('--gaussian-noise-relative-std', type=click.FloatRange(0, min_open=True, max=None), default=None, help='Positive shared relative standard deviation sigma_ij / Dobs_ij. COV converts this after input preprocessing to variance_ij=(value*Dobs_ij)^2.')
 @click.option('--covariance-optimizer', type=click.Choice(['hybrid', 'pdhg'], case_sensitive=True), default='hybrid', show_default=True, help='Optimizer for method COV. PDHG is variance-whitened and inverse-free during runtime KKT checks. Hybrid runs PDHG followed by direct-Gram monotone FISTA.')
 @click.option('--covariance-relative-tolerance', type=click.FloatRange(0, max=None), default=1e-5, show_default=True, help='Relative KKT convergence tolerance for method COV.')
 @click.option('--covariance-absolute-tolerance', type=click.FloatRange(0, max=None), default=1e-10, show_default=True, help='Absolute internal KKT convergence tolerance for method COV.')
@@ -70,7 +70,8 @@ def _parse_save_steps(save_steps_str):
 @click.option('--unit', 'hic_unit', type=click.Choice(['BP', 'FRAG'], case_sensitive=False), default='BP', show_default=True, help='Unit for .hic: BP or FRAG')
 @click.option('--no-log', is_flag=True, default=False, show_default=True, help='Disable writing run-parameter and iteration-series log files')
 @click.option('--no-xyzs', is_flag=True, default=False, show_default=True, help='Turn off writing conformations to .xyz file')
-@click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Turn on this argument will let the program ignore the missing elementsin the contact map or distance map')
+@click.option('--ignore-missing-data', is_flag=True, default=False, show_default=True, help='Exclude missing pair constraints from the contact or distance map')
+@click.option('--repair-fully-missing-loci', is_flag=True, default=False, show_default=True, help='With --ignore-missing-data, impute nearest-neighbor constraints for loci whose entire off-diagonal row/column is missing')
 @click.option('--remove-fully-missing-loci', is_flag=True, default=False, show_default=True, help='When used with --ignore-missing-data, remove loci whose entire off-diagonal row/column is missing before optimization')
 @click.option('--balance', is_flag=True, default=False, show_default=True, help='Turn on the matrix balance for contact map. Only effective when input_type == cmap and input_format == cooler')
 @click.option('--neighbor-balance', is_flag=True, default=False, show_default=True, help='Turn on neighbor balancing for contact map. Only effective when input_type == cmap. Normalizes contact between i and j by dividing it by the geometric mean of neighbor contact for i and j. see Paggi, Zhang 2025 for method details')
@@ -80,7 +81,7 @@ def _parse_save_steps(save_steps_str):
 @click.option('--save-pickle', is_flag=True, default=False, show_default=True, help='Save the returned results dictionary to {output_prefix}_HIPPS_DIMES_results.pkl and suppress the default text/CSV/XYZ file outputs')
 @click.option('--eigh-threads', type=int, default=None, help='Number of threads for eigenvalue (eigh) and BLAS/LAPACK. If not set, backend default is used. Set to 1 for single-threaded.')
 @click.option('--quiet', '-q', is_flag=True, default=False, show_default=True, help='Quiet mode: disable fancy tables display, keep only the progress bar.')
-def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, gaussian_noise_relative_std, covariance_optimizer, covariance_relative_tolerance, covariance_absolute_tolerance, covariance_handoff_relative_tolerance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
+def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, method, lamd, reg, gaussian_noise_variance, gaussian_noise_relative_std, covariance_optimizer, covariance_relative_tolerance, covariance_absolute_tolerance, covariance_handoff_relative_tolerance, iteration, learning_rate, momentum, nesterov, use_gpu, input_type, gpu_float32, input_format, binsize, hic_norm, hic_unit, no_log, no_xyzs, ignore_missing_data, repair_fully_missing_loci, remove_fully_missing_loci, balance, not_normalize, neighbor_balance, enforce_nonnegative_connectivity_matrix, save_steps, save_pickle, eigh_threads, quiet):
     """CLI for HIPPS-DIMES.
 
     INPUT: Path to the input file.
@@ -89,7 +90,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
 
-    run_optimization(
+    results = run_optimization(
         input_path=input,
         output_prefix=output_prefix,
         input_matrix=None,
@@ -122,6 +123,7 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         no_log=no_log,
         no_xyzs=no_xyzs,
         ignore_missing_data=ignore_missing_data,
+        repair_fully_missing_loci=repair_fully_missing_loci,
         remove_fully_missing_loci=remove_fully_missing_loci,
         balance=balance,
         not_normalize=not_normalize,
@@ -132,6 +134,18 @@ def main(input, output_prefix, connectivity_matrix, ensemble, alpha, selection, 
         eigh_threads=eigh_threads,
         verbose=not quiet,
     )
+    if method == 'COV':
+        covariance_info = results['covariance_optimization']
+        if not covariance_info['converged']:
+            raise click.ClickException(
+                "COV did not converge: "
+                f"status={covariance_info['status']}, "
+                f"returned_iteration={covariance_info['returned_iteration']}, "
+                "relative_KKT="
+                f"{covariance_info['relative_eliminated_kkt_residual']:.6e}, "
+                f"requested_rtol={covariance_info['relative_tolerance']:.6e}. "
+                "Requested output files were retained as nonconverged partial results."
+            )
 
 
 if __name__ == '__main__':

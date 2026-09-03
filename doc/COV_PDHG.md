@@ -20,6 +20,22 @@ The translational mode remains zero, and every internal mode remains strictly
 positive. The former scalar-step PDHG implementation has been replaced rather
 than retained as a fallback.
 
+## Observation graph requirement
+
+Finite, positive off-diagonal squared-distance entries define an undirected
+observation graph. COV requires this graph to connect all retained loci. If it
+has multiple components, their relative translations are unconstrained and the
+log-determinant term makes the stated objective unbounded below; a small
+finite-iterate residual would not certify a finite optimum. The validator scans
+the dense observed-pair mask in $O(N^2)$ time and uses only $O(N)$ additional
+working memory.
+
+Partially missing matrices are supported when their observation graph remains
+connected. A fully missing locus must be repaired or removed explicitly by the
+high-level API. Repaired nearest-neighbor pairs are genuine constraints: they
+enter both the data term and the variance constructed by the chosen COV noise
+model.
+
 ## Variance whitening
 
 Define
@@ -49,17 +65,30 @@ $$
 
 Whitening gives every observed-pair dual coordinate unit quadratic curvature.
 For `relative_noise_std=c`, the standardized target is the constant `1/c`.
+The low-level PDHG default initializes the dual with the whitened data
+residual; it does not run a separate multi-candidate `auto` scoring pass.
 
-The implementation estimates
+For step-size selection, define the edge-space normal operator
 
 $$
-\|\mathcal A\|^2
-=\lambda_{\max}(\mathcal D^*V^{-1}\mathcal D)
+G=\mathcal A\mathcal A^*.
 $$
 
-with matrix-free power iteration. The estimate includes a safety factor, and
-PDHG preserves the resulting safe product `tau*sigma` while adapting only the
-ratio `tau/sigma`.
+It is symmetric, positive semidefinite, and entrywise nonnegative. Starting
+from a strictly positive edge vector $x$, the Collatz bounds give
+
+$$
+\min_a\frac{(Gx)_a}{x_a}
+\leq \lambda_{\max}(G)=\|\mathcal A\|^2
+\leq \max_a\frac{(Gx)_a}{x_a}.
+$$
+
+The implementation repeatedly applies $G$ without materializing it and uses
+the maximum ratio as a certified upper bound, even if the configured bound-gap
+tolerance is not reached. A further safety factor determines the PDHG step
+product `tau*sigma`; adaptation changes only the ratio `tau/sigma`. This
+certificate avoids relying on a heuristic power-iteration start that could
+miss the dominant eigenspace.
 
 ## Inverse-free runtime KKT residual
 
@@ -109,6 +138,11 @@ exhausting it does not imply convergence. Check `info["converged"]`,
 `info["independent_kkt_converged"]`, and
 `info["relative_eliminated_kkt_residual"]`.
 
+`info["iterations"]` is the number of updates executed, whereas
+`info["returned_iteration"]` identifies the selected model. The history column
+`is_returned_iterate` marks that row. Reported top-level `objective`, `loss`,
+and `entropy` are all evaluated at that same returned iterate.
+
 ## Direct-Gram monotone FISTA refinement
 
 At the hybrid handoff, FISTA receives PDHG's centered physical Gram matrix
@@ -122,9 +156,10 @@ $$
 the gradient is evaluated with the same matrix-free weighted distance
 operator and adjoint used by PDHG. The nonsmooth-side proximal map is the
 closed-form positive-definite update for $-3\log\det'(B)/2$, applied only to
-the centered internal modes. FISTA estimates the weighted operator norm,
-uses backtracking when needed, and restarts acceleration whenever an
-extrapolated step would violate monotonic objective descent.
+the centered internal modes. In a hybrid run, FISTA reuses PDHG's certified
+weighted-operator bound and physical distance scale. It uses backtracking when
+needed and restarts acceleration whenever an extrapolated step would violate
+monotonic objective descent.
 
 The direct FISTA function is an internal low-level implementation. It is not
 exported from `HippsDimes` and is not a standalone CLI optimizer. This keeps
@@ -190,7 +225,8 @@ The PDHG history records the objective components, eliminated KKT residual,
 common-space primal and dual components, step sizes, step-ratio adaptations,
 Gram conditioning, and connectivity norm. Additional metadata include:
 
-- `weighted_operator_norm` for power-iteration setup diagnostics;
+- `weighted_operator_norm` for the edge-space Collatz certificate, including
+  lower and certified upper bounds and their relative gap;
 - `inverse_reconstruction_count` and
   `inverse_reconstructed_each_iteration`;
 - `pdhg["variance_whitened"]`;
@@ -203,20 +239,23 @@ accepted step size, backtracking count, momentum coefficient, restart flag,
 and objective decrease. Hybrid metadata include:
 
 - `phase_iterations` and `phase_wall_seconds` for `pdhg` and `fista`;
-- `fista_weighted_operator_norm`;
 - `initial_step_size`, `final_step_size`, `backtracking_reductions`, and
   `restart_count`;
 - `handoff["physical_gram_used_directly"] = True` and
   `handoff["scalar_recalibration"] = None`.
 
 The main low-level tuning parameters are `step_safety`, `initial_dual_step`,
-`step_ratio`, residual-adaptation controls, and the operator-norm power-iteration
-controls. The high-level API uses the validated defaults.
+`step_ratio`, residual-adaptation controls, and the operator-bound iteration and
+gap-tolerance controls. The high-level API uses the validated defaults.
 
 Progress callbacks distinguish `covariance_operator_norm` and
 `covariance_optimization`, with `phase` set to `pdhg` or `fista` in hybrid
-runs. Operator-norm events report their own relative residual and do not
+runs. Operator-norm events report their own relative bound gap and do not
 contain an objective value.
+
+When invoked through the CLI, a nonconverged COV run writes the requested
+partial artifacts and then exits with status 1. Library calls return those same
+artifacts and expose the false convergence flag for programmatic handling.
 
 ## Scaling evidence
 

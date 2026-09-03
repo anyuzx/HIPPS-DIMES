@@ -67,8 +67,8 @@ def _make_covariance_progress_callback(progress_callback, show_progress):
 
         if stage == 'covariance_operator_norm':
             progress_bar.set_postfix(
-                relative_residual=(
-                    f"{event['operator_norm_relative_residual']:.3e}"
+                relative_bound_gap=(
+                    f"{event['operator_norm_relative_bound_gap']:.3e}"
                 ),
                 refresh=False,
             )
@@ -181,13 +181,17 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
         with np.errstate(divide='ignore', invalid='ignore'):
             transformed = np.log10(repaired)
         transformed[missing_mask] = np.nan
-        interpolated = interpolate_missing(transformed)
     elif matrix_kind in {'dmap', 'ddmap'}:
         transformed = np.array(repaired, dtype=float, copy=True)
         transformed[missing_mask] = np.nan
-        interpolated = interpolate_missing(transformed)
     else:
         raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+
+    # The diagonal is not an observed inter-locus constraint.  Excluding it
+    # prevents its conventional zero (or unit contact before the log) from
+    # becoming the nearest interpolation source for an off-diagonal pair.
+    np.fill_diagonal(transformed, np.nan)
+    interpolated = interpolate_missing(transformed)
 
     repaired_pairs = set()
     for i in fully_missing_loci:
@@ -213,9 +217,10 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
                 )
 
             fill_value = float(np.mean(finite_candidates))
-            if matrix_kind == 'cmap' and fill_value <= 0.0:
+            if fill_value <= 0.0:
                 raise ValueError(
-                    f"Nearest-neighbor interpolation produced a nonpositive contact value for pair ({i}, {j})"
+                    "Nearest-neighbor interpolation produced a nonpositive "
+                    f"{matrix_kind} value for pair ({i}, {j})"
                 )
 
             repaired[i, j] = fill_value
@@ -275,6 +280,51 @@ def _remove_fully_missing_loci(matrix, matrix_kind):
     }
 
 
+def _handle_fully_missing_loci(
+    matrix,
+    matrix_kind,
+    missing_analysis,
+    *,
+    ignore_missing_data,
+    repair_fully_missing_loci,
+    remove_fully_missing_loci,
+):
+    """Apply the explicitly selected fully-missing-locus policy."""
+    handling_info = {
+        'nearest_neighbor_repaired_pairs': [],
+        'nearest_neighbor_repair_count': 0,
+        'removed_fully_missing_loci': [],
+        'removed_fully_missing_loci_count': 0,
+        'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
+        'missing_pairs_after_repair': missing_analysis['missing_pairs'],
+        'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+        'missing_pairs_after_removal': missing_analysis['missing_pairs'],
+        'missing_fraction_after_removal': missing_analysis['missing_fraction'],
+    }
+    fully_missing_loci = missing_analysis['fully_missing_loci']
+    if ignore_missing_data and fully_missing_loci:
+        if remove_fully_missing_loci:
+            matrix, update = _remove_fully_missing_loci(matrix, matrix_kind)
+            handling_info.update(update)
+        elif repair_fully_missing_loci:
+            matrix, update = _repair_fully_missing_loci_nearest_neighbors(
+                matrix,
+                matrix_kind,
+                missing_analysis['missing_mask'],
+                fully_missing_loci,
+            )
+            handling_info.update(update)
+        else:
+            raise ValueError(
+                "fully missing loci were found at indices "
+                f"{fully_missing_loci}; explicitly set "
+                "repair_fully_missing_loci=True or "
+                "remove_fully_missing_loci=True"
+            )
+    missing_analysis.update(handling_info)
+    return matrix
+
+
 def _subset_connectivity_matrix(connectivity_matrix, kept_loci, original_size):
     """Subset a provided connectivity matrix to the kept loci when needed."""
     connectivity_matrix = _ensure_square_matrix(connectivity_matrix, "Connectivity matrix")
@@ -322,6 +372,7 @@ def run_optimization(input_path=None,
                      no_log=False,
                      no_xyzs=False,
                      ignore_missing_data=False,
+                     repair_fully_missing_loci=False,
                      remove_fully_missing_loci=False,
                      balance=False,
                      not_normalize=False,
@@ -416,6 +467,9 @@ def run_optimization(input_path=None,
         If True, skip writing conformations to file
     ignore_missing_data : bool, default=False
         Whether to ignore missing elements in contact/distance map
+    repair_fully_missing_loci : bool, default=False
+        If True, and ``ignore_missing_data`` is also True, impute nearest-neighbor
+        constraints for loci whose entire off-diagonal row/column is missing.
     remove_fully_missing_loci : bool, default=False
         If True, and ``ignore_missing_data`` is also True, remove loci whose
         entire off-diagonal row/column is missing before optimization.
@@ -448,8 +502,8 @@ def run_optimization(input_path=None,
         iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
     show_progress : bool, default=True
         Whether to render solver progress bars. COV reports the selected
-        optimizer phases and operator-norm estimation separately. Set to False
-        when consuming progress_callback programmatically.
+        optimizer phases and operator-norm certification separately. Set to
+        False when consuming progress_callback programmatically.
         
     Returns
     -------
@@ -458,14 +512,20 @@ def run_optimization(input_path=None,
         - 'iteration_series': Optimization iteration-series data as a DataFrame
         - 'log': Alias for 'iteration_series' (backward compatibility)
         - 'run_parameters': Run parameters as a DataFrame with columns ['parameter', 'value']
-        - 'dmap_final': Final distance map (numpy array)
-        - 'connectivity_matrix': Final connectivity matrix (numpy array)
+        - 'dmap_final': Returned-model distance map (numpy array)
+        - 'connectivity_matrix': Returned-model connectivity matrix (numpy array)
+        - 'gram_matrix': Returned centered Gram matrix (COV only)
+        - 'covariance_optimization': COV convergence, returned-iterate, and diagnostic metadata
         - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)
         - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
         - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
         - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
         - 'kept_loci': Original locus indices retained for optimization (only if loci were removed)
         - 'removed_fully_missing_loci': Original fully missing loci removed before optimization
+
+        Missing-data repair provenance, including repaired pairs, is recorded
+        in 'run_parameters'. COV iteration history marks its selected model in
+        the 'is_returned_iterate' column.
     
     Notes
     -----
@@ -681,8 +741,17 @@ def run_optimization(input_path=None,
         no_log = not log
     if save_pickle and output_prefix is None:
         raise ValueError("output_prefix must be provided when save_pickle=True")
+    if repair_fully_missing_loci and not ignore_missing_data:
+        raise ValueError(
+            "repair_fully_missing_loci=True requires ignore_missing_data=True"
+        )
     if remove_fully_missing_loci and not ignore_missing_data:
         raise ValueError("remove_fully_missing_loci=True requires ignore_missing_data=True")
+    if repair_fully_missing_loci and remove_fully_missing_loci:
+        raise ValueError(
+            "repair_fully_missing_loci and remove_fully_missing_loci are "
+            "mutually exclusive"
+        )
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
 
@@ -736,29 +805,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = dmap_target.shape
             missing_analysis = _summarize_missing_data(dmap_target, 'dmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                dmap_target, removal_info = _remove_fully_missing_loci(dmap_target, 'dmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                dmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    dmap_target,
-                    'dmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            dmap_target = _handle_fully_missing_loci(
+                dmap_target,
+                'dmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
             ddmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_type == 'ddmap':
             if verbose and console:
@@ -785,29 +839,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = ddmap_target.shape
             missing_analysis = _summarize_missing_data(ddmap_target, 'ddmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                ddmap_target, removal_info = _remove_fully_missing_loci(ddmap_target, 'ddmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                ddmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    ddmap_target,
-                    'ddmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            ddmap_target = _handle_fully_missing_loci(
+                ddmap_target,
+                'ddmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
         elif input_type == 'cmap':
             if verbose and console:
                 console.print("Reading contact map")
@@ -900,29 +939,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = cmap.shape
             missing_analysis = _summarize_missing_data(cmap, 'cmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                cmap, removal_info = _remove_fully_missing_loci(cmap, 'cmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                cmap, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    cmap,
-                    'cmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            cmap = _handle_fully_missing_loci(
+                cmap,
+                'cmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
             
             # Apply neighbor balancing if requested
             if neighbor_balance:
@@ -1007,6 +1031,10 @@ def run_optimization(input_path=None,
             input_table.add_row("Neighbor Balancing", "Yes" if neighbor_balance else "No")
             input_table.add_row("Auto Normalization", "No" if not_normalize else "Yes")
         input_table.add_row("Ignore Missing Data", "Yes" if ignore_missing_data else "No")
+        input_table.add_row(
+            "Repair Fully Missing Loci",
+            "Yes" if repair_fully_missing_loci else "No",
+        )
         input_table.add_row("Remove Fully Missing Loci", "Yes" if remove_fully_missing_loci else "No")
         
         console.print(input_table)
@@ -1297,8 +1325,33 @@ def run_optimization(input_path=None,
                 final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]).sum())
 
         if len(iteration_series_df) > 0 and console:
-            console.print("Final loss: {}".format(iteration_series_df['loss'].values[-1]))
-            console.print("Final entropy: {}".format(iteration_series_df['entropy'].values[-1]))
+            if covariance_optimization_info is not None:
+                returned_iteration = covariance_optimization_info[
+                    'returned_iteration'
+                ]
+                console.print(
+                    "Returned loss at iteration {}: {}".format(
+                        returned_iteration,
+                        covariance_optimization_info['loss'],
+                    )
+                )
+                console.print(
+                    "Returned entropy at iteration {}: {}".format(
+                        returned_iteration,
+                        covariance_optimization_info['entropy'],
+                    )
+                )
+            else:
+                console.print(
+                    "Final loss: {}".format(
+                        iteration_series_df['loss'].values[-1]
+                    )
+                )
+                console.print(
+                    "Final entropy: {}".format(
+                        iteration_series_df['entropy'].values[-1]
+                    )
+                )
 
     run_parameters_df = _build_run_parameters_frame({
         'input_source': input_source,
@@ -1374,6 +1427,26 @@ def run_optimization(input_path=None,
         ),
         'covariance_status': (
             covariance_optimization_info['status']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_iterations_executed': (
+            covariance_optimization_info['iterations']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_iteration': (
+            covariance_optimization_info['returned_iteration']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_loss': (
+            covariance_optimization_info['loss']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_entropy': (
+            covariance_optimization_info['entropy']
             if covariance_optimization_info is not None
             else None
         ),
@@ -1457,6 +1530,7 @@ def run_optimization(input_path=None,
         'no_log': no_log,
         'no_xyzs': no_xyzs,
         'ignore_missing_data': ignore_missing_data,
+        'repair_fully_missing_loci': repair_fully_missing_loci,
         'remove_fully_missing_loci': remove_fully_missing_loci,
         'balance': balance,
         'not_normalize': not_normalize,

@@ -42,8 +42,30 @@ v_{ij}=r^2\left(D_{ij}^{\mathrm{obs}}\right)^2.
 $$
 
 Here $D^{\mathrm{obs}}$ is always the final squared-distance target after any
-contact-map or distance-map conversion, normalization, locus removal, and
-missing-data handling. Diagonal and missing pairs do not enter the objective.
+contact-map or distance-map conversion, normalization, explicit locus repair
+or removal, and other missing-data handling. Diagonal and still-missing pairs
+do not enter the objective.
+
+## Missing observations and fully missing loci
+
+With missing-data handling enabled, finite positive off-diagonal entries in the
+final squared-distance target define the observed pairs. They must form one
+connected graph over all retained loci. Otherwise, relative translations of
+the disconnected components are unconstrained and the COV objective is
+unbounded below. Sparse targets are valid as long as this connectivity
+condition holds.
+
+A locus with no observed off-diagonal pairs requires an explicit choice:
+
+- `repair_fully_missing_loci=True` fills only its genomic-neighbor pairs using
+  nearest interpolation from non-diagonal observations;
+- `remove_fully_missing_loci=True` removes it before optimization.
+
+Both require `ignore_missing_data=True` and are mutually exclusive. Repair is
+not merely a numerical initialization. Each filled pair becomes an observed
+constraint, and the requested absolute or relative noise model is constructed
+from the repaired final target. A target containing disconnected multi-locus
+clusters is rejected rather than silently bridged.
 
 ## Equivalent connectivity dual and stationarity
 
@@ -88,9 +110,9 @@ IS, GD, and DI remain available for their noiseless contracts.
 COV uses a Rouse chain calibrated over exactly the observed pairs by default:
 `k0 = 3 * mean_observed(|i-j|) / mean_observed(D_ij)`. Its unweighted
 observed-pair mean squared distance therefore matches the target without
-imputing missing pairs. An explicitly supplied connectivity matrix may instead
-be used to restart a fit. Initialization changes only the starting point; it
-does not add a Rouse prior or change the COV objective.
+imputing any additional pairs. An explicitly supplied connectivity matrix may
+instead be used to restart a fit. Initialization changes only the starting
+point; it does not add a Rouse prior or change the COV objective.
 
 Every resulting initial shape is then optimally rescaled for the actual COV
 objective. Let $B_0$ be its positive-definite internal Gram matrix,
@@ -119,9 +141,9 @@ $$
 
 This exact scalar step is applied to Rouse and supplied-connectivity
 initializations before the selected optimizer. It preserves feasibility,
-supports both noise models without imputing missing pairs, and changes a Rouse
-spring constant from $k_0$ to $k_0/s^*$. The initialization metadata records
-the scale and the COV objective before and after calibration.
+supports both noise models without imputing any additional missing pairs, and
+changes a Rouse spring constant from $k_0$ to $k_0/s^*$. The initialization
+metadata records the scale and the COV objective before and after calibration.
 
 ## COV optimizers and convergence
 
@@ -160,6 +182,20 @@ handoff tolerance is $10^{-2}$; both are configurable. A stricter final
 $10^{-8}$ value remains available for small, well-conditioned tests. The
 iteration argument is only a maximum update budget and is never itself a
 convergence criterion.
+
+PDHG step sizes use a certified upper bound on the weighted distance-operator
+norm from an edge-space Collatz iteration. The hybrid FISTA phase reuses that
+same certificate rather than recomputing it. At the handoff boundary, meeting
+the looser handoff tolerance alone never sets the final convergence flag; the
+returned Gram must meet the requested final absolute-plus-relative KKT test.
+
+PDHG may return the best runtime KKT iterate rather than the last update.
+`iterations` reports executed updates, `returned_iteration` identifies the
+selected model, and `history["is_returned_iterate"]` marks it. The reported
+top-level objective, loss, entropy, and independent certificate all refer to
+that same returned model. A CLI run that exhausts its budget writes requested
+partial outputs and exits with status 1; the Python API returns the partial
+result with `converged=False`.
 
 ## CPU and GPU backends
 

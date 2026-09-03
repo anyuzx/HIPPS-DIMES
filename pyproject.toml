@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hipps-dimes"
-version = "3.0"
+version = "4.0"
 description = "Maximum Entropy Model for 4D Genome"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -63,7 +63,20 @@ Repository = "https://github.com/anyuzx/HIPPS-DIMES.git"
 HippsDimes = "hipps_dimes.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+only-include = ["hipps_dimes", "HippsDimes.py"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "hipps_dimes",
+    "HippsDimes.py",
+    "tests",
+    "doc/COV_PDHG.md",
+    "doc/NOTE_ON_ACCELERATION.md",
+    "doc/NOTE_ON_NOISE.md",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.black]
 line-length = 88
@@ -89,7 +102,6 @@ multi_line_output = 3
 line_length = 88
 
 [tool.mypy]
-python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -114,6 +126,7 @@ disallow_untyped_decorators = false
 module = [
     "cooler",
     "cupy",
+    "cupyx",
     "hicstraw",
     "pandas",
     "scipy",

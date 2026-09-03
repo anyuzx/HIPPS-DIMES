@@ -1,4 +1,4 @@
-![movie](doc/source/movie.gif)
+![movie](https://raw.githubusercontent.com/anyuzx/HIPPS-DIMES/main/doc/source/movie.gif)
 
 [**Installation**](#install) | [**Quick Start**](#quick-start) | [**API**](#api) | [**Chromatin Dynamics**](#dynamics-prediction-functionality) | [**Chromatin Mechanics**](#linear-mechanical-response)
 
@@ -16,7 +16,7 @@ physics and the Ornstein–Uhlenbeck process. Available observables include
 autocorrelation functions (ACFs), mean-square displacements (MSDs), system-level
 viscoelastic moduli, and per-locus mechanical susceptibilities.
 
-![schematic](doc/source/schematic.jpg)
+![schematic](https://raw.githubusercontent.com/anyuzx/HIPPS-DIMES/main/doc/source/schematic.jpg)
 
 The theory and applications of this method are described in the following
 publications:
@@ -30,6 +30,16 @@ Other applications of this method can be found in:
 
 - Dey, Atreya, et al. "Structural changes in chromosomes driven by multiple condensin motors during mitosis." Cell Reports 42.4 (2023).
 - Jeong, Davin, et al. "Structural basis for the preservation of a subset of topologically associating domains in interphase chromosomes upon cohesin depletion." eLife 12 (2024): RP88564.
+
+## Release 4.0
+
+HIPPS-DIMES 4.0 adds the calibrated, noise-aware `COV` method with CPU and
+float64 GPU execution. Its default hybrid optimizer combines
+variance-whitened PDHG with direct-Gram monotone FISTA and reports an
+independently recomputed KKT convergence certificate. This release also makes
+fully missing-locus repair explicit, validates that COV observations connect
+all retained loci, and makes the returned COV iterate unambiguous in logs and
+results.
 
 # Documentation
 
@@ -205,6 +215,11 @@ This script will generate several files:
 - `--ignore-missing-data`: Exclude missing pair constraints. Non-finite entries
   are missing for every matrix type; nonpositive off-diagonal entries are also
   missing for contact maps.
+- `--repair-fully-missing-loci`: With `--ignore-missing-data`, impute only the
+  genomic nearest-neighbor constraints `(i, i-1)` and `(i, i+1)` needed to
+  reconnect a locus with no observed off-diagonal pairs. The repaired values
+  become ordinary observed constraints in the selected objective and, for
+  COV, in its noise model.
 - `--remove-fully-missing-loci`: With `--ignore-missing-data`, remove loci that
   have no observed off-diagonal pairs before optimization.
 - `--balance`: Balance a cooler-format contact map before optimization.
@@ -254,7 +269,19 @@ python -m hipps_dimes observed_ddmap.npy cov_fit \
 
 An iteration limit is only a budget. A returned COV model is converged only
 when its independently recomputed KKT certificate passes the requested
-tolerance.
+tolerance. The command-line program retains requested output files but exits
+with status 1 when that certificate fails; the Python API returns the partial
+result with `results["covariance_optimization"]["converged"] == False`.
+
+COV constructs an undirected observation graph from finite, positive
+off-diagonal squared-distance constraints. Every retained locus must belong to
+one connected component. Sparse observations are supported, but disconnected
+clusters are rejected because their relative motion is unconstrained and the
+noise-aware maximum-entropy objective has no finite optimum. When a locus has
+no observations, choose exactly one explicit policy with
+`--repair-fully-missing-loci` or `--remove-fully-missing-loci`, together with
+`--ignore-missing-data`. Neither option is needed for partially missing data
+whose observation graph is already connected.
 
 See [Noise-aware covariance optimization](doc/NOTE_ON_NOISE.md) for the noise
 model, initialization, and scientific interpretation. See
@@ -347,8 +374,11 @@ HippsDimes mydata.hic test \
   replace the reported convergence certificate.
 - Use `--ignore-missing-data` to exclude non-finite input pairs and, for contact
   maps, nonpositive pairs. If a locus has no observed off-diagonal pairs at all,
-  combine it with `--remove-fully-missing-loci` to remove that locus before
-  optimization.
+  also select either `--repair-fully-missing-loci` to add its genomic-neighbor
+  constraints or `--remove-fully-missing-loci` to remove it before
+  optimization. Repair and removal are mutually exclusive. COV additionally
+  requires the complete observed-pair graph to be connected, including cases
+  with no individually isolated locus.
 - Contact-map inputs are normalized by their maximum entry by default. Use
   `--not-normalize` when the supplied contact map should retain its existing
   scale.
@@ -417,7 +447,11 @@ maximum update budget rather than a recommended stopping iteration. If the
 budget is exhausted first, the returned convergence status is false and the
 user should not describe the result as converged. Inspect
 `results['covariance_optimization']['converged']`, `status`, and
-`relative_eliminated_kkt_residual` for the final certificate.
+`relative_eliminated_kkt_residual` for the final certificate. `iterations`
+records the number of updates executed, while `returned_iteration` identifies
+the model actually returned. The iteration-series column
+`is_returned_iterate` marks that row, and the top-level COV `objective`, `loss`,
+and `entropy` all describe the same returned model.
 
 #### Valid mean-squared-distance maps
 

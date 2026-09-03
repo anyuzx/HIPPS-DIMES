@@ -2043,6 +2043,40 @@ def _validate_gaussian_covariance_inputs(
     if np.any(observed[pair_mask] <= 0.0):
         raise ValueError("observed off-diagonal squared distances must be positive")
 
+    # A disconnected observation graph leaves relative translations between
+    # components unconstrained.  Along those covariance directions the
+    # Gaussian COV objective is unbounded below, even though a finite iterate
+    # can have an arbitrarily small KKT residual.  Scan the already-materialized
+    # dense pair mask in O(n^2) time without allocating another adjacency matrix.
+    unvisited = np.ones(n, dtype=bool)
+    components = []
+    while np.any(unvisited):
+        start = int(np.flatnonzero(unvisited)[0])
+        unvisited[start] = False
+        stack = [start]
+        component = []
+        while stack:
+            locus = stack.pop()
+            component.append(locus)
+            neighbors = np.flatnonzero(pair_mask[locus] & unvisited)
+            if neighbors.size:
+                unvisited[neighbors] = False
+                stack.extend(neighbors.tolist())
+        components.append(sorted(component))
+
+    if len(components) != 1:
+        component_sizes = [len(component) for component in components]
+        component_previews = [
+            component[:12] for component in components[:8]
+        ]
+        raise ValueError(
+            "the observed squared-distance graph must be connected; "
+            f"found {len(components)} components with sizes {component_sizes} "
+            f"and locus previews {component_previews}. Repair or remove fully "
+            "missing loci explicitly; disjoint multi-locus clusters require "
+            "corrected input constraints"
+        )
+
     has_absolute = noise_variance is not None
     has_relative = relative_noise_std is not None
     if has_absolute == has_relative:

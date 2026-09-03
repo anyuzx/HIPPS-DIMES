@@ -7,9 +7,10 @@ Use this file as the short operational guide for Codex and contributors. For the
 - `hipps_dimes/api.py`: workflow coordinator, input handling, result packaging, artifact writing
 - `hipps_dimes/models.py`: optimization engine and `Dynamics` class
 - `hipps_dimes/numerics.py`: scientific kernels and matrix math
+- `hipps_dimes/covariance_pdhg.py`: noise-aware COV PDHG and hybrid solver
 - `hipps_dimes/cli.py`: CLI parsing only; keep it thin
 - `hipps_dimes/core.py`, `hipps_dimes/__init__.py`, `HippsDimes.py`: export and compatibility layers
-- `tests/`: regression coverage split across `test_basic.py`, `test_dynamics.py`, and `test_entropy_and_api.py`
+- `tests/`: regression coverage split across `test_basic.py`, `test_dynamics.py`, `test_entropy_and_api.py`, and `test_covariance_pdhg.py`
 
 ## Working Rules
 
@@ -36,11 +37,11 @@ pytest -q -o addopts='' tests/test_entropy_and_api.py
 ## Change Routing
 
 - CLI/options/output-contract changes: `api.py`, `cli.py`, `tests/test_entropy_and_api.py`
-- Optimization changes: `models.py`, possibly `numerics.py`, plus API tests
+- COV optimization changes: `covariance_pdhg.py`, possibly `numerics.py`, plus `tests/test_covariance_pdhg.py`
+- IS/GD/DI optimization changes: `models.py`, possibly `numerics.py`, plus API tests
 - Dynamics/mechanics changes: `models.py`, `numerics.py`, `tests/test_dynamics.py`, and `tests/test_basic.py`
 - Compatibility/export changes: `__init__.py`, `core.py`, `HippsDimes.py`, and import tests
 
 ## Repo Quirks
 
-- The current `Makefile` and CI lint job only lint `HippsDimes.py`, not the full package.
-- `MAINTAINER_MAP.md` is currently ignored by `.gitignore`, so edits there do not show up in normal `git status`.
+- The current `Makefile` only lints `HippsDimes.py`; CI additionally checks the COV solver and its dedicated tests.

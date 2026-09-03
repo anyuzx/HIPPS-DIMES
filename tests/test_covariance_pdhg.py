@@ -13,9 +13,7 @@ from hipps_dimes import covariance_pdhg as pdhg
 from hipps_dimes import numerics
 
 _REAL_DATA_DIRECTORY = (
-    Path(__file__).parent
-    / "data"
-    / "gm12878_hic_chr1_31mb_41mb_25kb"
+    Path(__file__).parent / "data" / "gm12878_hic_chr1_31mb_41mb_25kb"
 )
 
 
@@ -40,9 +38,7 @@ def _load_real_chromosome_case():
 
 
 def _rouse_squared_distance_target(n=6, spring_constant=1.0):
-    connectivity = HippsDimes.construct_connectivity_matrix_rouse(
-        n, spring_constant
-    )
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(n, spring_constant)
     eigenvalues, eigenvectors = np.linalg.eigh(-connectivity)
     inverse = np.zeros_like(eigenvalues)
     inverse[eigenvalues > 1e-12] = 1.0 / eigenvalues[eigenvalues > 1e-12]
@@ -58,8 +54,7 @@ def _independent_relative_kkt(target, gram, variance):
     """Recompute the eliminated KKT residual without PDHG internals."""
     target = np.asarray(target, dtype=np.float64)
     gram = 0.5 * (
-        np.asarray(gram, dtype=np.float64)
-        + np.asarray(gram, dtype=np.float64).T
+        np.asarray(gram, dtype=np.float64) + np.asarray(gram, dtype=np.float64).T
     )
     n = target.shape[0]
     observed = np.isfinite(target) & ~np.eye(n, dtype=bool)
@@ -81,11 +76,7 @@ def _independent_relative_kkt(target, gram, variance):
     ) @ internal_vectors.T
 
     diagonal = np.diag(gram)
-    fitted_pairs = (
-        diagonal[pair_i]
-        + diagonal[pair_j]
-        - 2.0 * gram[pair_i, pair_j]
-    )
+    fitted_pairs = diagonal[pair_i] + diagonal[pair_j] - 2.0 * gram[pair_i, pair_j]
     eliminated_dual = (fitted_pairs - target_pairs) / pair_variance
     pair_matrix = np.zeros((n, n), dtype=np.float64)
     pair_matrix[pair_i, pair_j] = eliminated_dual
@@ -103,11 +94,12 @@ def _independent_relative_kkt(target, gram, variance):
 
 
 def test_pdhg_default_relative_tolerance_is_production_value():
-    parameter = inspect.signature(
+    parameters = inspect.signature(
         HippsDimes.fit_gaussian_noise_covariance_pdhg
-    ).parameters["relative_tolerance"]
+    ).parameters
 
-    assert parameter.default == 1e-5
+    assert parameters["relative_tolerance"].default == 1e-5
+    assert parameters["dual_initialization"].default == "residual"
 
 
 @pytest.mark.parametrize(
@@ -130,15 +122,10 @@ def test_direct_b_fista_is_module_only():
 
 
 def test_hybrid_defaults_to_fixed_production_handoff():
-    signature = inspect.signature(
-        HippsDimes.fit_gaussian_noise_covariance_hybrid
-    )
+    signature = inspect.signature(HippsDimes.fit_gaussian_noise_covariance_hybrid)
 
     assert signature.parameters["relative_tolerance"].default == 1e-5
-    assert (
-        signature.parameters["handoff_relative_tolerance"].default
-        == 1e-2
-    )
+    assert signature.parameters["handoff_relative_tolerance"].default == 1e-2
 
 
 def test_distance_operator_and_adjoint_are_exact_duals():
@@ -153,13 +140,8 @@ def test_distance_operator_and_adjoint_are_exact_duals():
     matrix = pdhg._center(0.5 * (matrix + matrix.T), np)
     dual = rng.normal(size=len(pair_i))
 
-    left = np.dot(
-        pdhg._distance_operator(matrix, pair_i, pair_j, np), dual
-    )
-    right = np.sum(
-        matrix
-        * pdhg._distance_adjoint(dual, n, pair_i, pair_j, np)
-    )
+    left = np.dot(pdhg._distance_operator(matrix, pair_i, pair_j, np), dual)
+    right = np.sum(matrix * pdhg._distance_adjoint(dual, n, pair_i, pair_j, np))
     assert left == pytest.approx(right, rel=1e-13, abs=1e-13)
 
 
@@ -176,21 +158,17 @@ def test_weighted_distance_operator_and_adjoint_are_exact_duals():
     dual = rng.normal(size=len(pair_i))
 
     left = np.dot(
-        pdhg._weighted_distance_operator(
-            matrix, inverse_std, pair_i, pair_j, np
-        ),
+        pdhg._weighted_distance_operator(matrix, inverse_std, pair_i, pair_j, np),
         dual,
     )
     right = np.sum(
         matrix
-        * pdhg._weighted_distance_adjoint(
-            dual, inverse_std, n, pair_i, pair_j, np
-        )
+        * pdhg._weighted_distance_adjoint(dual, inverse_std, n, pair_i, pair_j, np)
     )
     assert left == pytest.approx(right, rel=1e-13, abs=1e-13)
 
 
-def test_weighted_operator_norm_estimate_is_safe_on_small_system():
+def test_weighted_operator_norm_certificate_is_safe_on_small_system():
     rng = np.random.default_rng(20260829)
     n = 5
     pair_i, pair_j = np.triu_indices(n, k=1)
@@ -217,9 +195,7 @@ def test_weighted_operator_norm_estimate_is_safe_on_small_system():
             )
     design = np.column_stack(columns)
     exact = float(np.linalg.eigvalsh(design.T @ design)[-1])
-    initial = basis @ np.diag(np.linspace(1.0, 2.0, n_modes)) @ basis.T
-    estimated, info = pdhg._estimate_weighted_operator_norm_squared(
-        initial,
+    safe_bound, info = pdhg._certify_weighted_operator_norm_squared(
         inverse_std,
         n,
         pair_i,
@@ -228,10 +204,90 @@ def test_weighted_operator_norm_estimate_is_safe_on_small_system():
         max_iterations=80,
         relative_tolerance=1e-10,
         safety_factor=1.05,
+        phase="pdhg",
     )
 
-    assert info["rayleigh_quotient"] == pytest.approx(exact, rel=2e-7)
-    assert exact < estimated < 1.08 * exact
+    assert info["method"] == "edge_space_collatz"
+    assert info["bound_tolerance_reached"]
+    assert info["lower_bound"] <= exact <= info["certified_upper_bound"]
+    assert info["certified_upper_bound"] == pytest.approx(exact, rel=2e-7)
+    assert safe_bound == pytest.approx(1.05 * info["certified_upper_bound"])
+
+
+def test_weighted_operator_norm_certificate_handles_adversarial_weights():
+    """The certified bound must protect PDHG on a connected weighted graph."""
+    n = 6
+    pair_i = np.array([0, 1, 2, 3, 4], dtype=np.int64)
+    pair_j = np.array([1, 2, 3, 4, 5], dtype=np.int64)
+    inverse_std = np.sqrt(np.array([1.3, 1e-8, 1.0, 1e-8, 1e-8]))
+    basis = numerics._centered_orthonormal_basis(n)
+    columns = []
+    for i in range(n - 1):
+        for j in range(i, n - 1):
+            internal = np.zeros((n - 1, n - 1), dtype=float)
+            if i == j:
+                internal[i, j] = 1.0
+            else:
+                internal[i, j] = 1.0 / np.sqrt(2.0)
+                internal[j, i] = 1.0 / np.sqrt(2.0)
+            columns.append(
+                pdhg._weighted_distance_operator(
+                    basis @ internal @ basis.T,
+                    inverse_std,
+                    pair_i,
+                    pair_j,
+                    np,
+                )
+            )
+    design = np.column_stack(columns)
+    exact = float(np.linalg.eigvalsh(design.T @ design)[-1])
+
+    safe_bound, info = pdhg._certify_weighted_operator_norm_squared(
+        inverse_std,
+        n,
+        pair_i,
+        pair_j,
+        np,
+        max_iterations=25,
+        relative_tolerance=1e-4,
+        safety_factor=1.10,
+        phase="pdhg",
+    )
+
+    assert exact <= info["certified_upper_bound"]
+    assert 0.95**2 * exact / safe_bound < 1.0
+
+
+def test_covariance_rejects_disconnected_observation_graph():
+    target = np.full((4, 4), np.nan)
+    np.fill_diagonal(target, 0.0)
+    target[0, 1] = target[1, 0] = 1.0
+    target[2, 3] = target[3, 2] = 1.0
+
+    with pytest.raises(
+        ValueError,
+        match=r"must be connected; found 2 components with sizes \[2, 2\]",
+    ):
+        HippsDimes.fit_gaussian_noise_covariance_pdhg(
+            target,
+            noise_variance=0.1,
+        )
+
+
+def test_covariance_accepts_sparse_connected_observation_graph():
+    target = np.full((5, 5), np.nan)
+    np.fill_diagonal(target, 0.0)
+    indices = np.arange(4)
+    target[indices, indices + 1] = 1.0
+    target[indices + 1, indices] = 1.0
+
+    validated = numerics._validate_gaussian_covariance_inputs(
+        target,
+        noise_variance=0.1,
+        relative_noise_std=None,
+    )
+
+    assert len(validated[1]) == 4
 
 
 def test_inverse_free_eliminated_kkt_matches_explicit_inverse():
@@ -259,9 +315,7 @@ def test_inverse_free_eliminated_kkt_matches_explicit_inverse():
             np,
         )
     )
-    fitted = pdhg._weighted_distance_operator(
-        gram, inverse_std, pair_i, pair_j, np
-    )
+    fitted = pdhg._weighted_distance_operator(gram, inverse_std, pair_i, pair_j, np)
     residuals = pdhg._inverse_free_residuals(
         previous,
         gram,
@@ -279,14 +333,17 @@ def test_inverse_free_eliminated_kkt_matches_explicit_inverse():
     inverse = pdhg._inverse_from_internal_spectrum(
         eigenvalues, eigenvectors, householder, np
     )
-    explicit = pdhg._weighted_distance_adjoint(
-        fitted - whitened_target,
-        inverse_std,
-        n,
-        pair_i,
-        pair_j,
-        np,
-    ) - 1.5 * inverse
+    explicit = (
+        pdhg._weighted_distance_adjoint(
+            fitted - whitened_target,
+            inverse_std,
+            n,
+            pair_i,
+            pair_j,
+            np,
+        )
+        - 1.5 * inverse
+    )
 
     assert np.allclose(
         residuals["eliminated_residual"],
@@ -305,9 +362,7 @@ def test_logdet_proximal_map_is_centered_spd_and_stationary():
     step = 0.17
 
     fitted, _, eigenvalues, eigenvectors = (
-        pdhg._prox_centered_negative_logdet_inverse_free(
-            matrix, step, householder, np
-        )
+        pdhg._prox_centered_negative_logdet_inverse_free(matrix, step, householder, np)
     )
     inverse = pdhg._inverse_from_internal_spectrum(
         eigenvalues, eigenvectors, householder, np
@@ -315,10 +370,7 @@ def test_logdet_proximal_map_is_centered_spd_and_stationary():
 
     assert np.max(np.abs(np.sum(fitted, axis=1))) <= 1e-12
     assert np.min(eigenvalues) > 0.0
-    residual = (
-        (fitted - matrix) / step
-        - pdhg._ENTROPY_COEFFICIENT * inverse
-    )
+    residual = (fitted - matrix) / step - pdhg._ENTROPY_COEFFICIENT * inverse
     assert np.linalg.norm(residual, ord="fro") <= 1e-11
 
 
@@ -327,15 +379,11 @@ def test_logdet_proximal_map_stably_handles_large_negative_eigenvalue():
     eigenvalues = np.array([-1e9, 2.0])
     internal = np.diag(eigenvalues)
     householder = pdhg._householder_vector(n, np)
-    matrix = pdhg._full_centered_from_internal(
-        internal, householder, np
-    )
+    matrix = pdhg._full_centered_from_internal(internal, householder, np)
     step = 1.0
 
     fitted, logdet, updated, eigenvectors = (
-        pdhg._prox_centered_negative_logdet_inverse_free(
-            matrix, step, householder, np
-        )
+        pdhg._prox_centered_negative_logdet_inverse_free(matrix, step, householder, np)
     )
     inverse = pdhg._inverse_from_internal_spectrum(
         updated, eigenvectors, householder, np
@@ -499,38 +547,26 @@ def test_pdhg_small_variance_inconsistent_target_stays_finite(use_gpu):
     assert np.all(np.isfinite(gram))
     assert np.all(np.isfinite(connectivity))
     assert np.all(np.isfinite(info["history"]["objective"]))
-    assert np.all(
-        np.isfinite(info["history"]["gram_condition_number"])
-    )
-    assert np.all(
-        info["history"]["minimum_internal_gram_eigenvalue"] > 0.0
-    )
+    assert np.all(np.isfinite(info["history"]["gram_condition_number"]))
+    assert np.all(info["history"]["minimum_internal_gram_eigenvalue"] > 0.0)
 
 
 def test_pdhg_matches_analytic_two_locus_solution():
     target_value = 2.7
     variance = 0.14
-    target = np.array(
-        [[0.0, target_value], [target_value, 0.0]], dtype=float
+    target = np.array([[0.0, target_value], [target_value, 0.0]], dtype=float)
+
+    fitted, gram, connectivity, info = HippsDimes.fit_gaussian_noise_covariance_pdhg(
+        target,
+        variance,
+        max_iterations=500,
+        relative_tolerance=1e-10,
+        absolute_tolerance=1e-12,
     )
 
-    fitted, gram, connectivity, info = (
-        HippsDimes.fit_gaussian_noise_covariance_pdhg(
-            target,
-            variance,
-            max_iterations=500,
-            relative_tolerance=1e-10,
-            absolute_tolerance=1e-12,
-        )
-    )
-
-    expected_distance = 0.5 * (
-        target_value + np.sqrt(target_value**2 + 6.0 * variance)
-    )
+    expected_distance = 0.5 * (target_value + np.sqrt(target_value**2 + 6.0 * variance))
     assert info["converged"]
-    assert fitted[0, 1] == pytest.approx(
-        expected_distance, rel=1e-9, abs=1e-10
-    )
+    assert fitted[0, 1] == pytest.approx(expected_distance, rel=1e-9, abs=1e-10)
     assert np.max(np.abs(np.sum(gram, axis=1))) <= 1e-12
     assert np.max(np.abs(np.sum(connectivity, axis=1))) <= 1e-12
     assert fitted[0, 1] - target_value == pytest.approx(
@@ -552,14 +588,12 @@ def test_pdhg_and_hybrid_reach_same_small_system_optimum():
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
     )
-    fitted, gram, connectivity, info = (
-        HippsDimes.fit_gaussian_noise_covariance_pdhg(
-            target,
-            relative_noise_std=relative_std,
-            max_iterations=2000,
-            relative_tolerance=1e-8,
-            absolute_tolerance=1e-10,
-        )
+    fitted, gram, connectivity, info = HippsDimes.fit_gaussian_noise_covariance_pdhg(
+        target,
+        relative_noise_std=relative_std,
+        max_iterations=2000,
+        relative_tolerance=1e-8,
+        absolute_tolerance=1e-10,
     )
 
     assert reference[3]["converged"]
@@ -571,9 +605,7 @@ def test_pdhg_and_hybrid_reach_same_small_system_optimum():
     assert info["pdhg"]["weighted_residual_balancing"]
     assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
     assert np.allclose(gram, reference[1], rtol=3e-6, atol=2e-7)
-    assert np.allclose(
-        connectivity, reference[2], rtol=2e-6, atol=2e-7
-    )
+    assert np.allclose(connectivity, reference[2], rtol=2e-6, atol=2e-7)
     assert info["relative_stationarity_residual"] <= 1e-7
     assert np.all(np.isfinite(info["history"]["objective"]))
     assert len(info["history"]["objective"]) == info["iterations"]
@@ -621,9 +653,7 @@ def test_pdhg_does_not_reconstruct_inverse_at_every_iteration():
     assert info["inverse_reconstruction_count"] == 4
     assert not info["inverse_reconstructed_each_iteration"]
     assert len(info["history"]["iteration"]) == 8
-    assert np.isfinite(
-        info["history"]["relative_eliminated_kkt_residual"]
-    ).all()
+    assert np.isfinite(info["history"]["relative_eliminated_kkt_residual"]).all()
 
 
 def test_pdhg_independent_certificate_controls_converged(monkeypatch):
@@ -685,12 +715,10 @@ def test_hybrid_hands_off_to_fista_and_matches_cov_optimum():
         relative_tolerance=1e-10,
         absolute_tolerance=1e-12,
     )
-    fitted, gram, connectivity, info = (
-        HippsDimes.fit_gaussian_noise_covariance_hybrid(
-            target,
-            variance,
-            max_iterations=500,
-        )
+    fitted, gram, connectivity, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target,
+        variance,
+        max_iterations=500,
     )
 
     assert reference[3]["converged"]
@@ -705,19 +733,16 @@ def test_hybrid_hands_off_to_fista_and_matches_cov_optimum():
     assert info["phase_iterations"]["pdhg"] > 0
     assert info["phase_iterations"]["fista"] > 0
     assert sum(info["phase_iterations"].values()) == info["iterations"]
+    assert "fista_weighted_operator_norm" not in info
     assert info["relative_eliminated_kkt_residual"] <= 1e-5
     assert info["independent_kkt_recomputed_from_returned_gram"]
     assert np.allclose(fitted, reference[0], rtol=2e-7, atol=2e-8)
     assert np.allclose(gram, reference[1], rtol=3e-6, atol=2e-7)
-    assert np.allclose(
-        connectivity, reference[2], rtol=2e-6, atol=2e-7
-    )
+    assert np.allclose(connectivity, reference[2], rtol=2e-6, atol=2e-7)
 
     history = info["history"]
     assert len(history["iteration"]) == info["iterations"]
-    assert np.array_equal(
-        history["iteration"], np.arange(1, info["iterations"] + 1)
-    )
+    assert np.array_equal(history["iteration"], np.arange(1, info["iterations"] + 1))
     assert set(history["phase"]) == {"pdhg", "fista"}
     assert history["phase"][-1] == "fista"
     assert np.all(np.isfinite(history["objective"]))
@@ -756,6 +781,33 @@ def test_hybrid_handoff_does_not_wait_for_split_residuals(monkeypatch):
     assert info["history"]["relative_dual_kkt_residual"][pdhg_end] == 1.0
 
 
+def test_hybrid_reuses_phase_certificates(monkeypatch):
+    target = _rouse_squared_distance_target(6)
+    original = pdhg._independent_eliminated_kkt_residuals
+    certificate_calls = 0
+
+    def count_certificates(*args, **kwargs):
+        nonlocal certificate_calls
+        certificate_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pdhg,
+        "_independent_eliminated_kkt_residuals",
+        count_certificates,
+    )
+
+    _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target,
+        0.1,
+        max_iterations=500,
+    )
+
+    assert info["converged"]
+    assert info["phase_iterations"]["fista"] > 0
+    assert certificate_calls == 2
+
+
 def test_hybrid_rejects_handoff_stricter_than_final_tolerance():
     target = _rouse_squared_distance_target(4)
 
@@ -784,6 +836,43 @@ def test_hybrid_reports_when_total_budget_ends_before_handoff():
     assert info["iterations"] == 1
 
 
+def test_hybrid_accepts_final_certificate_at_iteration_budget():
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+        target,
+        0.1,
+        max_iterations=1,
+        relative_tolerance=1e-12,
+        handoff_relative_tolerance=1e-2,
+    )
+
+    assert info["converged"]
+    assert info["independent_kkt_converged"]
+    assert info["status"] == "optimality_tolerance"
+    assert info["phase_iterations"] == {"pdhg": 1, "fista": 0}
+    assert info["relative_eliminated_kkt_residual"] <= 1e-12
+
+
+def test_hybrid_distinguishes_handoff_from_final_tolerance_at_budget():
+    target = _rouse_squared_distance_target(6)
+
+    with pytest.warns(RuntimeWarning, match="iteration_budget_exhausted_at_handoff"):
+        _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_hybrid(
+            target,
+            0.1,
+            max_iterations=1,
+            relative_tolerance=1e-12,
+            absolute_tolerance=1e-15,
+            handoff_relative_tolerance=10.0,
+        )
+
+    assert info["handoff"]["reached"]
+    assert not info["converged"]
+    assert not info["independent_kkt_converged"]
+    assert info["status"] == "iteration_budget_exhausted_at_handoff"
+
+
 def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     """Protect the COV objective with an experimental chromosome fixture."""
     metadata, contact, target, gram = _load_real_chromosome_case()
@@ -803,18 +892,10 @@ def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     zero_index = int(np.argmin(np.abs(eigenvalues)))
     internal_eigenvalues = np.delete(eigenvalues, zero_index)
     diagonal = np.diag(gram)
-    fitted_pairs = (
-        diagonal[pair_i]
-        + diagonal[pair_j]
-        - 2.0 * gram[pair_i, pair_j]
-    )
+    fitted_pairs = diagonal[pair_i] + diagonal[pair_j] - 2.0 * gram[pair_i, pair_j]
     objective = -1.5 * np.sum(np.log(internal_eigenvalues))
-    objective += 0.5 * np.sum(
-        np.square(fitted_pairs - target_pairs) / pair_variance
-    )
-    relative_kkt = _independent_relative_kkt(
-        target, gram, pair_variance
-    )
+    objective += 0.5 * np.sum(np.square(fitted_pairs - target_pairs) / pair_variance)
+    relative_kkt = _independent_relative_kkt(target, gram, pair_variance)
     expected = metadata["reference_solution"]
 
     assert contact_sha256 == metadata["files"]["contact_map_sha256"]
@@ -825,9 +906,7 @@ def test_real_n400_chromosome_reference_satisfies_cov_objective_and_kkt():
     assert n * (n - 1) // 2 - len(target_pairs) == 1660
     assert np.max(np.abs(np.sum(gram, axis=1))) <= 1e-10
     assert np.min(internal_eigenvalues) > 0.0
-    assert objective == pytest.approx(
-        expected["objective"], rel=1e-11, abs=1e-6
-    )
+    assert objective == pytest.approx(expected["objective"], rel=1e-11, abs=1e-6)
     assert objective == pytest.approx(
         expected["trusted_reference_objective"], rel=1e-11, abs=1e-6
     )
@@ -865,6 +944,7 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
         iteration=solver["maximum_iterations"],
         use_gpu=True,
         ignore_missing_data=True,
+        repair_fully_missing_loci=True,
         not_normalize=True,
         no_log=True,
         no_xyzs=True,
@@ -890,9 +970,7 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
     assert info["phase_iterations"]["fista"] > 0
     assert info["independent_kkt_converged"]
     assert info["iterations"] <= solver["maximum_iterations"]
-    assert info["relative_eliminated_kkt_residual"] <= (
-        solver["relative_tolerance"]
-    )
+    assert info["relative_eliminated_kkt_residual"] <= (solver["relative_tolerance"])
     assert info["objective"] == pytest.approx(
         expected["trusted_reference_objective"], rel=1e-8, abs=1e-6
     )
@@ -900,14 +978,10 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
     fitted_gram = results["gram_matrix"]
     fitted_connectivity = results["connectivity_matrix"]
     fitted_distance = results["dmap_final"]
-    fitted_squared_distance = (
-        (3.0 * np.pi / 8.0) * np.square(fitted_distance)
-    )
+    fitted_squared_distance = (3.0 * np.pi / 8.0) * np.square(fitted_distance)
     reference_diagonal = np.diag(reference_gram)
     reference_squared_distance = (
-        reference_diagonal[:, None]
-        + reference_diagonal
-        - 2.0 * reference_gram
+        reference_diagonal[:, None] + reference_diagonal - 2.0 * reference_gram
     )
     reference_distance = np.sqrt(
         np.maximum(0.0, 8.0 * reference_squared_distance / (3.0 * np.pi))
@@ -922,23 +996,17 @@ def test_default_hybrid_converges_from_rouse_on_real_n400_contact_map():
     def relative_l2(observed, reference):
         return np.linalg.norm(observed - reference) / np.linalg.norm(reference)
 
-    assert relative_l2(
-        fitted_squared_distance, reference_squared_distance
-    ) <= 2e-5
+    assert relative_l2(fitted_squared_distance, reference_squared_distance) <= 2e-5
     assert relative_l2(fitted_distance, reference_distance) <= 1e-5
     assert relative_l2(fitted_gram, reference_gram) <= 5e-5
-    assert relative_l2(
-        fitted_connectivity, reference_connectivity
-    ) <= 3e-5
+    assert relative_l2(fitted_connectivity, reference_connectivity) <= 3e-5
 
     fitted_eigenvalues = np.linalg.eigvalsh(fitted_gram)
     zero_index = int(np.argmin(np.abs(fitted_eigenvalues)))
     assert np.min(np.delete(fitted_eigenvalues, zero_index)) > 0.0
     assert np.max(np.abs(fitted_gram - fitted_gram.T)) <= 1e-10
     assert np.max(np.abs(np.sum(fitted_gram, axis=1))) <= 1e-10
-    assert np.max(
-        np.abs(fitted_connectivity - fitted_connectivity.T)
-    ) <= 1e-10
+    assert np.max(np.abs(fitted_connectivity - fitted_connectivity.T)) <= 1e-10
     assert np.max(np.abs(np.sum(fitted_connectivity, axis=1))) <= 1e-10
     assert info["wall_seconds"] > 0.0
     assert info["phase_wall_seconds"]["pdhg"] > 0.0

@@ -19,6 +19,7 @@ The supported user-facing entry surfaces today are:
 - `hipps_dimes/api.py`: workflow coordinator; input validation/loading, missing-data handling, solver dispatch, result packaging, artifact writing
 - `hipps_dimes/models.py`: optimization engine plus the `Dynamics` class and progress-callback plumbing
 - `hipps_dimes/numerics.py`: numerical kernels, matrix transforms, ensemble sampling, dynamics/mechanics math, optional GPU helpers
+- `hipps_dimes/covariance_pdhg.py`: variance-whitened PDHG and the hybrid PDHG-to-FISTA implementation for noise-aware COV
 - `hipps_dimes/core.py`: compatibility aggregation module re-exporting numerics, models, and API surfaces
 - `hipps_dimes/cli.py`: Click/rich-click CLI, option parsing, and CLI-only normalization such as `save_steps`
 - `hipps_dimes/__init__.py`: package public API re-export
@@ -27,6 +28,7 @@ The supported user-facing entry surfaces today are:
 - `tests/test_basic.py`: import compatibility and smoke-level numerical regression tests
 - `tests/test_dynamics.py`: `Dynamics` lifecycle, progress callbacks, resume/reset behavior, and trajectory persistence
 - `tests/test_entropy_and_api.py`: `run_optimization(...)`, CLI behavior, file outputs, save-pickle/save-steps paths, and missing-data handling
+- `tests/test_covariance_pdhg.py`: COV objective, operator bound, KKT certificates, hybrid handoff, CPU/GPU parity, and real `N=400` regression coverage
 - `.github/workflows/ci.yml`: test, lint, and build automation
 - `pyproject.toml`: packaging metadata, dependency declarations, tool config, and pytest defaults
 - `Makefile`: local convenience commands for install, test, lint, format, build, and publish
@@ -41,8 +43,8 @@ The supported user-facing entry surfaces today are:
 
 1. `HippsDimes ...` resolves to `hipps_dimes.cli:main`.
 2. `cli.py` parses flags and positional arguments, normalizes CLI-only values, and calls `run_optimization(...)`.
-3. `api.py` validates inputs, loads matrices, handles missing-data repair/removal, and constructs `Optimize(...)`.
-4. `models.py` runs the selected solver (`IS`, `GD`, or `DI`).
+3. `api.py` validates inputs, loads matrices, and applies any explicit missing-data repair/removal policy.
+4. `models.py` runs `IS`, `GD`, or `DI`; `covariance_pdhg.py` runs `COV`.
 5. `api.py` builds the result dictionary, writes requested artifacts, and optionally generates XYZ ensembles.
 
 ### Library path
@@ -84,22 +86,25 @@ Current high-level cases include:
 - `cooler`
 - `.hic`
 - direct NumPy arrays passed as `input_matrix`
-- optional missing-data repair/removal when `ignore_missing_data` is enabled
+- explicit missing-data repair or removal when a fully missing locus is found and `ignore_missing_data` is enabled
 
 ### Change optimization behavior
 
 Touch:
 
-- `hipps_dimes/models.py`
+- `hipps_dimes/covariance_pdhg.py` for COV
+- `hipps_dimes/models.py` for IS, GD, or DI
 - `hipps_dimes/api.py` if the result contract, progress reporting, or orchestration changes
 - `hipps_dimes/numerics.py` if the change affects kernels or objective calculations
-- `tests/test_entropy_and_api.py`
+- `tests/test_covariance_pdhg.py` for solver behavior
+- `tests/test_entropy_and_api.py` for the public API or CLI contract
 
 Main solver surface:
 
 - `Optimize.run(...)`
-- `Optimize.run_noisy(...)`
 - internal update methods in `Optimize`
+- `fit_gaussian_noise_covariance_pdhg(...)`
+- `fit_gaussian_noise_covariance_hybrid(...)`
 
 ### Change output files or returned results
 
@@ -199,6 +204,17 @@ Use this file when touching:
 - missing-data repair/removal and related metadata
 - entropy calculation
 
+### `tests/test_covariance_pdhg.py`
+
+Use this file when touching:
+
+- the calibrated Gaussian COV objective
+- weighted distance operators and their certified norm bound
+- PDHG or direct-Gram FISTA updates
+- hybrid handoff and shared iteration-budget semantics
+- returned-iterate and independent KKT certification
+- COV CPU/GPU behavior and the retained real `N=400` fixture
+
 ## Practical Commands
 
 Run the full test suite without requiring `pytest-cov` locally:
@@ -212,6 +228,7 @@ Run the most relevant focused test files:
 ```bash
 pytest -q -o addopts='' tests/test_basic.py tests/test_dynamics.py
 pytest -q -o addopts='' tests/test_entropy_and_api.py
+pytest -q -o addopts='' tests/test_covariance_pdhg.py
 ```
 
 Install the package in editable mode:
@@ -229,14 +246,15 @@ pip install -e ".[dev]"
 ## Known Repo Quirks
 
 - `pyproject.toml` hardcodes coverage-related `pytest` addopts. If `pytest-cov` is not installed, plain `pytest` fails unless you override `addopts`.
-- The current `Makefile` and CI lint job only target `HippsDimes.py`, not the full `hipps_dimes/` package. Package modules can therefore drift from lint coverage unless those commands are expanded.
+- The current `Makefile` only targets `HippsDimes.py`. CI also formats and lints `hipps_dimes/covariance_pdhg.py` and `tests/test_covariance_pdhg.py`, but it does not yet lint every legacy package module.
 - The historical `HippsDimes` import path is still part of the supported surface and is covered by tests.
-- `README.md` documents the main CLI/API workflow, but newer programmatic features such as `save_pickle`, `save_steps`, missing-data locus removal, and progress callbacks are easier to verify from `api.py` and `tests/test_entropy_and_api.py`.
+- `README.md`, `doc/NOTE_ON_NOISE.md`, and `doc/COV_PDHG.md` define the supported COV and missing-data contract; verify details against `api.py`, `covariance_pdhg.py`, and their matching tests.
 
 ## Safe Mental Model
 
 - `api.py` is the workflow and output-contract owner.
 - `models.py` owns iterative optimization state and simulation lifecycle behavior.
+- `covariance_pdhg.py` owns noise-aware COV solver behavior.
 - `numerics.py` owns scientific kernels and matrix math.
 - `cli.py` should stay thin and mostly parse/forward.
 - `core.py`, `__init__.py`, and `HippsDimes.py` are compatibility/export layers and should contain very little business logic.

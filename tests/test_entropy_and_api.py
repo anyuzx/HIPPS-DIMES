@@ -11,6 +11,7 @@ from click.testing import CliRunner
 
 import HippsDimes
 import hipps_dimes.api as api
+import hipps_dimes.covariance_pdhg as covariance_pdhg
 import hipps_dimes.numerics as numerics
 from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
 from hipps_dimes.cli import main as cli_main
@@ -417,7 +418,6 @@ def test_run_optimization_progress_callback_receives_structured_updates():
             [
                 "COV operator norm",
                 "COV PDHG optimization",
-                "COV operator norm",
                 "COV FISTA optimization",
             ],
             {
@@ -812,6 +812,13 @@ def test_cli_help_exposes_cov_solver_and_noise_contract():
     assert "covariance_relative_tolerance" in parameter_names
     assert "covariance_absolute_tolerance" in parameter_names
     assert "covariance_handoff_relative_tolerance" in parameter_names
+    assert "repair_fully_missing_loci" in parameter_names
+    relative_noise_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "gaussian_noise_relative_std"
+    )
+    assert relative_noise_parameter.type.min_open
     optimizer_parameter = next(
         parameter
         for parameter in cli_main.params
@@ -972,6 +979,34 @@ def test_repair_fully_missing_contact_locus_repairs_only_nearest_neighbors():
     assert repaired_summary["fully_missing_loci"] == []
 
 
+@pytest.mark.parametrize("matrix_kind", ["dmap", "ddmap"])
+def test_repair_fully_missing_distance_locus_excludes_diagonal_source(
+    matrix_kind,
+):
+    """Distance repair must not copy the zero diagonal off diagonal."""
+    dmap = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    target = dmap if matrix_kind == "dmap" else np.square(dmap)
+    target[2, :] = np.nan
+    target[:, 2] = np.nan
+    target[2, 2] = 0.0
+    summary = _summarize_missing_data(target, matrix_kind)
+
+    repaired, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+        target,
+        matrix_kind,
+        summary["missing_mask"],
+        summary["fully_missing_loci"],
+    )
+
+    assert repair_info["nearest_neighbor_repaired_pairs"] == [(1, 2), (2, 3)]
+    assert repaired[1, 2] > 0.0
+    assert repaired[2, 3] > 0.0
+    assert np.isnan(repaired[0, 2])
+    assert np.isnan(repaired[2, 4])
+
+
 def test_run_optimization_records_missing_data_analysis_and_repair():
     """run_optimization should record missing-data analysis and nearest-neighbor repairs."""
     A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
@@ -986,6 +1021,7 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
         input_type="cmap",
         input_format="text",
         ignore_missing_data=True,
+        repair_fully_missing_loci=True,
         method="IS",
         iteration=5,
         learning_rate=5.0,
@@ -1004,9 +1040,148 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
     assert run_parameters["missing_pairs"] == 4
     assert np.isclose(float(run_parameters["missing_pair_fraction"]), 0.4)
     assert json.loads(run_parameters["fully_missing_loci"]) == [2]
+    assert bool(run_parameters["repair_fully_missing_loci"]) is True
     assert run_parameters["nearest_neighbor_repair_count"] == 2
     assert json.loads(run_parameters["nearest_neighbor_repaired_pairs"]) == [[1, 2], [2, 3]]
     assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
+
+
+def test_cov_repair_is_explicit_and_enters_final_noise_model():
+    target = HippsDimes.a2cmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0),
+        rc=1.0,
+    )
+    target[2, :] = 0.0
+    target[:, 2] = 0.0
+    target[2, 2] = 1.0
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="cmap",
+        input_format="text",
+        method="COV",
+        gaussian_noise_relative_std=0.1,
+        ignore_missing_data=True,
+        repair_fully_missing_loci=True,
+        iteration=500,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    assert info["observed_pair_count"] == 8
+    assert parameters["nearest_neighbor_repair_count"] == 2
+    assert bool(parameters["repair_fully_missing_loci"]) is True
+
+
+def test_cov_returned_iterate_is_consistent_across_reports(
+    monkeypatch,
+    capsys,
+):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    )
+    original = covariance_pdhg._inverse_free_residuals
+    call_count = 0
+
+    def prefer_first_runtime_iterate(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        residuals = dict(original(*args, **kwargs))
+        residuals["eliminated_relative"] = float(call_count - 1)
+        return residuals
+
+    monkeypatch.setattr(
+        covariance_pdhg,
+        "_inverse_free_residuals",
+        prefer_first_runtime_iterate,
+    )
+    with pytest.warns(RuntimeWarning, match="without satisfying"):
+        results = HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            method="COV",
+            covariance_optimizer="pdhg",
+            gaussian_noise_variance=0.1,
+            covariance_relative_tolerance=0.0,
+            covariance_absolute_tolerance=1e-30,
+            iteration=3,
+            no_xyzs=True,
+            verbose=True,
+            show_progress=False,
+        )
+
+    info = results["covariance_optimization"]
+    series = results["iteration_series"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    output = capsys.readouterr().out
+
+    assert info["iterations"] == 3
+    assert info["returned_iteration"] == 1
+    assert series["is_returned_iterate"].sum() == 1
+    assert bool(series.loc[0, "is_returned_iterate"])
+    assert info["loss"] == pytest.approx(series.loc[0, "loss"])
+    assert info["entropy"] == pytest.approx(series.loc[0, "entropy"])
+    assert info["objective"] == pytest.approx(series.loc[0, "objective"])
+    assert parameters["covariance_iterations_executed"] == 3
+    assert parameters["covariance_returned_iteration"] == 1
+    assert parameters["covariance_returned_loss"] == pytest.approx(info["loss"])
+    assert "Returned loss at iteration 1" in output
+
+
+def test_cli_cov_nonconvergence_exits_nonzero_after_writing_outputs(tmp_path):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(6, 1.0)
+    )
+    input_path = tmp_path / "target.npy"
+    output_prefix = tmp_path / "nonconverged"
+    np.save(input_path, target)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(input_path),
+            str(output_prefix),
+            "--input-type",
+            "dmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "COV",
+            "--gaussian-noise-variance",
+            "0.1",
+            "--iteration",
+            "1",
+            "--no-xyzs",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "COV did not converge" in result.output
+    assert "nonconverged partial results" in result.output
+    assert (tmp_path / "nonconverged_run_parameters.csv").exists()
+    assert (tmp_path / "nonconverged_iteration_series.csv").exists()
+    assert (tmp_path / "nonconverged_dmap_final.txt").exists()
+    assert (tmp_path / "nonconverged_connectivity_matrix.txt").exists()
+    parameters = pd.read_csv(
+        tmp_path / "nonconverged_run_parameters.csv"
+    ).set_index("parameter")["value"]
+    assert parameters["covariance_converged"] == "False"
 
 
 def test_remove_fully_missing_loci_requires_ignore_missing_data():
@@ -1020,6 +1195,65 @@ def test_remove_fully_missing_loci_requires_ignore_missing_data():
             input_matrix=dmap_target,
             input_type="dmap",
             input_format="text",
+            remove_fully_missing_loci=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_repair_fully_missing_loci_requires_ignore_missing_data():
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="repair_fully_missing_loci=True requires ignore_missing_data=True",
+    ):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            repair_fully_missing_loci=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_fully_missing_locus_policy_must_be_explicit():
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    target[2, :] = np.nan
+    target[:, 2] = np.nan
+    target[2, 2] = 0.0
+
+    with pytest.raises(ValueError, match="explicitly set"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            ignore_missing_data=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_fully_missing_locus_repair_and_removal_are_mutually_exclusive():
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            ignore_missing_data=True,
+            repair_fully_missing_loci=True,
             remove_fully_missing_loci=True,
             no_xyzs=True,
             verbose=False,

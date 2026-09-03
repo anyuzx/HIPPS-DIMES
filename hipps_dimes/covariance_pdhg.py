@@ -1585,7 +1585,7 @@ def fit_gaussian_noise_covariance_pdhg(
             message = "variance-whitened PDHG eliminated KKT tolerance reached"
             break
 
-    if return_best and best is not None:
+    if return_best and not stopping_criterion_reached and best is not None:
         (
             _,
             gram,

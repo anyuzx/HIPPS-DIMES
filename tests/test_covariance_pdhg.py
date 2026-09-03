@@ -883,7 +883,6 @@ def test_absolute_kkt_tolerance_uses_physical_residual_units(solver_name):
     }
     if solver_name == "pdhg":
         solver = HippsDimes.fit_gaussian_noise_covariance_pdhg
-        kwargs["return_best"] = False
     else:
         solver = pdhg.fit_gaussian_noise_covariance_fista
         centering = np.eye(6) - np.ones((6, 6)) / 6.0
@@ -893,6 +892,27 @@ def test_absolute_kkt_tolerance_uses_physical_residual_units(solver_name):
 
     assert info["distance_scale"] < 1.0
     assert info["converged"]
+    assert info["termination_internal_kkt_converged"]
+    assert info["independent_kkt_converged"]
+    assert info["stationarity_residual_norm"] <= absolute_tolerance
+
+
+def test_pdhg_returns_combined_kkt_stopping_iterate():
+    target = _rouse_squared_distance_target(5)
+    target[0, 4] *= 0.1
+    target[4, 0] = target[0, 4]
+    absolute_tolerance = 16.0
+
+    _, _, _, info = HippsDimes.fit_gaussian_noise_covariance_pdhg(
+        target,
+        relative_noise_std=0.2,
+        max_iterations=100,
+        relative_tolerance=0.0,
+        absolute_tolerance=absolute_tolerance,
+    )
+
+    assert info["converged"]
+    assert info["returned_iteration"] == info["iterations"]
     assert info["termination_internal_kkt_converged"]
     assert info["independent_kkt_converged"]
     assert info["stationarity_residual_norm"] <= absolute_tolerance

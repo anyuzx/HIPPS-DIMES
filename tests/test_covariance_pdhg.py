@@ -837,6 +837,40 @@ def test_hybrid_rejects_handoff_stricter_than_final_tolerance():
         )
 
 
+@pytest.mark.parametrize(
+    "solver_name",
+    ["pdhg", "hybrid", "fista"],
+)
+@pytest.mark.parametrize(
+    "tolerance_name",
+    ["relative_tolerance", "absolute_tolerance"],
+)
+@pytest.mark.parametrize("nonfinite_value", [np.nan, np.inf, -np.inf])
+def test_covariance_solvers_reject_nonfinite_tolerances(
+    solver_name, tolerance_name, nonfinite_value
+):
+    target = _rouse_squared_distance_target(4)
+    kwargs = {
+        "noise_variance": 0.1,
+        "max_iterations": 1,
+        tolerance_name: nonfinite_value,
+    }
+    if solver_name == "pdhg":
+        solver = HippsDimes.fit_gaussian_noise_covariance_pdhg
+    elif solver_name == "hybrid":
+        solver = HippsDimes.fit_gaussian_noise_covariance_hybrid
+    else:
+        solver = pdhg.fit_gaussian_noise_covariance_fista
+        centering = np.eye(4) - np.ones((4, 4)) / 4.0
+        kwargs["initial_gram"] = -0.5 * centering @ target @ centering
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{tolerance_name} must be a nonnegative finite scalar",
+    ):
+        solver(target, **kwargs)
+
+
 def test_hybrid_reports_when_total_budget_ends_before_handoff():
     target = _rouse_squared_distance_target(6)
 

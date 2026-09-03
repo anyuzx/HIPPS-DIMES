@@ -33,6 +33,28 @@ def _scalar(value) -> float:
     return float(value.item()) if hasattr(value, "item") else float(value)
 
 
+def _validate_convergence_tolerances(relative_tolerance, absolute_tolerance):
+    tolerances = {
+        "relative_tolerance": relative_tolerance,
+        "absolute_tolerance": absolute_tolerance,
+    }
+    for name, value in tolerances.items():
+        if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+            raise ValueError(f"{name} must be a nonnegative finite scalar")
+        try:
+            tolerances[name] = float(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must be a nonnegative finite scalar") from error
+        if not np.isfinite(tolerances[name]) or tolerances[name] < 0.0:
+            raise ValueError(f"{name} must be a nonnegative finite scalar")
+    if (
+        tolerances["relative_tolerance"] == 0.0
+        and tolerances["absolute_tolerance"] == 0.0
+    ):
+        raise ValueError("at least one convergence tolerance must be positive")
+    return tolerances["relative_tolerance"], tolerances["absolute_tolerance"]
+
+
 def _norm(value, xp) -> float:
     return _scalar(xp.sqrt(xp.sum(value * value)))
 
@@ -529,10 +551,9 @@ def fit_gaussian_noise_covariance_fista(
     )
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")
-    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
-        raise ValueError("convergence tolerances must be nonnegative")
-    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
-        raise ValueError("at least one convergence tolerance must be positive")
+    relative_tolerance, absolute_tolerance = _validate_convergence_tolerances(
+        relative_tolerance, absolute_tolerance
+    )
     if not np.isfinite(backtracking_factor) or not (0.0 < backtracking_factor < 1.0):
         raise ValueError("backtracking_factor must lie strictly between zero and one")
     if (
@@ -1158,10 +1179,9 @@ def fit_gaussian_noise_covariance_pdhg(
     )
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")
-    if relative_tolerance < 0.0 or absolute_tolerance < 0.0:
-        raise ValueError("convergence tolerances must be nonnegative")
-    if relative_tolerance == 0.0 and absolute_tolerance == 0.0:
-        raise ValueError("at least one convergence tolerance must be positive")
+    relative_tolerance, absolute_tolerance = _validate_convergence_tolerances(
+        relative_tolerance, absolute_tolerance
+    )
     if not np.isfinite(theta) or not (0.0 <= theta <= 1.0):
         raise ValueError("theta must lie in [0, 1]")
     if not np.isfinite(step_safety) or not (0.0 < step_safety < 1.0):
@@ -1798,6 +1818,9 @@ def fit_gaussian_noise_covariance_hybrid(
     """
     if not isinstance(max_iterations, (int, np.integer)) or max_iterations <= 0:
         raise ValueError("max_iterations must be a positive integer")
+    relative_tolerance, absolute_tolerance = _validate_convergence_tolerances(
+        relative_tolerance, absolute_tolerance
+    )
     if isinstance(handoff_relative_tolerance, (bool, np.bool_)) or not np.isscalar(
         handoff_relative_tolerance
     ):

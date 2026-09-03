@@ -273,8 +273,9 @@ python -m hipps_dimes observed_ddmap.npy cov_fit \
 An iteration limit is only a budget. A returned COV model is converged only
 when its independently recomputed KKT certificate passes the requested
 tolerance. The command-line program retains requested output files but exits
-with status 1 when that certificate fails; the Python API returns the partial
-result with `results["covariance_optimization"]["converged"] == False`.
+with status 1 when that certificate fails; the Python API emits a
+`RuntimeWarning` and returns the partial result with
+`results["covariance_optimization"]["converged"] == False`.
 
 COV constructs an undirected observation graph from finite, positive
 off-diagonal squared-distance constraints. Every retained locus must belong to

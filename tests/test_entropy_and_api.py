@@ -3,6 +3,8 @@
 import json
 import os
 import pickle
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -19,6 +21,30 @@ from hipps_dimes.api import (
     _summarize_missing_data,
 )
 from hipps_dimes.cli import main as cli_main
+
+
+def test_plain_library_call_surfaces_cov_nonconvergence_warning():
+    """Importing HIPPS-DIMES must not suppress process-wide warnings."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONWARNINGS", None)
+    code = (
+        "import numpy as np, HippsDimes; "
+        "indices = np.arange(5); "
+        "target = 3.0 * np.abs(indices[:, None] - indices[None, :]); "
+        "HippsDimes.fit_gaussian_noise_covariance_pdhg("
+        "target, 0.1, max_iterations=1, relative_tolerance=1e-14, "
+        "absolute_tolerance=1e-15)"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=True,
+    )
+
+    assert "stopped without satisfying the KKT tolerance" in completed.stderr
 
 
 def test_compute_entropy_from_random_connectivity_matrix():

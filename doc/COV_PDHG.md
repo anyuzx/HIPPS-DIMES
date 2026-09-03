@@ -258,7 +258,8 @@ contain an objective value.
 
 When invoked through the CLI, a nonconverged COV run writes the requested
 partial artifacts and then exits with status 1. Library calls return those same
-artifacts and expose the false convergence flag for programmatic handling.
+artifacts, emit a `RuntimeWarning`, and expose the false convergence flag for
+programmatic handling.
 
 ## Scaling evidence
 

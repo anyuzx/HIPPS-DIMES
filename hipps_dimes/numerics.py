@@ -8,14 +8,9 @@ https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 3. Shi, Guang, Sucheol, Shin, and D. Thirumalai. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advance 11 (31), eadx1763
 """
 
-import os
-import sys
-import time
-import warnings
 import itertools
-
-if not sys.warnoptions:
-    warnings.simplefilter("ignore")
+import os
+import time
 
 import numpy as np
 import scipy
@@ -1326,7 +1321,8 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     # (A is generated/updated numerically and we already nan_to_num() in optimization)
     eigvalue, eigvector = np.linalg.eigh(A)
 
-    temp = -1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = -1.0 / eigvalue
 
     temp[temp == -np.inf] = 0.0
     temp[temp == np.inf] = 0.0
@@ -1431,7 +1427,8 @@ def a2dmap_theory_with_force_applied(A, force):
     eigvalue, eigvector = np.linalg.eigh(A)
 
     # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
-    temp = -1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = -1.0 / eigvalue
 
     # Handle infinities and large values (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0
@@ -1959,7 +1956,9 @@ def cmap2dmap(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # and then interpolate the missing data. Any zero contact pair will be interpolated
-    cmap_log = interpolate_missing(np.log10(cmap))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cmap_log = np.log10(cmap)
+    cmap_log = interpolate_missing(cmap_log)
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # lastly, convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
@@ -1970,7 +1969,8 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # unlike cmap2dmap(), this function does not interpolate the missing data. Just leave the missing data as is
-    cmap_log = np.log10(cmap)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cmap_log = np.log10(cmap)
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)

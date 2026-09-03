@@ -596,6 +596,8 @@ def fit_gaussian_noise_covariance_fista(
         distance_scale = float(np.median(target_pairs))
     if not np.isfinite(distance_scale) or distance_scale <= 0.0:
         raise ValueError("distance_scale must be positive and finite")
+    # Normalized stationarity residuals are distance_scale times physical ones.
+    solver_absolute_tolerance = distance_scale * absolute_tolerance
 
     solver_target_cpu = target_pairs / distance_scale
     solver_variance_cpu = pair_variance / (distance_scale * distance_scale)
@@ -748,7 +750,8 @@ def fit_gaussian_noise_covariance_fista(
     restart_count = 0
     backtracking_reductions = 0
     converged = current["stationarity_residual_norm"] <= (
-        absolute_tolerance + relative_tolerance * current["stationarity_residual_scale"]
+        solver_absolute_tolerance
+        + relative_tolerance * current["stationarity_residual_scale"]
     )
     status = "optimality_tolerance" if converged else "max_iterations"
     message = (
@@ -954,7 +957,7 @@ def fit_gaussian_noise_covariance_fista(
             )
 
         converged = current["stationarity_residual_norm"] <= (
-            absolute_tolerance
+            solver_absolute_tolerance
             + relative_tolerance * current["stationarity_residual_scale"]
         )
         if converged:
@@ -1000,7 +1003,8 @@ def fit_gaussian_noise_covariance_fista(
         absolute_tolerance + relative_tolerance * independent_scale
     )
     runtime_converged = current["stationarity_residual_norm"] <= (
-        absolute_tolerance + relative_tolerance * current["stationarity_residual_scale"]
+        solver_absolute_tolerance
+        + relative_tolerance * current["stationarity_residual_scale"]
     )
     converged = bool(runtime_converged and independent_converged)
     if converged:
@@ -1267,6 +1271,8 @@ def fit_gaussian_noise_covariance_pdhg(
         distance_scale = float(np.median(target_pairs))
     if not np.isfinite(distance_scale) or distance_scale <= 0.0:
         raise ValueError("distance_scale must be positive and finite")
+    # Normalized stationarity residuals are distance_scale times physical ones.
+    solver_absolute_tolerance = distance_scale * absolute_tolerance
 
     gram = full_gram / distance_scale
     target = solver_target_pairs / distance_scale
@@ -1570,7 +1576,8 @@ def fit_gaussian_noise_covariance_pdhg(
             )
 
         eliminated_converged = residuals["eliminated_norm"] <= (
-            absolute_tolerance + relative_tolerance * residuals["eliminated_scale"]
+            solver_absolute_tolerance
+            + relative_tolerance * residuals["eliminated_scale"]
         )
         if eliminated_converged:
             stopping_criterion_reached = True

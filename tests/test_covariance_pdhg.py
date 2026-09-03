@@ -871,6 +871,33 @@ def test_covariance_solvers_reject_nonfinite_tolerances(
         solver(target, **kwargs)
 
 
+@pytest.mark.parametrize("solver_name", ["pdhg", "fista"])
+def test_absolute_kkt_tolerance_uses_physical_residual_units(solver_name):
+    target = 0.1 * _rouse_squared_distance_target(6)
+    absolute_tolerance = 1.0
+    kwargs = {
+        "relative_noise_std": 0.1,
+        "max_iterations": 200,
+        "relative_tolerance": 0.0,
+        "absolute_tolerance": absolute_tolerance,
+    }
+    if solver_name == "pdhg":
+        solver = HippsDimes.fit_gaussian_noise_covariance_pdhg
+        kwargs["return_best"] = False
+    else:
+        solver = pdhg.fit_gaussian_noise_covariance_fista
+        centering = np.eye(6) - np.ones((6, 6)) / 6.0
+        kwargs["initial_gram"] = -0.5 * centering @ target @ centering
+
+    _, _, _, info = solver(target, **kwargs)
+
+    assert info["distance_scale"] < 1.0
+    assert info["converged"]
+    assert info["termination_internal_kkt_converged"]
+    assert info["independent_kkt_converged"]
+    assert info["stationarity_residual_norm"] <= absolute_tolerance
+
+
 def test_hybrid_reports_when_total_budget_ends_before_handoff():
     target = _rouse_squared_distance_target(6)
 

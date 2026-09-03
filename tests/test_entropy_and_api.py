@@ -13,7 +13,11 @@ import HippsDimes
 import hipps_dimes.api as api
 import hipps_dimes.covariance_pdhg as covariance_pdhg
 import hipps_dimes.numerics as numerics
-from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
+from hipps_dimes.api import (
+    _handle_missing_data,
+    _repair_fully_missing_loci_nearest_neighbors,
+    _summarize_missing_data,
+)
 from hipps_dimes.cli import main as cli_main
 
 
@@ -597,8 +601,12 @@ def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
     assert parameters["covariance_initialization_resolved"] == "rouse"
 
 
-def test_run_optimization_cov_cmap_rouse_ignores_missing_pairs(tmp_path):
-    """Direct contact input should preserve missing pairs through COV setup."""
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_run_optimization_cov_cmap_missing_pairs_follow_policy(
+    tmp_path,
+    ignore_missing_data,
+):
+    """Direct contact input should apply the selected pair policy before COV."""
     n = 6
     truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
     cmap_target = HippsDimes.a2cmap_theory(truth, rc=1.0)
@@ -616,7 +624,7 @@ def test_run_optimization_cov_cmap_rouse_ignores_missing_pairs(tmp_path):
         method="COV",
         gaussian_noise_relative_std=0.1,
         iteration=300,
-        ignore_missing_data=True,
+        ignore_missing_data=ignore_missing_data,
         not_normalize=True,
         no_xyzs=True,
         verbose=False,
@@ -632,10 +640,15 @@ def test_run_optimization_cov_cmap_rouse_ignores_missing_pairs(tmp_path):
     )
 
     assert info["converged"]
-    assert info["observed_pair_count"] == n * (n - 1) // 2 - len(missing_pairs)
+    expected_missing = len(missing_pairs) if ignore_missing_data else 0
+    assert info["observed_pair_count"] == n * (n - 1) // 2 - expected_missing
     assert info["initialization"]["kind"] == "rouse"
     assert parameters["missing_pairs"] == len(missing_pairs)
-    assert bool(parameters["ignore_missing_data"]) is True
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else len(missing_pairs)
+    )
+    assert parameters["missing_pairs_after_handling"] == expected_missing
+    assert bool(parameters["ignore_missing_data"]) is ignore_missing_data
 
 
 @pytest.mark.skipif(
@@ -1007,6 +1020,100 @@ def test_repair_fully_missing_distance_locus_excludes_diagonal_source(
     assert np.isnan(repaired[2, 4])
 
 
+@pytest.mark.parametrize("matrix_kind", ["cmap", "dmap", "ddmap"])
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_partial_missing_pairs_follow_selected_policy(
+    matrix_kind,
+    ignore_missing_data,
+):
+    """Partial pairs are either interpolated natively or left missing."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    dmap = HippsDimes.a2dmap_theory(connectivity)
+    if matrix_kind == "cmap":
+        target = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+        missing_value = 0.0
+    elif matrix_kind == "dmap":
+        target = dmap
+        missing_value = np.nan
+    else:
+        target = (3.0 * np.pi / 8.0) * np.square(dmap)
+        missing_value = np.nan
+
+    expected_nearest_value = target[0, 3]
+    target = target.copy()
+    target[0, 4] = missing_value
+    target[4, 0] = missing_value
+    analysis = _summarize_missing_data(target, matrix_kind)
+
+    handled = _handle_missing_data(
+        target,
+        matrix_kind,
+        analysis,
+        ignore_missing_data=ignore_missing_data,
+        repair_fully_missing_loci=False,
+        remove_fully_missing_loci=False,
+    )
+
+    if ignore_missing_data:
+        assert analysis["interpolated_missing_pair_count"] == 0
+        assert analysis["missing_pairs_after_handling"] == 1
+        assert _summarize_missing_data(handled, matrix_kind)["missing_pairs"] == 1
+    else:
+        assert analysis["interpolated_missing_pair_count"] == 1
+        assert analysis["missing_pairs_after_handling"] == 0
+        assert _summarize_missing_data(handled, matrix_kind)["missing_pairs"] == 0
+        assert handled[0, 4] == pytest.approx(expected_nearest_value)
+        assert handled[4, 0] == pytest.approx(expected_nearest_value)
+
+
+@pytest.mark.parametrize("input_type", ["dmap", "ddmap"])
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_cov_partial_distance_pairs_follow_public_missing_policy(
+    input_type,
+    ignore_missing_data,
+):
+    """COV must receive completed targets unless missing pairs are excluded."""
+    n = 5
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap = HippsDimes.a2dmap_theory(connectivity)
+    target = (
+        dmap.copy()
+        if input_type == "dmap"
+        else (3.0 * np.pi / 8.0) * np.square(dmap)
+    )
+    target[0, 4] = np.nan
+    target[4, 0] = np.nan
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type=input_type,
+        input_format="text",
+        method="COV",
+        gaussian_noise_variance=0.1,
+        covariance_optimizer="pdhg",
+        iteration=1,
+        ignore_missing_data=ignore_missing_data,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    expected_missing = 1 if ignore_missing_data else 0
+
+    assert results["covariance_optimization"]["observed_pair_count"] == (
+        n * (n - 1) // 2 - expected_missing
+    )
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else 1
+    )
+    assert parameters["missing_pairs_after_handling"] == expected_missing
+
+
 def test_run_optimization_records_missing_data_analysis_and_repair():
     """run_optimization should record missing-data analysis and nearest-neighbor repairs."""
     A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
@@ -1046,7 +1153,10 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
     assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
 
 
-def test_cov_repair_is_explicit_and_enters_final_noise_model():
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_cov_repair_is_explicit_and_enters_final_noise_model(
+    ignore_missing_data,
+):
     target = HippsDimes.a2cmap_theory(
         HippsDimes.construct_connectivity_matrix_rouse(5, 1.0),
         rc=1.0,
@@ -1061,7 +1171,7 @@ def test_cov_repair_is_explicit_and_enters_final_noise_model():
         input_format="text",
         method="COV",
         gaussian_noise_relative_std=0.1,
-        ignore_missing_data=True,
+        ignore_missing_data=ignore_missing_data,
         repair_fully_missing_loci=True,
         iteration=500,
         no_xyzs=True,
@@ -1077,8 +1187,16 @@ def test_cov_repair_is_explicit_and_enters_final_noise_model():
     )
 
     assert info["converged"]
-    assert info["observed_pair_count"] == 8
+    assert info["observed_pair_count"] == (
+        8 if ignore_missing_data else 10
+    )
     assert parameters["nearest_neighbor_repair_count"] == 2
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else 2
+    )
+    assert parameters["missing_pairs_after_handling"] == (
+        2 if ignore_missing_data else 0
+    )
     assert bool(parameters["repair_fully_missing_loci"]) is True
 
 
@@ -1184,45 +1302,54 @@ def test_cli_cov_nonconvergence_exits_nonzero_after_writing_outputs(tmp_path):
     assert parameters["covariance_converged"] == "False"
 
 
-def test_remove_fully_missing_loci_requires_ignore_missing_data():
-    """Removing fully missing loci is only valid when ignore_missing_data is enabled."""
-    n = 5
-    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
-    dmap_target = HippsDimes.a2dmap_theory(A_true)
-
-    with pytest.raises(ValueError, match="remove_fully_missing_loci=True requires ignore_missing_data=True"):
-        HippsDimes.run_optimization(
-            input_matrix=dmap_target,
-            input_type="dmap",
-            input_format="text",
-            remove_fully_missing_loci=True,
-            no_xyzs=True,
-            verbose=False,
-            show_progress=False,
-        )
-
-
-def test_repair_fully_missing_loci_requires_ignore_missing_data():
+def test_di_rejects_excluded_partial_pairs():
+    """Direct inversion has no sparse-target optimization contract."""
     target = HippsDimes.a2dmap_theory(
         HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
     )
+    target[0, 4] = np.nan
+    target[4, 0] = np.nan
 
     with pytest.raises(
         ValueError,
-        match="repair_fully_missing_loci=True requires ignore_missing_data=True",
+        match="DI.*requires a complete target",
     ):
         HippsDimes.run_optimization(
             input_matrix=target,
             input_type="dmap",
             input_format="text",
-            repair_fully_missing_loci=True,
+            method="DI",
+            ignore_missing_data=True,
             no_xyzs=True,
             verbose=False,
             show_progress=False,
         )
 
 
-def test_fully_missing_locus_policy_must_be_explicit():
+@pytest.mark.parametrize("matrix_kind", ["dmap", "ddmap"])
+def test_distance_inputs_reject_nonpositive_finite_pairs(matrix_kind):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    if matrix_kind == "ddmap":
+        target = (3.0 * np.pi / 8.0) * np.square(target)
+    target[0, 4] = 0.0
+    target[4, 0] = 0.0
+
+    with pytest.raises(ValueError, match="must be positive"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type=matrix_kind,
+            input_format="text",
+            iteration=1,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_fully_missing_locus_policy_must_be_explicit(ignore_missing_data):
     target = HippsDimes.a2dmap_theory(
         HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
     )
@@ -1235,7 +1362,7 @@ def test_fully_missing_locus_policy_must_be_explicit():
             input_matrix=target,
             input_type="dmap",
             input_format="text",
-            ignore_missing_data=True,
+            ignore_missing_data=ignore_missing_data,
             no_xyzs=True,
             verbose=False,
             show_progress=False,
@@ -1261,7 +1388,10 @@ def test_fully_missing_locus_repair_and_removal_are_mutually_exclusive():
         )
 
 
-def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_mapping():
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_mapping(
+    ignore_missing_data,
+):
     """Removing fully missing loci should reduce the optimization problem and keep index mapping."""
     A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
     cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
@@ -1275,7 +1405,7 @@ def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_
         connectivity_matrix=A_true,
         input_type="cmap",
         input_format="text",
-        ignore_missing_data=True,
+        ignore_missing_data=ignore_missing_data,
         remove_fully_missing_loci=True,
         method="IS",
         iteration=5,

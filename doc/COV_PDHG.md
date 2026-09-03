@@ -30,11 +30,14 @@ finite-iterate residual would not certify a finite optimum. The validator scans
 the dense observed-pair mask in $O(N^2)$ time and uses only $O(N)$ additional
 working memory.
 
-Partially missing matrices are supported when their observation graph remains
-connected. A fully missing locus must be repaired or removed explicitly by the
-high-level API. Repaired nearest-neighbor pairs are genuine constraints: they
-enter both the data term and the variance constructed by the chosen COV noise
-model.
+Partially missing matrices are supported when
+`ignore_missing_data=True` and their observation graph remains connected. With
+the default `ignore_missing_data=False`, the high-level API interpolates every
+remaining missing pair first, so the completed map becomes the target. A fully
+missing locus must be repaired or removed explicitly before either pair policy
+is applied. Repaired and interpolated pairs are genuine target constraints:
+they enter both the data term and the variance constructed by the chosen COV
+noise model.
 
 ## Variance whitening
 

@@ -43,29 +43,36 @@ $$
 
 Here $D^{\mathrm{obs}}$ is always the final squared-distance target after any
 contact-map or distance-map conversion, normalization, explicit locus repair
-or removal, and other missing-data handling. Diagonal and still-missing pairs
-do not enter the objective.
+or removal, and pair interpolation. Diagonal and explicitly excluded pairs do
+not enter the objective.
 
 ## Missing observations and fully missing loci
 
-With missing-data handling enabled, finite positive off-diagonal entries in the
-final squared-distance target define the observed pairs. They must form one
-connected graph over all retained loci. Otherwise, relative translations of
-the disconnected components are unconstrained and the COV objective is
-unbounded below. Sparse targets are valid as long as this connectivity
-condition holds.
-
-A locus with no observed off-diagonal pairs requires an explicit choice:
+Missing data are handled in two ordered stages. First, a locus with no usable
+off-diagonal pair requires an explicit choice:
 
 - `repair_fully_missing_loci=True` fills only its genomic-neighbor pairs using
   nearest interpolation from non-diagonal observations;
 - `remove_fully_missing_loci=True` removes it before optimization.
 
-Both require `ignore_missing_data=True` and are mutually exclusive. Repair is
-not merely a numerical initialization. Each filled pair becomes an observed
-constraint, and the requested absolute or relative noise model is constructed
-from the repaired final target. A target containing disconnected multi-locus
-clusters is rejected rather than silently bridged.
+These choices are mutually exclusive and are required independently of
+`ignore_missing_data`. Second, the remaining partially missing pairs follow
+that flag:
+
+- `ignore_missing_data=False` interpolates every remaining pair before input
+  conversion and uses the completed map as the target. Contact maps are
+  interpolated in log-contact space, distance maps in distance space, and
+  squared-distance maps in squared-distance space.
+- `ignore_missing_data=True` leaves those pairs absent from the objective.
+
+Repair and interpolation are not merely numerical initialization. Every
+filled pair becomes a target constraint, and the requested absolute or
+relative noise model is constructed from the final target. When missing pairs
+are excluded, the finite positive off-diagonal target entries must form one
+connected graph over all retained loci. Otherwise, relative translations of
+the disconnected components are unconstrained and the COV objective is
+unbounded below. A target containing disconnected multi-locus clusters is
+rejected rather than silently bridged.
 
 ## Equivalent connectivity dual and stationarity
 

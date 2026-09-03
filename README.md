@@ -39,7 +39,9 @@ variance-whitened PDHG with direct-Gram monotone FISTA and reports an
 independently recomputed KKT convergence certificate. This release also makes
 fully missing-locus repair explicit, validates that COV observations connect
 all retained loci, and makes the returned COV iterate unambiguous in logs and
-results.
+results. Missing-pair handling is now consistent across contact, distance, and
+squared-distance inputs: pairs are either interpolated before optimization or
+explicitly excluded.
 
 # Documentation
 
@@ -212,16 +214,17 @@ This script will generate several files:
 - `--unit`: `.hic` unit: `BP` or `FRAG`. Default: `BP`.
 - `--no-log`: By default, the program writes two log files when `output-prefix` is provided: `{output_prefix}_run_parameters.csv` and `{output_prefix}_iteration_series.csv`. Use `--no-log` to disable writing both files.
 - `--no-xyzs`: Do not write generated conformations to an `.xyz` file.
-- `--ignore-missing-data`: Exclude missing pair constraints. Non-finite entries
-  are missing for every matrix type; nonpositive off-diagonal entries are also
-  missing for contact maps.
-- `--repair-fully-missing-loci`: With `--ignore-missing-data`, impute only the
-  genomic nearest-neighbor constraints `(i, i-1)` and `(i, i+1)` needed to
-  reconnect a locus with no observed off-diagonal pairs. The repaired values
-  become ordinary observed constraints in the selected objective and, for
-  COV, in its noise model.
-- `--remove-fully-missing-loci`: With `--ignore-missing-data`, remove loci that
-  have no observed off-diagonal pairs before optimization.
+- `--ignore-missing-data`: Exclude remaining missing pair constraints. Without
+  this flag, every remaining missing pair is interpolated before optimization:
+  contact maps in log-contact space, distance maps in distance space, and
+  squared-distance maps in squared-distance space. The completed map is the
+  optimization target.
+- `--repair-fully-missing-loci`: Impute only the genomic nearest-neighbor
+  constraints `(i, i-1)` and `(i, i+1)` needed to reconnect a locus with no
+  observed off-diagonal pairs. The repaired values become ordinary target
+  constraints in the selected objective and, for COV, in its noise model.
+- `--remove-fully-missing-loci`: Remove loci that have no observed
+  off-diagonal pairs before applying the remaining missing-pair policy.
 - `--balance`: Balance a cooler-format contact map before optimization.
 - `--neighbor-balance`: Apply neighbor balancing to a contact map by dividing
   each pair value by the geometric mean of the corresponding neighbor-contact
@@ -279,9 +282,11 @@ one connected component. Sparse observations are supported, but disconnected
 clusters are rejected because their relative motion is unconstrained and the
 noise-aware maximum-entropy objective has no finite optimum. When a locus has
 no observations, choose exactly one explicit policy with
-`--repair-fully-missing-loci` or `--remove-fully-missing-loci`, together with
-`--ignore-missing-data`. Neither option is needed for partially missing data
-whose observation graph is already connected.
+`--repair-fully-missing-loci` or `--remove-fully-missing-loci`, regardless of
+the `--ignore-missing-data` setting. Repair or removal is applied first. The
+remaining partial pairs are then either excluded with `--ignore-missing-data`
+or interpolated without it. `DI` requires a complete target and therefore
+cannot be combined with excluded pairs.
 
 See [Noise-aware covariance optimization](doc/NOTE_ON_NOISE.md) for the noise
 model, initialization, and scientific interpretation. See
@@ -372,13 +377,15 @@ HippsDimes mydata.hic test \
   stopping decision described below. For COV, the built-in KKT test determines
   convergence; checkpoints are useful for diagnostics or restarting but do not
   replace the reported convergence certificate.
-- Use `--ignore-missing-data` to exclude non-finite input pairs and, for contact
-  maps, nonpositive pairs. If a locus has no observed off-diagonal pairs at all,
-  also select either `--repair-fully-missing-loci` to add its genomic-neighbor
-  constraints or `--remove-fully-missing-loci` to remove it before
-  optimization. Repair and removal are mutually exclusive. COV additionally
-  requires the complete observed-pair graph to be connected, including cases
-  with no individually isolated locus.
+- Missing pairs are interpolated by default and the completed map becomes the
+  target. Use `--ignore-missing-data` to exclude them instead. Non-finite input
+  pairs are missing for every map type; nonpositive off-diagonal pairs are also
+  missing for contact maps. If a locus has no observed off-diagonal pairs at
+  all, select either `--repair-fully-missing-loci` to add its genomic-neighbor
+  constraints or `--remove-fully-missing-loci` to remove it before the pair
+  policy is applied. Repair and removal are mutually exclusive. COV
+  additionally requires the retained observed-pair graph to be connected when
+  pairs are excluded, including cases with no individually isolated locus.
 - Contact-map inputs are normalized by their maximum entry by default. Use
   `--not-normalize` when the supplied contact map should retain its existing
   scale.

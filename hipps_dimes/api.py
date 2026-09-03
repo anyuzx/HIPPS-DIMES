@@ -140,6 +140,7 @@ def _compute_missing_mask(matrix, matrix_kind):
         missing_mask = ~np.isfinite(matrix)
     else:
         raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+    missing_mask = np.logical_or(missing_mask, missing_mask.T)
     np.fill_diagonal(missing_mask, False)
     return missing_mask
 
@@ -172,6 +173,47 @@ def _format_index_list(indices, limit=12):
     return f"{preview}, ... ({len(indices)} total)"
 
 
+def _interpolate_missing_pairs(matrix, matrix_kind, missing_mask):
+    """Interpolate every missing pair in the matrix's native representation."""
+    matrix = np.array(matrix, dtype=float, copy=True)
+    missing_mask = np.asarray(missing_mask, dtype=bool)
+    if not np.any(missing_mask):
+        return matrix
+
+    if matrix_kind == 'cmap':
+        with np.errstate(divide='ignore', invalid='ignore'):
+            transformed = np.log10(matrix)
+    elif matrix_kind in {'dmap', 'ddmap'}:
+        transformed = matrix.copy()
+        # A distance-map diagonal is a convention, not an inter-locus
+        # observation.  Do not let its zero values seed interpolation.
+        np.fill_diagonal(transformed, np.nan)
+    else:
+        raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+
+    transformed[missing_mask] = np.nan
+    if not np.any(np.isfinite(transformed)):
+        raise ValueError(
+            f"cannot interpolate {matrix_kind}: no finite source values remain"
+        )
+    interpolated = interpolate_missing(transformed)
+    interpolated = 0.5 * (interpolated + interpolated.T)
+
+    if matrix_kind == 'cmap':
+        matrix = np.power(10.0, interpolated)
+    else:
+        matrix = interpolated
+        np.fill_diagonal(matrix, 0.0)
+
+    remaining = _summarize_missing_data(matrix, matrix_kind)
+    if remaining['missing_pairs']:
+        raise ValueError(
+            f"interpolation left {remaining['missing_pairs']} missing "
+            f"{matrix_kind} pairs"
+        )
+    return matrix
+
+
 def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_mask, fully_missing_loci):
     """Fill nearest-neighbor entries for fully missing loci using nearest interpolation."""
     repaired = np.array(matrix, dtype=float, copy=True)
@@ -191,6 +233,11 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
     # prevents its conventional zero (or unit contact before the log) from
     # becoming the nearest interpolation source for an off-diagonal pair.
     np.fill_diagonal(transformed, np.nan)
+    if not np.any(np.isfinite(transformed)):
+        raise ValueError(
+            f"cannot repair fully missing loci in {matrix_kind}: no finite "
+            "off-diagonal source values remain"
+        )
     interpolated = interpolate_missing(transformed)
 
     repaired_pairs = set()
@@ -280,7 +327,7 @@ def _remove_fully_missing_loci(matrix, matrix_kind):
     }
 
 
-def _handle_fully_missing_loci(
+def _handle_missing_data(
     matrix,
     matrix_kind,
     missing_analysis,
@@ -289,7 +336,21 @@ def _handle_fully_missing_loci(
     repair_fully_missing_loci,
     remove_fully_missing_loci,
 ):
-    """Apply the explicitly selected fully-missing-locus policy."""
+    """Apply the fully-missing-locus and partial-pair policies in order."""
+    matrix = np.array(matrix, dtype=float, copy=True)
+    missing_mask = missing_analysis['missing_mask']
+    if matrix_kind in {'dmap', 'ddmap'}:
+        observed_mask = ~missing_mask
+        np.fill_diagonal(observed_mask, False)
+        if np.any(matrix[observed_mask] <= 0.0):
+            raise ValueError(
+                f"finite off-diagonal {matrix_kind} values must be positive; "
+                "use NaN for missing pairs"
+            )
+        matrix[missing_mask] = np.nan
+    else:
+        matrix[missing_mask] = 0.0
+
     handling_info = {
         'nearest_neighbor_repaired_pairs': [],
         'nearest_neighbor_repair_count': 0,
@@ -300,9 +361,13 @@ def _handle_fully_missing_loci(
         'missing_fraction_after_repair': missing_analysis['missing_fraction'],
         'missing_pairs_after_removal': missing_analysis['missing_pairs'],
         'missing_fraction_after_removal': missing_analysis['missing_fraction'],
+        'interpolated_missing_pair_count': 0,
+        'missing_pairs_after_handling': missing_analysis['missing_pairs'],
+        'missing_fraction_after_handling': missing_analysis['missing_fraction'],
+        'total_pairs_after_handling': missing_analysis['total_pairs'],
     }
     fully_missing_loci = missing_analysis['fully_missing_loci']
-    if ignore_missing_data and fully_missing_loci:
+    if fully_missing_loci:
         if remove_fully_missing_loci:
             matrix, update = _remove_fully_missing_loci(matrix, matrix_kind)
             handling_info.update(update)
@@ -310,7 +375,7 @@ def _handle_fully_missing_loci(
             matrix, update = _repair_fully_missing_loci_nearest_neighbors(
                 matrix,
                 matrix_kind,
-                missing_analysis['missing_mask'],
+                missing_mask,
                 fully_missing_loci,
             )
             handling_info.update(update)
@@ -321,6 +386,32 @@ def _handle_fully_missing_loci(
                 "repair_fully_missing_loci=True or "
                 "remove_fully_missing_loci=True"
             )
+
+    remaining = _summarize_missing_data(matrix, matrix_kind)
+    if remaining['fully_missing_loci']:
+        raise ValueError(
+            "the selected fully-missing-locus policy did not reconnect or "
+            f"remove loci {remaining['fully_missing_loci']}"
+        )
+    if not ignore_missing_data and remaining['missing_pairs']:
+        handling_info['interpolated_missing_pair_count'] = remaining[
+            'missing_pairs'
+        ]
+        matrix = _interpolate_missing_pairs(
+            matrix,
+            matrix_kind,
+            remaining['missing_mask'],
+        )
+        remaining = _summarize_missing_data(matrix, matrix_kind)
+
+    handling_info['remaining_fully_missing_loci'] = remaining[
+        'fully_missing_loci'
+    ]
+    handling_info['missing_pairs_after_handling'] = remaining['missing_pairs']
+    handling_info['missing_fraction_after_handling'] = remaining[
+        'missing_fraction'
+    ]
+    handling_info['total_pairs_after_handling'] = remaining['total_pairs']
     missing_analysis.update(handling_info)
     return matrix
 
@@ -466,13 +557,17 @@ def run_optimization(input_path=None,
     no_xyzs : bool, default=False
         If True, skip writing conformations to file
     ignore_missing_data : bool, default=False
-        Whether to ignore missing elements in contact/distance map
+        If True, exclude remaining missing pair constraints from optimization.
+        If False, interpolate remaining pairs before optimization: in
+        log-contact space for ``cmap``, distance space for ``dmap``, and
+        squared-distance space for ``ddmap``.
     repair_fully_missing_loci : bool, default=False
-        If True, and ``ignore_missing_data`` is also True, impute nearest-neighbor
-        constraints for loci whose entire off-diagonal row/column is missing.
+        Impute nearest-neighbor constraints for loci whose entire off-diagonal
+        row/column is missing. Fully missing loci require either this option or
+        ``remove_fully_missing_loci`` regardless of ``ignore_missing_data``.
     remove_fully_missing_loci : bool, default=False
-        If True, and ``ignore_missing_data`` is also True, remove loci whose
-        entire off-diagonal row/column is missing before optimization.
+        Remove loci whose entire off-diagonal row/column is missing before the
+        remaining partial-pair policy is applied.
     balance : bool, default=False
         Apply matrix balancing for contact map (cooler format)
     not_normalize : bool, default=False
@@ -523,9 +618,9 @@ def run_optimization(input_path=None,
         - 'kept_loci': Original locus indices retained for optimization (only if loci were removed)
         - 'removed_fully_missing_loci': Original fully missing loci removed before optimization
 
-        Missing-data repair provenance, including repaired pairs, is recorded
-        in 'run_parameters'. COV iteration history marks its selected model in
-        the 'is_returned_iterate' column.
+        Missing-data provenance, including repaired, removed, interpolated,
+        and excluded pairs, is recorded in 'run_parameters'. COV iteration
+        history marks its selected model in the 'is_returned_iterate' column.
     
     Notes
     -----
@@ -741,12 +836,6 @@ def run_optimization(input_path=None,
         no_log = not log
     if save_pickle and output_prefix is None:
         raise ValueError("output_prefix must be provided when save_pickle=True")
-    if repair_fully_missing_loci and not ignore_missing_data:
-        raise ValueError(
-            "repair_fully_missing_loci=True requires ignore_missing_data=True"
-        )
-    if remove_fully_missing_loci and not ignore_missing_data:
-        raise ValueError("remove_fully_missing_loci=True requires ignore_missing_data=True")
     if repair_fully_missing_loci and remove_fully_missing_loci:
         raise ValueError(
             "repair_fully_missing_loci and remove_fully_missing_loci are "
@@ -805,7 +894,7 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = dmap_target.shape
             missing_analysis = _summarize_missing_data(dmap_target, 'dmap')
-            dmap_target = _handle_fully_missing_loci(
+            dmap_target = _handle_missing_data(
                 dmap_target,
                 'dmap',
                 missing_analysis,
@@ -839,7 +928,7 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = ddmap_target.shape
             missing_analysis = _summarize_missing_data(ddmap_target, 'ddmap')
-            ddmap_target = _handle_fully_missing_loci(
+            ddmap_target = _handle_missing_data(
                 ddmap_target,
                 'ddmap',
                 missing_analysis,
@@ -939,7 +1028,7 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = cmap.shape
             missing_analysis = _summarize_missing_data(cmap, 'cmap')
-            cmap = _handle_fully_missing_loci(
+            cmap = _handle_missing_data(
                 cmap,
                 'cmap',
                 missing_analysis,
@@ -954,10 +1043,7 @@ def run_optimization(input_path=None,
                     console.print("Applying neighbor balancing to contact map (see Paggi, Zhang 2025)")
                 cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
             
-            if ignore_missing_data:
-                ddmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
-            else:
-                ddmap_target = cmap2dmap(cmap, alpha, not_normalize)
+            ddmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
 
         # Legacy missing-data paths use infinity as their sentinel, while COV
@@ -969,6 +1055,17 @@ def run_optimization(input_path=None,
         ):
             ddmap_target = np.asarray(ddmap_target, dtype=np.float64).copy()
             ddmap_target[np.isinf(ddmap_target)] = np.nan
+
+        if (
+            method == 'DI'
+            and missing_analysis is not None
+            and missing_analysis['missing_pairs_after_handling'] > 0
+        ):
+            raise ValueError(
+                "method='DI' requires a complete target and cannot ignore "
+                "missing pairs; set ignore_missing_data=False to interpolate "
+                "them or use method='IS', 'GD', or 'COV'"
+            )
 
         # Load connectivity matrix if provided
         if connectivity_matrix is not None:
@@ -1030,7 +1127,10 @@ def run_optimization(input_path=None,
             input_table.add_row("Matrix Balancing", "Yes" if balance else "No" if input_format == 'cooler' else "N/A")
             input_table.add_row("Neighbor Balancing", "Yes" if neighbor_balance else "No")
             input_table.add_row("Auto Normalization", "No" if not_normalize else "Yes")
-        input_table.add_row("Ignore Missing Data", "Yes" if ignore_missing_data else "No")
+        input_table.add_row(
+            "Missing Pair Policy",
+            "Exclude" if ignore_missing_data else "Interpolate",
+        )
         input_table.add_row(
             "Repair Fully Missing Loci",
             "Yes" if repair_fully_missing_loci else "No",
@@ -1052,7 +1152,7 @@ def run_optimization(input_path=None,
                 "Fully Missing Loci",
                 _format_index_list(missing_analysis['fully_missing_loci']),
             )
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['removed_fully_missing_loci_count'] > 0:
+            if missing_analysis['removed_fully_missing_loci_count'] > 0:
                 missing_table.add_row(
                     "Removed Fully Missing",
                     _format_index_list(missing_analysis['removed_fully_missing_loci']),
@@ -1069,7 +1169,7 @@ def run_optimization(input_path=None,
                     "Missing Pairs After Removal",
                     f"{missing_analysis['missing_pairs_after_removal']:,} / {ddmap_target.shape[0] * (ddmap_target.shape[0] - 1) // 2:,} ({100.0 * missing_analysis['missing_fraction_after_removal']:.2f}%)",
                 )
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
+            elif missing_analysis['nearest_neighbor_repair_count'] > 0:
                 missing_table.add_row(
                     "NN Repaired Pairs",
                     _format_index_list(
@@ -1088,6 +1188,18 @@ def run_optimization(input_path=None,
                     "Missing Pairs After Repair",
                     f"{missing_analysis['missing_pairs_after_repair']:,} / {missing_analysis['total_pairs']:,} ({100.0 * missing_analysis['missing_fraction_after_repair']:.2f}%)",
                 )
+            missing_table.add_row(
+                "Interpolated Missing Pairs",
+                str(missing_analysis['interpolated_missing_pair_count']),
+            )
+            missing_table.add_row(
+                "Excluded Missing Pairs",
+                (
+                    f"{missing_analysis['missing_pairs_after_handling']:,} / "
+                    f"{missing_analysis['total_pairs_after_handling']:,} "
+                    f"({100.0 * missing_analysis['missing_fraction_after_handling']:.2f}%)"
+                ),
+            )
 
             console.print(missing_table)
             console.print()  # spacing
@@ -1550,6 +1662,9 @@ def run_optimization(input_path=None,
         'missing_pair_fraction_after_repair': missing_analysis['missing_fraction_after_repair'] if missing_analysis is not None else 0.0,
         'missing_pairs_after_removal': missing_analysis['missing_pairs_after_removal'] if missing_analysis is not None else 0,
         'missing_pair_fraction_after_removal': missing_analysis['missing_fraction_after_removal'] if missing_analysis is not None else 0.0,
+        'interpolated_missing_pair_count': missing_analysis['interpolated_missing_pair_count'] if missing_analysis is not None else 0,
+        'missing_pairs_after_handling': missing_analysis['missing_pairs_after_handling'] if missing_analysis is not None else 0,
+        'missing_pair_fraction_after_handling': missing_analysis['missing_fraction_after_handling'] if missing_analysis is not None else 0.0,
         'remaining_fully_missing_loci': missing_analysis['remaining_fully_missing_loci'] if missing_analysis is not None else [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,

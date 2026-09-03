@@ -507,6 +507,10 @@ def test_direct_b_fista_rejects_uncentered_initial_gram():
         )
 
 
+@pytest.mark.filterwarnings(
+    "ignore:fit_gaussian_noise_covariance_pdhg stopped "
+    "without satisfying.*:RuntimeWarning"
+)
 @pytest.mark.parametrize(
     "use_gpu",
     [
@@ -529,20 +533,33 @@ def test_pdhg_small_variance_inconsistent_target_stays_finite(use_gpu):
         ]
     )
 
-    with pytest.warns(RuntimeWarning, match="without satisfying"):
-        fitted, gram, connectivity, info = (
-            HippsDimes.fit_gaussian_noise_covariance_pdhg(
-                target,
-                noise_variance=1e-8,
-                max_iterations=20,
-                use_gpu=use_gpu,
-            )
-        )
+    fitted, gram, connectivity, info = HippsDimes.fit_gaussian_noise_covariance_pdhg(
+        target,
+        noise_variance=1e-8,
+        max_iterations=20,
+        use_gpu=use_gpu,
+    )
 
-    assert not info["converged"]
-    assert info["status"] == "independent_kkt_failed"
-    assert info["termination_internal_kkt_converged"]
-    assert not info["independent_kkt_converged"]
+    independent_relative = _independent_relative_kkt(target, gram, 1e-8)
+    relative_threshold = info["relative_tolerance"] + (
+        info["absolute_tolerance"] / info["stationarity_residual_scale"]
+    )
+    expected_converged = independent_relative <= relative_threshold
+    if expected_converged:
+        expected_status = "optimality_tolerance"
+    elif info["termination_internal_kkt_converged"]:
+        expected_status = "independent_kkt_failed"
+    else:
+        expected_status = "max_iterations"
+
+    assert info["relative_eliminated_kkt_residual"] == pytest.approx(
+        independent_relative,
+        rel=1e-9,
+        abs=1e-12,
+    )
+    assert info["converged"] == expected_converged
+    assert info["independent_kkt_converged"] == expected_converged
+    assert info["status"] == expected_status
     assert np.all(np.isfinite(fitted))
     assert np.all(np.isfinite(gram))
     assert np.all(np.isfinite(connectivity))

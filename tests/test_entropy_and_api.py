@@ -1066,6 +1066,30 @@ def test_partial_missing_pairs_follow_selected_policy(
         assert handled[4, 0] == pytest.approx(expected_nearest_value)
 
 
+def test_contact_interpolation_excludes_and_preserves_diagonal():
+    """Self-contact values must not seed missing off-diagonal contacts."""
+    n = 6
+    target = np.full((n, n), 0.1)
+    np.fill_diagonal(target, 1.0)
+    separation = np.abs(np.subtract.outer(np.arange(n), np.arange(n)))
+    missing_band = (separation <= 2) & (separation > 0)
+    target[missing_band] = 0.0
+    analysis = _summarize_missing_data(target, "cmap")
+
+    handled = _handle_missing_data(
+        target,
+        "cmap",
+        analysis,
+        ignore_missing_data=False,
+        repair_fully_missing_loci=False,
+        remove_fully_missing_loci=False,
+    )
+
+    assert analysis["interpolated_missing_pair_count"] == 9
+    assert np.allclose(handled[missing_band], 0.1)
+    assert np.allclose(np.diag(handled), 1.0)
+
+
 @pytest.mark.parametrize("input_type", ["dmap", "ddmap"])
 @pytest.mark.parametrize("ignore_missing_data", [False, True])
 def test_cov_partial_distance_pairs_follow_public_missing_policy(

@@ -181,16 +181,17 @@ def _interpolate_missing_pairs(matrix, matrix_kind, missing_mask):
         return matrix
 
     if matrix_kind == 'cmap':
+        contact_diagonal = np.diag(matrix).copy()
         with np.errstate(divide='ignore', invalid='ignore'):
             transformed = np.log10(matrix)
     elif matrix_kind in {'dmap', 'ddmap'}:
         transformed = matrix.copy()
-        # A distance-map diagonal is a convention, not an inter-locus
-        # observation.  Do not let its zero values seed interpolation.
-        np.fill_diagonal(transformed, np.nan)
     else:
         raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
 
+    # Diagonal entries are conventions, not inter-locus observations.  Never
+    # let them seed interpolation of a missing off-diagonal pair.
+    np.fill_diagonal(transformed, np.nan)
     transformed[missing_mask] = np.nan
     if not np.any(np.isfinite(transformed)):
         raise ValueError(
@@ -201,6 +202,7 @@ def _interpolate_missing_pairs(matrix, matrix_kind, missing_mask):
 
     if matrix_kind == 'cmap':
         matrix = np.power(10.0, interpolated)
+        matrix[np.diag_indices_from(matrix)] = contact_diagonal
     else:
         matrix = interpolated
         np.fill_diagonal(matrix, 0.0)

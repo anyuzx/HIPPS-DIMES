@@ -1291,6 +1291,33 @@ def test_contact_interpolation_excludes_and_preserves_diagonal():
     assert np.allclose(np.diag(handled), 1.0)
 
 
+def test_cov_contact_map_accepts_zero_self_contact_diagonal():
+    """Contact-map diagonals are conventions, not COV observations."""
+    n = 5
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    contact_map = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+    np.fill_diagonal(contact_map, 0.0)
+
+    with pytest.warns(RuntimeWarning, match="stopped without satisfying"):
+        results = HippsDimes.run_optimization(
+            input_matrix=contact_map,
+            input_type="cmap",
+            input_format="text",
+            method="COV",
+            gaussian_noise_variance=0.1,
+            covariance_optimizer="pdhg",
+            iteration=1,
+            ignore_missing_data=False,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+    assert results["covariance_optimization"]["observed_pair_count"] == (
+        n * (n - 1) // 2
+    )
+
+
 @pytest.mark.parametrize("input_type", ["dmap", "ddmap"])
 @pytest.mark.parametrize("ignore_missing_data", [False, True])
 def test_cov_partial_distance_pairs_follow_public_missing_policy(

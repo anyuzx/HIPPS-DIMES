@@ -1983,6 +1983,7 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
+    np.fill_diagonal(dmap, 0.0)
     return dmap
 
 

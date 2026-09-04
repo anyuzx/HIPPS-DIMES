@@ -1,5 +1,6 @@
 """Optimization and dynamics models for HIPPS-DIMES."""
 
+import sys
 import time
 
 from .numerics import *  # noqa: F401,F403

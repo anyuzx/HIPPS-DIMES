@@ -6,6 +6,15 @@ import pytest
 import HippsDimes
 
 
+def test_dynamics_invalid_spring_constant_uses_validation_path(capsys):
+    """Invalid constructor input should exit cleanly instead of raising NameError."""
+    with pytest.raises(SystemExit) as exc_info:
+        HippsDimes.Dynamics(3, k="bad", model="rouse")
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out == "Spring constant should be a number"
+
+
 def test_dynamics_copies_input_connectivity_matrix():
     """External mutations of the input matrix should not affect the model."""
     a = np.array(

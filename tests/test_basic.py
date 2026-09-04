@@ -581,6 +581,23 @@ def test_a2dmap_theory_with_force_applied_smoke():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
+def test_a2xyz_samplers_handle_exact_zero_mode_without_warning():
+    """Expected translational zero modes should not emit floating warnings."""
+    A = HippsDimes.construct_connectivity_matrix_rouse(2, 1.0)
+    force = {"loci": [0, 1], "amplitude": 1.0, "direction": [1.0, 0.0, 0.0]}
+
+    with np.errstate(divide="raise", invalid="raise"):
+        unforced = HippsDimes.a2xyz_sample(A, ensemble=2)
+        forced = HippsDimes.a2xyz_sample_with_force_applied(
+            A, force, ensemble=2
+        )
+
+    assert unforced.shape == (2, 2, 3)
+    assert forced.shape == (2, 2, 3)
+    assert np.all(np.isfinite(unforced))
+    assert np.all(np.isfinite(forced))
+
+
 def test_restore_matrix_with_nans_reinserts_removed_loci():
     """Reduced matrices should be restored with NaN-filled rows/cols at removed loci."""
     small = np.array(

@@ -1699,7 +1699,8 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """
     TOL = 10**8.0
     eigvalue, eigvector = np.linalg.eigh(A)
-    temp = 1.0 / eigvalue[:, np.newaxis]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = 1.0 / eigvalue[:, np.newaxis]
 
     # replace close zero eigvenvalue with zero
     temp[temp == -np.inf] = 0.0
@@ -1796,7 +1797,8 @@ def a2xyz_sample_with_force_applied(A, force, ensemble=1):
     eigvalue, eigvector = np.linalg.eigh(A)
 
     # Compute 1/eigenvalue, handling zero eigenvalues
-    temp = 1.0 / eigvalue[:, np.newaxis]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = 1.0 / eigvalue[:, np.newaxis]
 
     # Replace infinities and large values with zero (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0

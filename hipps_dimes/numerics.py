@@ -129,7 +129,10 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
     # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = cp.diag(Omega)
-    sigma = cp.sqrt(Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega)
+    sigma_squared = Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega
+    if force_positive_definite:
+        sigma_squared = cp.maximum(sigma_squared, 0.0)
+    sigma = cp.sqrt(sigma_squared)
     dmap = 2.0 * cp.sqrt(2.0 / cp.pi) * sigma
 
     if return_eigenvalues:
@@ -1338,7 +1341,10 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = np.diag(Omega)
-    sigma = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
+    sigma_squared = Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega
+    if force_positive_definite:
+        sigma_squared = np.maximum(sigma_squared, 0.0)
+    sigma = np.sqrt(sigma_squared)
 
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma
 

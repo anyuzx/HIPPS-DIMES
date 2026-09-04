@@ -114,6 +114,31 @@ def test_a2dmap_theory():
     assert np.allclose(np.diag(dmap), 0.0)
 
 
+def test_a2dmap_positive_projection_clips_negative_roundoff(monkeypatch):
+    """Projected pair variances should remain nonnegative before sqrt."""
+    nearly_equal_mode = np.array([1.0, 1.0 + 1e-8, 0.3])
+    nearly_equal_mode /= np.linalg.norm(nearly_equal_mode)
+    eigenvectors, _ = np.linalg.qr(
+        np.column_stack(
+            (nearly_equal_mode, [0.2, -0.1, 1.0], [1.0, -1.0, 0.0])
+        )
+    )
+    eigenvalues = np.array([-0.01, 1.0, 1.0])
+    monkeypatch.setattr(
+        np.linalg,
+        "eigh",
+        lambda matrix: (eigenvalues, eigenvectors),
+    )
+
+    with np.errstate(invalid="raise"):
+        dmap = HippsDimes.a2dmap_theory(
+            np.eye(3), force_positive_definite=True
+        )
+
+    assert np.all(np.isfinite(dmap))
+    assert np.allclose(np.diag(dmap), 0.0)
+
+
 def _rouse_squared_distance_target(n=6, spring_constant=1.0):
     truth = HippsDimes.construct_connectivity_matrix_rouse(n, spring_constant)
     mean_distance = HippsDimes.a2dmap_theory(

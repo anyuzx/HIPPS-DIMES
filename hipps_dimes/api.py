@@ -606,9 +606,11 @@ def run_optimization(input_path=None,
     -------
     results : dict
         Dictionary containing:
-        - 'iteration_series': Optimization iteration-series data as a DataFrame
+        - 'iteration_series': Post-step optimization metrics as a DataFrame
         - 'log': Alias for 'iteration_series' (backward compatibility)
         - 'run_parameters': Run parameters as a DataFrame with columns ['parameter', 'value']
+        - 'optimization': Common returned-model status, iteration counts, loss,
+          and entropy for every method
         - 'dmap_final': Returned-model distance map (numpy array)
         - 'connectivity_matrix': Returned-model connectivity matrix (numpy array)
         - 'gram_matrix': Returned centered Gram matrix (COV only)
@@ -1429,6 +1431,38 @@ def run_optimization(input_path=None,
         loss, entropy, iteration_extra_series
     )
 
+    if covariance_optimization_info is not None:
+        optimization_summary = {
+            'method': method,
+            'status': covariance_optimization_info['status'],
+            'converged': bool(covariance_optimization_info['converged']),
+            'iterations_executed': int(
+                covariance_optimization_info['iterations']
+            ),
+            'returned_iteration': int(
+                covariance_optimization_info['returned_iteration']
+            ),
+            'final_loss': float(covariance_optimization_info['loss']),
+            'final_entropy': float(covariance_optimization_info['entropy']),
+        }
+    else:
+        iterations_executed = len(iteration_series_df)
+        if method == 'DI':
+            status = 'direct_solution'
+        elif iterations_executed == 0:
+            status = 'no_iterations_requested'
+        else:
+            status = 'iteration_budget_completed'
+        optimization_summary = {
+            'method': method,
+            'status': status,
+            'converged': None,
+            'iterations_executed': int(iterations_executed),
+            'returned_iteration': int(iterations_executed),
+            'final_loss': float(model.loss),
+            'final_entropy': float(model.entropy),
+        }
+
     # Print regularization norms if requested
     if verbose:
         if reg == 'L2':
@@ -1677,6 +1711,7 @@ def run_optimization(input_path=None,
         'iteration_series': iteration_series_df,
         'log': iteration_series_df,
         'run_parameters': run_parameters_df,
+        'optimization': optimization_summary,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }

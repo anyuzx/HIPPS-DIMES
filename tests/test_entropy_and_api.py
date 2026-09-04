@@ -101,6 +101,122 @@ def test_run_optimization_smoke_dmap():
     assert np.allclose(np.sum(A_est, axis=1), 0.0, atol=1e-8)
 
 
+@pytest.mark.parametrize(
+    ("method", "method_options", "expected_status", "expected_converged"),
+    [
+        (
+            "IS",
+            {"iteration": 2, "learning_rate": 1.0},
+            "iteration_budget_completed",
+            None,
+        ),
+        (
+            "GD",
+            {"iteration": 2, "learning_rate": 1.0},
+            "iteration_budget_completed",
+            None,
+        ),
+        ("DI", {}, "direct_solution", None),
+        (
+            "COV",
+            {"iteration": 200, "gaussian_noise_variance": 0.1},
+            "optimality_tolerance",
+            True,
+        ),
+    ],
+)
+def test_run_optimization_returns_common_optimization_summary(
+    method,
+    method_options,
+    expected_status,
+    expected_converged,
+):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(connectivity)
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        **method_options,
+    )
+
+    summary = results["optimization"]
+    assert set(summary) == {
+        "method",
+        "status",
+        "converged",
+        "iterations_executed",
+        "returned_iteration",
+        "final_loss",
+        "final_entropy",
+    }
+    assert summary["method"] == method
+    assert summary["status"] == expected_status
+    assert summary["converged"] is expected_converged
+
+    fitted_ddmap = (3.0 * np.pi / 8.0) * np.square(results["dmap_final"])
+    observed = np.isfinite(ddmap_target) & (ddmap_target > 0.0)
+    expected_loss = np.sqrt(
+        np.mean(
+            np.square(
+                (fitted_ddmap[observed] - ddmap_target[observed])
+                / ddmap_target[observed]
+            )
+        )
+    )
+    expected_entropy = HippsDimes.compute_entropy_from_A(
+        results["connectivity_matrix"]
+    )
+    assert summary["final_loss"] == pytest.approx(expected_loss)
+    assert summary["final_entropy"] == pytest.approx(expected_entropy)
+
+    if method == "COV":
+        info = results["covariance_optimization"]
+        assert summary["iterations_executed"] == info["iterations"]
+        assert summary["returned_iteration"] == info["returned_iteration"]
+        assert summary["final_loss"] == pytest.approx(info["loss"])
+        assert summary["final_entropy"] == pytest.approx(info["entropy"])
+    else:
+        assert summary["iterations_executed"] == len(results["iteration_series"])
+        assert summary["returned_iteration"] == len(results["iteration_series"])
+
+
+@pytest.mark.parametrize("method", ["IS", "GD"])
+def test_zero_iteration_summary_describes_initial_model(method):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    target = HippsDimes.a2dmap_theory(connectivity)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        iteration=0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    assert results["iteration_series"].empty
+    assert results["optimization"] == {
+        "method": method,
+        "status": "no_iterations_requested",
+        "converged": None,
+        "iterations_executed": 0,
+        "returned_iteration": 0,
+        "final_loss": pytest.approx(0.0, abs=1e-12),
+        "final_entropy": pytest.approx(
+            HippsDimes.compute_entropy_from_A(results["connectivity_matrix"])
+        ),
+    }
+
+
 def test_run_optimization_smoke_dmap_npy_input(tmp_path):
     """run_optimization should accept dmap input from a .npy file."""
     n = 6
@@ -438,6 +554,65 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     assert all(update["method"] == "IS" for update in updates)
     assert all(update["general_method"] == "optimization" for update in updates)
     assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
+
+
+@pytest.mark.parametrize("method", ["IS", "GD"])
+def test_iterative_metrics_and_checkpoints_describe_same_post_update_state(method):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    connectivity[0, 4] = 0.35
+    connectivity[4, 0] = 0.35
+    connectivity = HippsDimes.a2a(connectivity)
+    dmap_target = HippsDimes.a2dmap_theory(connectivity)
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+    observed = np.isfinite(ddmap_target) & (ddmap_target > 0.0)
+    updates = []
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        iteration=3,
+        learning_rate=1.0,
+        save_steps=[1, 2, 3],
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        progress_callback=updates.append,
+    )
+
+    series = results["iteration_series"]
+    checkpoints = results["connectivity_matrix_at_steps"]
+    assert [update["iteration"] for update in updates] == [1, 2, 3]
+    assert sorted(checkpoints) == [1, 2, 3]
+    assert np.allclose(checkpoints[3], results["connectivity_matrix"])
+
+    for step, checkpoint in checkpoints.items():
+        checkpoint_dmap = HippsDimes.a2dmap_theory(
+            checkpoint, force_positive_definite=True
+        )
+        checkpoint_ddmap = (3.0 * np.pi / 8.0) * np.square(checkpoint_dmap)
+        expected_loss = np.sqrt(
+            np.mean(
+                np.square(
+                    (checkpoint_ddmap[observed] - ddmap_target[observed])
+                    / ddmap_target[observed]
+                )
+            )
+        )
+        expected_entropy = HippsDimes.compute_entropy_from_A(checkpoint)
+        row = series.iloc[step - 1]
+        assert row["loss"] == pytest.approx(expected_loss)
+        assert row["entropy"] == pytest.approx(expected_entropy)
+        assert updates[step - 1]["loss"] == pytest.approx(expected_loss)
+        assert updates[step - 1]["entropy"] == pytest.approx(expected_entropy)
+
+    assert results["optimization"]["final_loss"] == pytest.approx(
+        series.iloc[-1]["loss"]
+    )
+    assert results["optimization"]["final_entropy"] == pytest.approx(
+        series.iloc[-1]["entropy"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1308,6 +1483,15 @@ def test_cov_returned_iterate_is_consistent_across_reports(
     assert parameters["covariance_iterations_executed"] == 3
     assert parameters["covariance_returned_iteration"] == 1
     assert parameters["covariance_returned_loss"] == pytest.approx(info["loss"])
+    assert results["optimization"] == {
+        "method": "COV",
+        "status": info["status"],
+        "converged": False,
+        "iterations_executed": 3,
+        "returned_iteration": 1,
+        "final_loss": pytest.approx(info["loss"]),
+        "final_entropy": pytest.approx(info["entropy"]),
+    }
     assert "Returned loss at iteration 1" in output
 
 

@@ -514,6 +514,7 @@ final_dmap = results["dmap_final"]
 final_cmap = results["cmap_final"]
 iteration_series = results["iteration_series"]
 run_parameters = results["run_parameters"]
+optimization = results["optimization"]
 ```
 
 #### Return values
@@ -525,10 +526,17 @@ The `run_optimization()` function returns a dictionary with:
 - `'cmap_final'`: Final contact map (NumPy array, for `input_type="cmap"`)
 - `'xyzs'`: Generated conformations (NumPy array, unless `no_xyzs=True`)
 - `'iteration_series'`: Iteration-series scalar outputs (pandas DataFrame).
-  Every method reports `iteration`, `loss`, and `entropy`; COV adds
-  optimizer-specific diagnostics.
+  Every method reports `iteration`, `loss`, and `entropy`; each numbered row
+  describes the model produced by that solver step. In particular, IS/GD row
+  `t` is the state after update `t`. COV adds optimizer-specific diagnostics.
 - `'run_parameters'`: Run parameters (pandas DataFrame with `parameter` and
   `value` columns)
+- `'optimization'`: Common returned-model summary for every method, containing
+  `method`, `status`, `converged`, `iterations_executed`,
+  `returned_iteration`, `final_loss`, and `final_entropy`. IS and GD report
+  `converged=None` because they run a fixed iteration budget without a
+  convergence certificate; DI reports `converged=None` because it is a direct
+  solve. COV reports its independently certified Boolean convergence status.
 - `'log'`: Alias for `'iteration_series'` (backward compatibility)
 - `'rc_optimal'`: Optimal contact threshold (float, for `input_type="cmap"`)
 - `'connectivity_matrix_at_steps'`: Saved intermediate connectivity matrices

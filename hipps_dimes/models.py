@@ -816,6 +816,7 @@ class Optimize:
                 console.print(f"[green]Will save connectivity matrix at iterations: {sorted(save_steps_set)}[/green]")
 
         start_time = time.perf_counter()
+        dmap_maxent = None
         if general_method == 'optimization':
             with trange(
                 epoch,
@@ -826,57 +827,65 @@ class Optimize:
             ) as pbar:
                 for t in pbar:
                     self.__update_parameter(t, **kwargs)
-                    if self.use_gpu:
-                        # Record without syncing to host
-                        loss_hist_gpu[t] = self._loss_gpu
-                        entropy_hist_gpu[t] = self._entropy_gpu
 
-                        should_sync_progress = (
-                            show_progress or progress_callback is not None
-                        ) and ((t == 0) or ((t + 1) % self.gpu_display_every == 0) or (t + 1 == epoch))
+                    # __update_parameter evaluates the state before applying its
+                    # update.  From the second update onward that state is the
+                    # result of the preceding numbered update, so record it one
+                    # slot earlier.  The final post-update state is evaluated
+                    # once below using the distance-map calculation already
+                    # required for the return value.
+                    if t > 0:
+                        reported_iteration = t
+                        if self.use_gpu:
+                            loss_hist_gpu[
+                                reported_iteration - 1
+                            ] = self._loss_gpu
+                            entropy_hist_gpu[
+                                reported_iteration - 1
+                            ] = self._entropy_gpu
+                            should_sync_progress = (
+                                show_progress or progress_callback is not None
+                            ) and (
+                                reported_iteration == 1
+                                or reported_iteration % self.gpu_display_every == 0
+                            )
+                            if should_sync_progress:
+                                loss_value = float(self._loss_gpu)
+                                entropy_value = float(self._entropy_gpu)
+                            else:
+                                loss_value = None
+                                entropy_value = None
+                        else:
+                            loss_value = self.loss
+                            entropy_value = (
+                                self.entropy
+                                if self.entropy is not None
+                                else np.nan
+                            )
+                            loss_array.append(loss_value)
+                            entropy_array.append(entropy_value)
+                            should_sync_progress = True
+
                         if should_sync_progress:
-                            self.loss = float(self._loss_gpu)
-                            self.entropy = float(self._entropy_gpu)
                             if show_progress:
                                 pbar.set_postfix({
-                                    "loss": self.loss,
-                                    "entropy": self.entropy,
-                                    "iteration/s": _iter_per_sec_str(t + 1, start_time),
+                                    "loss": loss_value,
+                                    "entropy": entropy_value,
+                                    "iteration/s": _iter_per_sec_str(
+                                        reported_iteration, start_time
+                                    ),
                                 })
                             _emit_progress(
                                 progress_callback,
-                                iteration=t + 1,
+                                iteration=reported_iteration,
                                 total=epoch,
-                                loss=self.loss,
-                                entropy=self.entropy,
+                                loss=loss_value,
+                                entropy=entropy_value,
                                 start_time=start_time,
                                 method=method_name,
                                 general_method=general_method,
                                 use_gpu=self.use_gpu,
                             )
-                    else:
-                        # CPU path
-                        loss_value = self.loss
-                        entropy_value = self.entropy if self.entropy is not None else np.nan
-                        if show_progress:
-                            pbar.set_postfix({
-                                "loss": loss_value,
-                                "entropy": entropy_value,
-                                "iteration/s": _iter_per_sec_str(t + 1, start_time),
-                            })
-                        loss_array.append(loss_value)
-                        entropy_array.append(entropy_value)
-                        _emit_progress(
-                            progress_callback,
-                            iteration=t + 1,
-                            total=epoch,
-                            loss=loss_value,
-                            entropy=entropy_value,
-                            start_time=start_time,
-                            method=method_name,
-                            general_method=general_method,
-                            use_gpu=self.use_gpu,
-                        )
                     
                     # Save connectivity matrix at specified iteration steps
                     # Note: t is 0-indexed, so we check for t+1 to match iteration number
@@ -890,17 +899,63 @@ class Optimize:
                             filename = '{}_connectivity_matrix_iter{}.txt'.format(output_prefix, step)
                             np.savetxt(filename, self.A)
                             console.print(f"[green]Saved connectivity matrix at iteration {step} to {filename}[/green]")
+
+                # Evaluate the returned post-update model. This reuses the
+                # final distance-map evaluation that run() already performs,
+                # rather than adding another eigendecomposition per update.
+                if self.use_gpu:
+                    self.A = cp.asnumpy(self._A_gpu)
+                dmap_maxent, final_eigvals_A = a2dmap_theory(
+                    self.A,
+                    force_positive_definite=True,
+                    return_eigenvalues=True,
+                )
+                final_ddmap = ((3. * np.pi) / 8.) * np.power(dmap_maxent, 2.)
+                final_loss = float(self.__compute_loss(final_ddmap))
+                final_entropy = float(
+                    compute_entropy_from_A(self.A, eigvals=-final_eigvals_A)
+                )
+                self.loss = final_loss
+                self.entropy = final_entropy
+
+                if epoch > 0:
+                    if self.use_gpu:
+                        loss_hist_gpu[epoch - 1] = final_loss
+                        entropy_hist_gpu[epoch - 1] = final_entropy
+                    else:
+                        loss_array.append(final_loss)
+                        entropy_array.append(final_entropy)
+                    if show_progress:
+                        pbar.set_postfix({
+                            "loss": final_loss,
+                            "entropy": final_entropy,
+                            "iteration/s": _iter_per_sec_str(epoch, start_time),
+                        })
+                    _emit_progress(
+                        progress_callback,
+                        iteration=epoch,
+                        total=epoch,
+                        loss=final_loss,
+                        entropy=final_entropy,
+                        start_time=start_time,
+                        method=method_name,
+                        general_method=general_method,
+                        use_gpu=self.use_gpu,
+                    )
         elif general_method == 'direct':
             if not checkEMD(self.ddmap_target):
                 raise ValueError(
                     'The distance matrix is a not valid Euclidean distance matrix. Direct inversion method is not applicable. Please use optimization method such as Iterative scaling or gradient descent')
             self.A = ddmap2a_direct(self.ddmap_target)
             # Compute loss for direct inversion
-            ddmap_t = ((3. * np.pi) / 8.) * np.power(a2dmap_theory(self.A, force_positive_definite=True), 2.)
+            dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
+            ddmap_t = ((3. * np.pi) / 8.) * np.power(dmap_maxent, 2.)
             loss_array.append(self.__compute_loss(ddmap_t))
             # Compute entropy for direct inversion
             eigvals_K = np.linalg.eigvalsh(-self.A)
             entropy_array.append(compute_entropy_from_A(self.A, eigvals=eigvals_K))
+            self.loss = float(loss_array[-1])
+            self.entropy = float(entropy_array[-1])
             _emit_progress(
                 progress_callback,
                 iteration=1,
@@ -917,14 +972,9 @@ class Optimize:
         if use_gpu_hist:
             loss_array = cp.asnumpy(loss_hist_gpu).tolist()
             entropy_array = cp.asnumpy(entropy_hist_gpu).tolist()
-            # Ensure latest scalars are synced for callers that read model.loss/entropy
-            self.loss = float(self._loss_gpu) if self._loss_gpu is not None else None
-            self.entropy = float(self._entropy_gpu) if self._entropy_gpu is not None else None
 
-        # Ensure self.A is up-to-date on CPU before returning / computing dmap
-        if self.use_gpu and general_method == 'optimization':
-            self.A = cp.asnumpy(self._A_gpu)
-        dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
+        if dmap_maxent is None:
+            dmap_maxent = a2dmap_theory(self.A, force_positive_definite=True)
 
         return loss_array, entropy_array, dmap_maxent, self.A, connectivity_at_steps
 

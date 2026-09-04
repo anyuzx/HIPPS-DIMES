@@ -6,11 +6,83 @@ import time
 
 import numpy as np
 import pandas as pd
-import scipy
 from rich import print
+from tqdm import tqdm
 
+from .covariance_pdhg import (
+    fit_gaussian_noise_covariance_hybrid,
+    fit_gaussian_noise_covariance_pdhg,
+)
 from .models import Optimize
 from .numerics import *  # noqa: F401,F403
+from .numerics import _optimize_contact_threshold
+
+_COVARIANCE_PROGRESS_STAGES = {
+    'covariance_operator_norm': ('COV operator norm', 'iteration'),
+}
+
+
+def _make_covariance_progress_callback(progress_callback, show_progress):
+    """Render COV solver stages while preserving structured callbacks."""
+    if not show_progress:
+        return progress_callback, lambda: None
+
+    progress_bar = None
+    current_stage = None
+
+    def close_progress_bar():
+        nonlocal progress_bar
+        if progress_bar is not None:
+            progress_bar.close()
+            progress_bar = None
+
+    def report_progress(event):
+        nonlocal current_stage, progress_bar
+        if progress_callback is not None:
+            progress_callback(event)
+
+        stage = event.get('stage')
+        phase = event.get('phase')
+        if stage == 'covariance_optimization':
+            description = (
+                'COV PDHG optimization'
+                if phase == 'pdhg'
+                else 'COV FISTA optimization'
+            )
+            unit = 'iteration'
+        elif stage in _COVARIANCE_PROGRESS_STAGES:
+            description, unit = _COVARIANCE_PROGRESS_STAGES[stage]
+        else:
+            return
+
+        stage_key = (stage, phase)
+        if stage_key != current_stage:
+            close_progress_bar()
+            progress_bar = tqdm(
+                total=int(event['total']),
+                desc=description,
+                unit=unit,
+            )
+            current_stage = stage_key
+
+        if stage == 'covariance_operator_norm':
+            progress_bar.set_postfix(
+                relative_bound_gap=(
+                    f"{event['operator_norm_relative_bound_gap']:.3e}"
+                ),
+                refresh=False,
+            )
+        else:
+            postfix = {
+                'objective': f"{event['objective']:.3e}",
+                'relative_kkt': f"{event['relative_gradient_norm']:.3e}",
+            }
+            progress_bar.set_postfix(**postfix, refresh=False)
+
+        completed = int(event['iteration'])
+        progress_bar.update(max(0, completed - progress_bar.n))
+
+    return report_progress, close_progress_bar
 
 
 def _build_iteration_series_frame(loss, entropy, extra_series=None):
@@ -68,6 +140,7 @@ def _compute_missing_mask(matrix, matrix_kind):
         missing_mask = ~np.isfinite(matrix)
     else:
         raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+    missing_mask = np.logical_or(missing_mask, missing_mask.T)
     np.fill_diagonal(missing_mask, False)
     return missing_mask
 
@@ -100,6 +173,49 @@ def _format_index_list(indices, limit=12):
     return f"{preview}, ... ({len(indices)} total)"
 
 
+def _interpolate_missing_pairs(matrix, matrix_kind, missing_mask):
+    """Interpolate every missing pair in the matrix's native representation."""
+    matrix = np.array(matrix, dtype=float, copy=True)
+    missing_mask = np.asarray(missing_mask, dtype=bool)
+    if not np.any(missing_mask):
+        return matrix
+
+    if matrix_kind == 'cmap':
+        contact_diagonal = np.diag(matrix).copy()
+        with np.errstate(divide='ignore', invalid='ignore'):
+            transformed = np.log10(matrix)
+    elif matrix_kind in {'dmap', 'ddmap'}:
+        transformed = matrix.copy()
+    else:
+        raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+
+    # Diagonal entries are conventions, not inter-locus observations.  Never
+    # let them seed interpolation of a missing off-diagonal pair.
+    np.fill_diagonal(transformed, np.nan)
+    transformed[missing_mask] = np.nan
+    if not np.any(np.isfinite(transformed)):
+        raise ValueError(
+            f"cannot interpolate {matrix_kind}: no finite source values remain"
+        )
+    interpolated = interpolate_missing(transformed)
+    interpolated = 0.5 * (interpolated + interpolated.T)
+
+    if matrix_kind == 'cmap':
+        matrix = np.power(10.0, interpolated)
+        matrix[np.diag_indices_from(matrix)] = contact_diagonal
+    else:
+        matrix = interpolated
+        np.fill_diagonal(matrix, 0.0)
+
+    remaining = _summarize_missing_data(matrix, matrix_kind)
+    if remaining['missing_pairs']:
+        raise ValueError(
+            f"interpolation left {remaining['missing_pairs']} missing "
+            f"{matrix_kind} pairs"
+        )
+    return matrix
+
+
 def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_mask, fully_missing_loci):
     """Fill nearest-neighbor entries for fully missing loci using nearest interpolation."""
     repaired = np.array(matrix, dtype=float, copy=True)
@@ -109,13 +225,22 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
         with np.errstate(divide='ignore', invalid='ignore'):
             transformed = np.log10(repaired)
         transformed[missing_mask] = np.nan
-        interpolated = interpolate_missing(transformed)
     elif matrix_kind in {'dmap', 'ddmap'}:
         transformed = np.array(repaired, dtype=float, copy=True)
         transformed[missing_mask] = np.nan
-        interpolated = interpolate_missing(transformed)
     else:
         raise ValueError(f"Unsupported matrix_kind '{matrix_kind}'")
+
+    # The diagonal is not an observed inter-locus constraint.  Excluding it
+    # prevents its conventional zero (or unit contact before the log) from
+    # becoming the nearest interpolation source for an off-diagonal pair.
+    np.fill_diagonal(transformed, np.nan)
+    if not np.any(np.isfinite(transformed)):
+        raise ValueError(
+            f"cannot repair fully missing loci in {matrix_kind}: no finite "
+            "off-diagonal source values remain"
+        )
+    interpolated = interpolate_missing(transformed)
 
     repaired_pairs = set()
     for i in fully_missing_loci:
@@ -141,9 +266,10 @@ def _repair_fully_missing_loci_nearest_neighbors(matrix, matrix_kind, missing_ma
                 )
 
             fill_value = float(np.mean(finite_candidates))
-            if matrix_kind == 'cmap' and fill_value <= 0.0:
+            if fill_value <= 0.0:
                 raise ValueError(
-                    f"Nearest-neighbor interpolation produced a nonpositive contact value for pair ({i}, {j})"
+                    "Nearest-neighbor interpolation produced a nonpositive "
+                    f"{matrix_kind} value for pair ({i}, {j})"
                 )
 
             repaired[i, j] = fill_value
@@ -203,6 +329,95 @@ def _remove_fully_missing_loci(matrix, matrix_kind):
     }
 
 
+def _handle_missing_data(
+    matrix,
+    matrix_kind,
+    missing_analysis,
+    *,
+    ignore_missing_data,
+    repair_fully_missing_loci,
+    remove_fully_missing_loci,
+):
+    """Apply the fully-missing-locus and partial-pair policies in order."""
+    matrix = np.array(matrix, dtype=float, copy=True)
+    missing_mask = missing_analysis['missing_mask']
+    if matrix_kind in {'dmap', 'ddmap'}:
+        observed_mask = ~missing_mask
+        np.fill_diagonal(observed_mask, False)
+        if np.any(matrix[observed_mask] <= 0.0):
+            raise ValueError(
+                f"finite off-diagonal {matrix_kind} values must be positive; "
+                "use NaN for missing pairs"
+            )
+        matrix[missing_mask] = np.nan
+    else:
+        matrix[missing_mask] = 0.0
+
+    handling_info = {
+        'nearest_neighbor_repaired_pairs': [],
+        'nearest_neighbor_repair_count': 0,
+        'removed_fully_missing_loci': [],
+        'removed_fully_missing_loci_count': 0,
+        'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
+        'missing_pairs_after_repair': missing_analysis['missing_pairs'],
+        'missing_fraction_after_repair': missing_analysis['missing_fraction'],
+        'missing_pairs_after_removal': missing_analysis['missing_pairs'],
+        'missing_fraction_after_removal': missing_analysis['missing_fraction'],
+        'interpolated_missing_pair_count': 0,
+        'missing_pairs_after_handling': missing_analysis['missing_pairs'],
+        'missing_fraction_after_handling': missing_analysis['missing_fraction'],
+        'total_pairs_after_handling': missing_analysis['total_pairs'],
+    }
+    fully_missing_loci = missing_analysis['fully_missing_loci']
+    if fully_missing_loci:
+        if remove_fully_missing_loci:
+            matrix, update = _remove_fully_missing_loci(matrix, matrix_kind)
+            handling_info.update(update)
+        elif repair_fully_missing_loci:
+            matrix, update = _repair_fully_missing_loci_nearest_neighbors(
+                matrix,
+                matrix_kind,
+                missing_mask,
+                fully_missing_loci,
+            )
+            handling_info.update(update)
+        else:
+            raise ValueError(
+                "fully missing loci were found at indices "
+                f"{fully_missing_loci}; explicitly set "
+                "repair_fully_missing_loci=True or "
+                "remove_fully_missing_loci=True"
+            )
+
+    remaining = _summarize_missing_data(matrix, matrix_kind)
+    if remaining['fully_missing_loci']:
+        raise ValueError(
+            "the selected fully-missing-locus policy did not reconnect or "
+            f"remove loci {remaining['fully_missing_loci']}"
+        )
+    if not ignore_missing_data and remaining['missing_pairs']:
+        handling_info['interpolated_missing_pair_count'] = remaining[
+            'missing_pairs'
+        ]
+        matrix = _interpolate_missing_pairs(
+            matrix,
+            matrix_kind,
+            remaining['missing_mask'],
+        )
+        remaining = _summarize_missing_data(matrix, matrix_kind)
+
+    handling_info['remaining_fully_missing_loci'] = remaining[
+        'fully_missing_loci'
+    ]
+    handling_info['missing_pairs_after_handling'] = remaining['missing_pairs']
+    handling_info['missing_fraction_after_handling'] = remaining[
+        'missing_fraction'
+    ]
+    handling_info['total_pairs_after_handling'] = remaining['total_pairs']
+    missing_analysis.update(handling_info)
+    return matrix
+
+
 def _subset_connectivity_matrix(connectivity_matrix, kept_loci, original_size):
     """Subset a provided connectivity matrix to the kept loci when needed."""
     connectivity_matrix = _ensure_square_matrix(connectivity_matrix, "Connectivity matrix")
@@ -231,6 +446,11 @@ def run_optimization(input_path=None,
                      lamd=0.0,
                      reg='L2',
                      gaussian_noise_variance=0.0,
+                     gaussian_noise_relative_std=None,
+                     covariance_optimizer='hybrid',
+                     covariance_relative_tolerance=1e-5,
+                     covariance_absolute_tolerance=1e-10,
+                     covariance_handoff_relative_tolerance=1e-2,
                      iteration=10000,
                      learning_rate=10.0,
                      momentum=0.0,
@@ -245,6 +465,7 @@ def run_optimization(input_path=None,
                      no_log=False,
                      no_xyzs=False,
                      ignore_missing_data=False,
+                     repair_fully_missing_loci=False,
                      remove_fully_missing_loci=False,
                      balance=False,
                      not_normalize=False,
@@ -277,15 +498,35 @@ def run_optimization(input_path=None,
     selection : str, optional
         Region selection for cooler/hic files
     method : str, default='IS'
-        Optimization method: 'IS' (Iterative Scaling), 'GD' (Gradient Descent), or 'DI' (Direct Inversion)
+        Optimization method: 'IS', 'GD', 'DI', or calibrated Gaussian 'COV'
     lamd : float, default=0.0
         Regularization weight
     reg : str, default='L2'
         Regularization type: 'L1' or 'L2'
     gaussian_noise_variance : float, default=0.0
-        Noise variance for independent Gaussian noise on constraints.
+        Positive homoskedastic variance on squared-distance constraints. COV only.
+    gaussian_noise_relative_std : float, optional
+        Positive shared relative standard deviation ``sigma_ij / Dobs_ij``.
+        COV converts it to ``variance_ij = (value * Dobs_ij)**2`` after input
+        conversion and missing-data handling.
+    covariance_optimizer : {'hybrid', 'pdhg'}, default='hybrid'
+        Optimizer used for the Gaussian COV objective. PDHG is
+        variance-whitened and uses inverse-free runtime KKT diagnostics. The
+        hybrid default uses PDHG globally and direct-Gram monotone FISTA for
+        refinement.
+    covariance_relative_tolerance : float, default=1e-5
+        Relative COV KKT tolerance. Hybrid and PDHG results must pass a
+        freshly recomputed dual-eliminated KKT certificate at this tolerance
+        before the run is reported as converged.
+    covariance_absolute_tolerance : float, default=1e-10
+        Absolute tolerance used by the selected COV optimizer's internal KKT
+        checks.
+    covariance_handoff_relative_tolerance : float, default=1e-2
+        Relative KKT threshold at which the hybrid optimizer switches from
+        PDHG to FISTA. Ignored by standalone PDHG.
     iteration : int, default=10000
-        Number of optimization iterations
+        Maximum optimization iterations. Hybrid PDHG and FISTA updates share
+        this single total budget.
     learning_rate : float, default=10.0
         Learning rate for optimization
     momentum : float, default=0.0
@@ -297,9 +538,9 @@ def run_optimization(input_path=None,
         NAG's look-ahead correction enables higher momentum (0.95) without divergence.
         RECOMMENDED: Use with momentum=0.95 for best performance.
     use_gpu : bool, default=False
-        If True and CuPy is installed, use GPU acceleration for eigendecomposition.
-        Provides 2-4x speedup for matrices with n >= 200.
-        Requires: conda install -c conda-forge cupy
+        If True, use CuPy GPU acceleration. All COV optimizers use float64
+        throughout and fail clearly if no CUDA GPU is accessible. Legacy
+        IS/GD retain their existing behavior.
     input_type : str, default='cmap'
         Type of input:
         - 'cmap': contact map
@@ -318,10 +559,17 @@ def run_optimization(input_path=None,
     no_xyzs : bool, default=False
         If True, skip writing conformations to file
     ignore_missing_data : bool, default=False
-        Whether to ignore missing elements in contact/distance map
+        If True, exclude remaining missing pair constraints from optimization.
+        If False, interpolate remaining pairs before optimization: in
+        log-contact space for ``cmap``, distance space for ``dmap``, and
+        squared-distance space for ``ddmap``.
+    repair_fully_missing_loci : bool, default=False
+        Impute nearest-neighbor constraints for loci whose entire off-diagonal
+        row/column is missing. Fully missing loci require either this option or
+        ``remove_fully_missing_loci`` regardless of ``ignore_missing_data``.
     remove_fully_missing_loci : bool, default=False
-        If True, and ``ignore_missing_data`` is also True, remove loci whose
-        entire off-diagonal row/column is missing before optimization.
+        Remove loci whose entire off-diagonal row/column is missing before the
+        remaining partial-pair policy is applied.
     balance : bool, default=False
         Apply matrix balancing for contact map (cooler format)
     not_normalize : bool, default=False
@@ -350,24 +598,33 @@ def run_optimization(input_path=None,
         Payload keys include iteration, total, loss, entropy,
         iterations_per_sec, method, general_method, stage, noisy, and use_gpu.
     show_progress : bool, default=True
-        Whether to render solver progress bars. Set to False when consuming
-        progress_callback programmatically.
+        Whether to render solver progress bars. COV reports the selected
+        optimizer phases and operator-norm certification separately. Set to
+        False when consuming progress_callback programmatically.
         
     Returns
     -------
     results : dict
         Dictionary containing:
-        - 'iteration_series': Optimization iteration-series data as a DataFrame
+        - 'iteration_series': Post-step optimization metrics as a DataFrame
         - 'log': Alias for 'iteration_series' (backward compatibility)
         - 'run_parameters': Run parameters as a DataFrame with columns ['parameter', 'value']
-        - 'dmap_final': Final distance map (numpy array)
-        - 'connectivity_matrix': Final connectivity matrix (numpy array)
+        - 'optimization': Common returned-model status, iteration counts, loss,
+          and entropy for every method
+        - 'dmap_final': Returned-model distance map (numpy array)
+        - 'connectivity_matrix': Returned-model connectivity matrix (numpy array)
+        - 'gram_matrix': Returned centered Gram matrix (COV only)
+        - 'covariance_optimization': COV convergence, returned-iterate, and diagnostic metadata
         - 'connectivity_matrix_at_steps': Dict of step -> connectivity matrix (only if save_steps was set)
         - 'cmap_final': Final contact map (numpy array, only if input_type=='cmap')
         - 'xyzs': Generated conformations (numpy array, only if no_xyzs==False)
         - 'rc_optimal': Optimal contact threshold (float, only if input_type=='cmap')
         - 'kept_loci': Original locus indices retained for optimization (only if loci were removed)
         - 'removed_fully_missing_loci': Original fully missing loci removed before optimization
+
+        Missing-data provenance, including repaired, removed, interpolated,
+        and excluded pairs, is recorded in 'run_parameters'. COV iteration
+        history marks its selected model in the 'is_returned_iterate' column.
     
     Notes
     -----
@@ -385,8 +642,9 @@ def run_optimization(input_path=None,
     
     **GPU Acceleration** (for large matrices):
     - Use use_gpu=True when CuPy is installed
-    - In practice, this provides 2-4x speedup for matrices with n >= 200
-    - For n < 200, CPU may be faster due to GPU transfer overhead
+    - All COV optimizers run GPU matrix operations in float64
+    - Hybrid COV hands the physical centered PDHG Gram directly to FISTA
+    - For small matrices, CPU may be faster due to GPU setup overhead
     - Install CuPy: conda install -c conda-forge cupy
     
     Examples
@@ -432,18 +690,161 @@ def run_optimization(input_path=None,
         raise ValueError(
             f"Invalid input_format '{input_format}'. Must be one of {sorted(valid_input_formats)}"
         )
-    if gaussian_noise_variance < 0.0:
-        raise ValueError("gaussian_noise_variance must be non-negative")
-    if gaussian_noise_variance > 0.0 and method == 'DI':
-        raise ValueError("gaussian_noise_variance is only supported for optimization methods (IS/GD), not DI")
-    if gaussian_noise_variance > 0.0 and lamd > 0.0:
-        raise ValueError("gaussian_noise_variance (noise variance) cannot be combined with lamd regularization")
+    valid_methods = {'IS', 'GD', 'DI', 'COV'}
+    if method not in valid_methods:
+        raise ValueError(
+            f"Invalid method '{method}'. Must be one of {sorted(valid_methods)}"
+        )
+    if isinstance(gaussian_noise_variance, (bool, np.bool_)) or not np.isscalar(
+        gaussian_noise_variance
+    ):
+        raise ValueError("gaussian_noise_variance must be a nonnegative finite scalar")
+    try:
+        gaussian_noise_variance = float(gaussian_noise_variance)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "gaussian_noise_variance must be a nonnegative finite scalar"
+        ) from error
+    if not np.isfinite(gaussian_noise_variance) or gaussian_noise_variance < 0.0:
+        raise ValueError("gaussian_noise_variance must be a nonnegative finite scalar")
+    if gaussian_noise_relative_std is not None:
+        if isinstance(gaussian_noise_relative_std, (bool, np.bool_)) or not np.isscalar(
+            gaussian_noise_relative_std
+        ):
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            )
+        try:
+            gaussian_noise_relative_std = float(gaussian_noise_relative_std)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            ) from error
+        if (
+            not np.isfinite(gaussian_noise_relative_std)
+            or gaussian_noise_relative_std <= 0.0
+        ):
+            raise ValueError(
+                "gaussian_noise_relative_std must be a positive finite scalar"
+            )
+    if covariance_optimizer not in {'hybrid', 'pdhg'}:
+        raise ValueError(
+            "covariance_optimizer must be 'hybrid' or 'pdhg'"
+        )
+    covariance_tolerances = {
+        'covariance_relative_tolerance': covariance_relative_tolerance,
+        'covariance_absolute_tolerance': covariance_absolute_tolerance,
+    }
+    for tolerance_name, tolerance_value in covariance_tolerances.items():
+        if isinstance(tolerance_value, (bool, np.bool_)) or not np.isscalar(
+            tolerance_value
+        ):
+            raise ValueError(f"{tolerance_name} must be a nonnegative finite scalar")
+        try:
+            covariance_tolerances[tolerance_name] = float(tolerance_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{tolerance_name} must be a nonnegative finite scalar"
+            ) from error
+        if (
+            not np.isfinite(covariance_tolerances[tolerance_name])
+            or covariance_tolerances[tolerance_name] < 0.0
+        ):
+            raise ValueError(
+                f"{tolerance_name} must be a nonnegative finite scalar"
+            )
+    covariance_relative_tolerance = covariance_tolerances[
+        'covariance_relative_tolerance'
+    ]
+    covariance_absolute_tolerance = covariance_tolerances[
+        'covariance_absolute_tolerance'
+    ]
+    if (
+        covariance_relative_tolerance == 0.0
+        and covariance_absolute_tolerance == 0.0
+    ):
+        raise ValueError("at least one covariance convergence tolerance must be positive")
+    if (
+        isinstance(covariance_handoff_relative_tolerance, (bool, np.bool_))
+        or not np.isscalar(covariance_handoff_relative_tolerance)
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        )
+    try:
+        covariance_handoff_relative_tolerance = float(
+            covariance_handoff_relative_tolerance
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        ) from error
+    if (
+        not np.isfinite(covariance_handoff_relative_tolerance)
+        or covariance_handoff_relative_tolerance <= 0.0
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must be a positive finite scalar"
+        )
+    if (
+        covariance_optimizer == 'hybrid'
+        and covariance_relative_tolerance > 0.0
+        and covariance_handoff_relative_tolerance
+        < covariance_relative_tolerance
+    ):
+        raise ValueError(
+            "covariance_handoff_relative_tolerance must not be smaller than "
+            "covariance_relative_tolerance"
+        )
+
+    has_absolute_noise = gaussian_noise_variance > 0.0
+    has_relative_noise = gaussian_noise_relative_std is not None
+    if method == 'COV':
+        if has_absolute_noise == has_relative_noise:
+            raise ValueError(
+                "COV requires exactly one of gaussian_noise_variance or "
+                "gaussian_noise_relative_std"
+            )
+        if lamd > 0.0:
+            raise ValueError("COV cannot be combined with lamd regularization")
+        if enforce_nonnegative_connectivity_matrix:
+            raise ValueError(
+                "COV cannot be combined with nonnegative-connectivity enforcement"
+            )
+        if gpu_float32:
+            raise ValueError("COV supports float64 only; gpu_float32 is not allowed")
+    else:
+        if has_absolute_noise or has_relative_noise:
+            raise ValueError(
+                "Gaussian-noise options are supported only with method='COV'; "
+                "legacy noisy IS/GD does not optimize the calibrated Gaussian objective"
+            )
+        if covariance_optimizer != 'hybrid':
+            raise ValueError(
+                "covariance_optimizer is supported only with method='COV'"
+            )
+        if (
+            covariance_relative_tolerance != 1e-5
+            or covariance_absolute_tolerance != 1e-10
+        ):
+            raise ValueError(
+                "covariance convergence tolerances are supported only with "
+                "method='COV'"
+            )
+        if covariance_handoff_relative_tolerance != 1e-2:
+            raise ValueError(
+                "covariance_handoff_relative_tolerance is supported only "
+                "with method='COV'"
+            )
     if log is not None:
         no_log = not log
     if save_pickle and output_prefix is None:
         raise ValueError("output_prefix must be provided when save_pickle=True")
-    if remove_fully_missing_loci and not ignore_missing_data:
-        raise ValueError("remove_fully_missing_loci=True requires ignore_missing_data=True")
+    if repair_fully_missing_loci and remove_fully_missing_loci:
+        raise ValueError(
+            "repair_fully_missing_loci and remove_fully_missing_loci are "
+            "mutually exclusive"
+        )
     if eigh_threads is not None:
         set_eigh_num_threads(eigh_threads)
 
@@ -497,29 +898,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = dmap_target.shape
             missing_analysis = _summarize_missing_data(dmap_target, 'dmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                dmap_target, removal_info = _remove_fully_missing_loci(dmap_target, 'dmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                dmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    dmap_target,
-                    'dmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            dmap_target = _handle_missing_data(
+                dmap_target,
+                'dmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
             ddmap_target = ((3. * np.pi) / 8.) * np.power(dmap_target, 2.)
         elif input_type == 'ddmap':
             if verbose and console:
@@ -546,29 +932,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = ddmap_target.shape
             missing_analysis = _summarize_missing_data(ddmap_target, 'ddmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                ddmap_target, removal_info = _remove_fully_missing_loci(ddmap_target, 'ddmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                ddmap_target, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    ddmap_target,
-                    'ddmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            ddmap_target = _handle_missing_data(
+                ddmap_target,
+                'ddmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
         elif input_type == 'cmap':
             if verbose and console:
                 console.print("Reading contact map")
@@ -661,29 +1032,14 @@ def run_optimization(input_path=None,
                 )
             original_matrix_rows, original_matrix_cols = cmap.shape
             missing_analysis = _summarize_missing_data(cmap, 'cmap')
-            handling_info = {
-                'nearest_neighbor_repaired_pairs': [],
-                'nearest_neighbor_repair_count': 0,
-                'removed_fully_missing_loci': [],
-                'removed_fully_missing_loci_count': 0,
-                'remaining_fully_missing_loci': missing_analysis['fully_missing_loci'],
-                'missing_pairs_after_repair': missing_analysis['missing_pairs'],
-                'missing_fraction_after_repair': missing_analysis['missing_fraction'],
-                'missing_pairs_after_removal': missing_analysis['missing_pairs'],
-                'missing_fraction_after_removal': missing_analysis['missing_fraction'],
-            }
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['fully_missing_loci']:
-                cmap, removal_info = _remove_fully_missing_loci(cmap, 'cmap')
-                handling_info.update(removal_info)
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
-                cmap, repair_update = _repair_fully_missing_loci_nearest_neighbors(
-                    cmap,
-                    'cmap',
-                    missing_analysis['missing_mask'],
-                    missing_analysis['fully_missing_loci'],
-                )
-                handling_info.update(repair_update)
-            missing_analysis.update(handling_info)
+            cmap = _handle_missing_data(
+                cmap,
+                'cmap',
+                missing_analysis,
+                ignore_missing_data=ignore_missing_data,
+                repair_fully_missing_loci=repair_fully_missing_loci,
+                remove_fully_missing_loci=remove_fully_missing_loci,
+            )
             
             # Apply neighbor balancing if requested
             if neighbor_balance:
@@ -691,11 +1047,30 @@ def run_optimization(input_path=None,
                     console.print("Applying neighbor balancing to contact map (see Paggi, Zhang 2025)")
                 cmap = neighbor_balance_symmetric(cmap, not_normalize=not_normalize)
             
-            if ignore_missing_data:
-                ddmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
-            else:
-                ddmap_target = cmap2dmap(cmap, alpha, not_normalize)
+            ddmap_target = cmap2dmap_missing_data(cmap, alpha, not_normalize)
             ddmap_target = ((3. * np.pi) / 8.) * np.power(ddmap_target, 2.)
+
+        # Legacy missing-data paths use infinity as their sentinel, while COV
+        # uses NaN so finite entries alone define the observed pair set.
+        if (
+            method == 'COV'
+            and ignore_missing_data
+            and np.any(np.isinf(ddmap_target))
+        ):
+            ddmap_target = np.asarray(ddmap_target, dtype=np.float64).copy()
+            ddmap_target[np.isinf(ddmap_target)] = np.nan
+
+        if (
+            method == 'DI'
+            and missing_analysis is not None
+            and missing_analysis['missing_pairs_after_handling'] > 0
+        ):
+            raise ValueError(
+                "method='DI' requires a complete target and cannot ignore "
+                "missing pairs; set ignore_missing_data=False to interpolate "
+                "them or use method='IS', 'GD', or 'COV'"
+            )
+
         # Load connectivity matrix if provided
         if connectivity_matrix is not None:
             if isinstance(connectivity_matrix, str):
@@ -756,7 +1131,14 @@ def run_optimization(input_path=None,
             input_table.add_row("Matrix Balancing", "Yes" if balance else "No" if input_format == 'cooler' else "N/A")
             input_table.add_row("Neighbor Balancing", "Yes" if neighbor_balance else "No")
             input_table.add_row("Auto Normalization", "No" if not_normalize else "Yes")
-        input_table.add_row("Ignore Missing Data", "Yes" if ignore_missing_data else "No")
+        input_table.add_row(
+            "Missing Pair Policy",
+            "Exclude" if ignore_missing_data else "Interpolate",
+        )
+        input_table.add_row(
+            "Repair Fully Missing Loci",
+            "Yes" if repair_fully_missing_loci else "No",
+        )
         input_table.add_row("Remove Fully Missing Loci", "Yes" if remove_fully_missing_loci else "No")
         
         console.print(input_table)
@@ -774,7 +1156,7 @@ def run_optimization(input_path=None,
                 "Fully Missing Loci",
                 _format_index_list(missing_analysis['fully_missing_loci']),
             )
-            if ignore_missing_data and remove_fully_missing_loci and missing_analysis['removed_fully_missing_loci_count'] > 0:
+            if missing_analysis['removed_fully_missing_loci_count'] > 0:
                 missing_table.add_row(
                     "Removed Fully Missing",
                     _format_index_list(missing_analysis['removed_fully_missing_loci']),
@@ -791,7 +1173,7 @@ def run_optimization(input_path=None,
                     "Missing Pairs After Removal",
                     f"{missing_analysis['missing_pairs_after_removal']:,} / {ddmap_target.shape[0] * (ddmap_target.shape[0] - 1) // 2:,} ({100.0 * missing_analysis['missing_fraction_after_removal']:.2f}%)",
                 )
-            elif ignore_missing_data and missing_analysis['fully_missing_loci']:
+            elif missing_analysis['nearest_neighbor_repair_count'] > 0:
                 missing_table.add_row(
                     "NN Repaired Pairs",
                     _format_index_list(
@@ -810,6 +1192,18 @@ def run_optimization(input_path=None,
                     "Missing Pairs After Repair",
                     f"{missing_analysis['missing_pairs_after_repair']:,} / {missing_analysis['total_pairs']:,} ({100.0 * missing_analysis['missing_fraction_after_repair']:.2f}%)",
                 )
+            missing_table.add_row(
+                "Interpolated Missing Pairs",
+                str(missing_analysis['interpolated_missing_pair_count']),
+            )
+            missing_table.add_row(
+                "Excluded Missing Pairs",
+                (
+                    f"{missing_analysis['missing_pairs_after_handling']:,} / "
+                    f"{missing_analysis['total_pairs_after_handling']:,} "
+                    f"({100.0 * missing_analysis['missing_fraction_after_handling']:.2f}%)"
+                ),
+            )
 
             console.print(missing_table)
             console.print()  # spacing
@@ -819,12 +1213,19 @@ def run_optimization(input_path=None,
         opt_table.add_column("Parameter", style="dim", width=20)
         opt_table.add_column("Value", style="green")
         
-        method_str = "Iterative Scaling (IS)" if method == 'IS' else "Gradient Descent (GD)" if method == 'GD' else "Direct Inversion (DI)" if method == 'DI' else "Unknown"
+        method_str = (
+            "Iterative Scaling (IS)" if method == 'IS'
+            else "Gradient Descent (GD)" if method == 'GD'
+            else "Direct Inversion (DI)" if method == 'DI'
+            else "Covariance-cone Gaussian fit (COV)" if method == 'COV'
+            else "Unknown"
+        )
         opt_table.add_row("Method", method_str)
         
         if method != 'DI':
             opt_table.add_row("Iterations", f"{iteration:,}")
-            opt_table.add_row("Learning Rate", f"{learning_rate}")
+            if method in {'IS', 'GD'}:
+                opt_table.add_row("Learning Rate", f"{learning_rate}")
             
             # Momentum and Nesterov (only for IS)
             if method == 'IS':
@@ -841,8 +1242,36 @@ def run_optimization(input_path=None,
                 opt_table.add_row("Regularization", f"{reg} (λ = {lamd})")
             else:
                 opt_table.add_row("Regularization", "None")
-            if gaussian_noise_variance > 0.0:
-                opt_table.add_row("Noise Variance", f"{gaussian_noise_variance}")
+            if method == 'COV':
+                opt_table.add_row("Optimizer", covariance_optimizer)
+                opt_table.add_row(
+                    "Initialization",
+                    "provided connectivity"
+                    if connectivity_matrix is not None
+                    else "Rouse",
+                )
+                if has_absolute_noise:
+                    opt_table.add_row(
+                        "Noise Model", f"absolute variance {gaussian_noise_variance}"
+                    )
+                else:
+                    opt_table.add_row(
+                        "Noise Model",
+                        f"relative std {gaussian_noise_relative_std}",
+                    )
+                opt_table.add_row(
+                    "Relative KKT Tolerance",
+                    f"{covariance_relative_tolerance:.3e}",
+                )
+                opt_table.add_row(
+                    "Absolute KKT Tolerance",
+                    f"{covariance_absolute_tolerance:.3e}",
+                )
+                if covariance_optimizer == 'hybrid':
+                    opt_table.add_row(
+                        "PDHG-to-FISTA Handoff",
+                        f"{covariance_handoff_relative_tolerance:.3e}",
+                    )
         
         # GPU
         gpu_status = "[green]Enabled[/green]" if use_gpu and is_gpu_available() else "[yellow]Disabled[/yellow]"
@@ -891,43 +1320,148 @@ def run_optimization(input_path=None,
             console.print("\n[cyan]💡 Tip: For large matrices, GPU can provide 2-4x speedup. Install CuPy: conda install -c conda-forge cupy[/cyan]")
     
     # Run optimization
-    model = Optimize(ddmap_target, connectivity_matrix=connectivity_matrix, use_gpu=use_gpu, gpu_float32=gpu_float32)
-    
-    if use_gpu and model.use_gpu and verbose:
-        dtype_str = "float32" if getattr(model, "gpu_float32", False) else "float64"
-        console.print(f"[green]GPU acceleration enabled ({get_gpu_name()}), dtype={dtype_str}[/green]")
-
     solver_output_prefix = None if save_pickle else output_prefix
-    
-    keyword_arguments = {'learning_rate': learning_rate, 'lamd': lamd, 'reg': reg, 'method': method,
-                         'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
-                         'momentum': momentum, 'nesterov': nesterov}
+    covariance_optimization_info = None
+    fitted_gram_matrix = None
+    iteration_extra_series = None
+    use_gpu_enabled = False
 
-    if method == 'IS' or method == 'GD':
-        general_method = 'optimization'
-    elif method == 'DI':
-        general_method = 'direct'
-
-    if gaussian_noise_variance > 0.0:
-        keyword_arguments_noisy = {
-            'learning_rate': learning_rate,
-            'method': method,
-            'enforce_nonnegative_connectivity_matrix': enforce_nonnegative_connectivity_matrix,
-            'momentum': momentum,
-            'nesterov': nesterov
+    if method == 'COV':
+        covariance_solver = {
+            'hybrid': fit_gaussian_noise_covariance_hybrid,
+            'pdhg': fit_gaussian_noise_covariance_pdhg,
+        }[covariance_optimizer]
+        covariance_progress_callback, close_covariance_progress = (
+            _make_covariance_progress_callback(progress_callback, show_progress)
+        )
+        try:
+            covariance_solver_arguments = {
+                'relative_noise_std': gaussian_noise_relative_std,
+                'initial_connectivity': connectivity_matrix,
+                'use_gpu': use_gpu,
+                'max_iterations': iteration,
+                'relative_tolerance': covariance_relative_tolerance,
+                'absolute_tolerance': covariance_absolute_tolerance,
+                'save_steps': save_steps,
+                'progress_callback': covariance_progress_callback,
+            }
+            if covariance_optimizer == 'hybrid':
+                covariance_solver_arguments[
+                    'handoff_relative_tolerance'
+                ] = covariance_handoff_relative_tolerance
+            (
+                fitted_ddmap,
+                fitted_gram_matrix,
+                final_connectivity_matrix,
+                covariance_optimization_info,
+            ) = covariance_solver(
+                ddmap_target,
+                gaussian_noise_variance if has_absolute_noise else None,
+                **covariance_solver_arguments,
+            )
+        finally:
+            close_covariance_progress()
+        dmap_maxent = a2dmap_theory(
+            final_connectivity_matrix, force_positive_definite=True
+        )
+        reconstructed_ddmap = (3.0 * np.pi / 8.0) * np.square(dmap_maxent)
+        consistency_scale = max(float(np.max(np.abs(fitted_ddmap))), 1.0)
+        if not np.allclose(
+            reconstructed_ddmap,
+            fitted_ddmap,
+            rtol=1e-8,
+            atol=1e-10 * consistency_scale,
+        ):
+            raise RuntimeError(
+                "COV connectivity does not reproduce its fitted squared-distance map"
+            )
+        history = covariance_optimization_info['history']
+        loss = history['loss'].tolist()
+        entropy = history['entropy'].tolist()
+        iteration_extra_series = {
+            key: values
+            for key, values in history.items()
+            if key not in {'iteration', 'loss', 'entropy'}
         }
-        loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run_noisy(
-            iteration, gaussian_noise_variance=gaussian_noise_variance, general_method=general_method, save_steps=save_steps,
-            output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
-            **keyword_arguments_noisy)
+        connectivity_at_steps = covariance_optimization_info[
+            'connectivity_matrix_at_steps'
+        ]
+        use_gpu_enabled = covariance_optimization_info['backend'] == 'gpu'
+        if solver_output_prefix is not None:
+            for step, matrix in connectivity_at_steps.items():
+                np.savetxt(
+                    f'{solver_output_prefix}_connectivity_matrix_iter{step}.txt',
+                    matrix,
+                )
     else:
+        model = Optimize(
+            ddmap_target,
+            connectivity_matrix=connectivity_matrix,
+            use_gpu=use_gpu,
+            gpu_float32=gpu_float32,
+        )
+        use_gpu_enabled = model.use_gpu
+        if use_gpu and model.use_gpu and verbose:
+            dtype_str = (
+                "float32" if getattr(model, "gpu_float32", False) else "float64"
+            )
+            console.print(
+                f"[green]GPU acceleration enabled ({get_gpu_name()}), "
+                f"dtype={dtype_str}[/green]"
+            )
+        keyword_arguments = {
+            'learning_rate': learning_rate,
+            'lamd': lamd,
+            'reg': reg,
+            'method': method,
+            'enforce_nonnegative_connectivity_matrix': (
+                enforce_nonnegative_connectivity_matrix
+            ),
+            'momentum': momentum,
+            'nesterov': nesterov,
+        }
+        general_method = 'optimization' if method in {'IS', 'GD'} else 'direct'
         loss, entropy, dmap_maxent, final_connectivity_matrix, connectivity_at_steps = model.run(
             iteration, general_method=general_method, save_steps=save_steps,
             output_prefix=solver_output_prefix, progress_callback=progress_callback, show_progress=show_progress,
             **keyword_arguments)
     
     # Format per-iteration scalar outputs.
-    iteration_series_df = _build_iteration_series_frame(loss, entropy)
+    iteration_series_df = _build_iteration_series_frame(
+        loss, entropy, iteration_extra_series
+    )
+
+    if covariance_optimization_info is not None:
+        optimization_summary = {
+            'method': method,
+            'status': covariance_optimization_info['status'],
+            'converged': bool(covariance_optimization_info['converged']),
+            'iterations_executed': int(
+                covariance_optimization_info['iterations']
+            ),
+            'returned_iteration': int(
+                covariance_optimization_info['returned_iteration']
+            ),
+            'final_loss': float(covariance_optimization_info['loss']),
+            'final_entropy': float(covariance_optimization_info['entropy']),
+        }
+    else:
+        iterations_executed = len(iteration_series_df)
+        if method == 'DI':
+            status = 'direct_solution'
+        elif iterations_executed == 0:
+            status = 'no_iterations_requested'
+        else:
+            status = 'iteration_budget_completed'
+        optimization_summary = {
+            'method': method,
+            'status': status,
+            'converged': None,
+            'iterations_executed': int(iterations_executed),
+            'returned_iteration': int(iterations_executed),
+            'final_loss': float(model.loss),
+            'final_entropy': float(model.entropy),
+        }
 
     # Print regularization norms if requested
     if verbose:
@@ -939,8 +1473,33 @@ def run_optimization(input_path=None,
                 final_connectivity_matrix[np.triu_indices_from(final_connectivity_matrix, k=1)]).sum())
 
         if len(iteration_series_df) > 0 and console:
-            console.print("Final loss: {}".format(iteration_series_df['loss'].values[-1]))
-            console.print("Final entropy: {}".format(iteration_series_df['entropy'].values[-1]))
+            if covariance_optimization_info is not None:
+                returned_iteration = covariance_optimization_info[
+                    'returned_iteration'
+                ]
+                console.print(
+                    "Returned loss at iteration {}: {}".format(
+                        returned_iteration,
+                        covariance_optimization_info['loss'],
+                    )
+                )
+                console.print(
+                    "Returned entropy at iteration {}: {}".format(
+                        returned_iteration,
+                        covariance_optimization_info['entropy'],
+                    )
+                )
+            else:
+                console.print(
+                    "Final loss: {}".format(
+                        iteration_series_df['loss'].values[-1]
+                    )
+                )
+                console.print(
+                    "Final entropy: {}".format(
+                        iteration_series_df['entropy'].values[-1]
+                    )
+                )
 
     run_parameters_df = _build_run_parameters_frame({
         'input_source': input_source,
@@ -959,12 +1518,159 @@ def run_optimization(input_path=None,
         'lamd': lamd,
         'reg': reg,
         'gaussian_noise_variance': gaussian_noise_variance,
+        'gaussian_noise_relative_std': gaussian_noise_relative_std,
+        'gaussian_noise_model': (
+            covariance_optimization_info['noise_model']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_minimum': (
+            covariance_optimization_info['noise_variance_minimum']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_median': (
+            covariance_optimization_info['noise_variance_median']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'gaussian_noise_variance_maximum': (
+            covariance_optimization_info['noise_variance_maximum']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_optimizer_requested': (
+            covariance_optimizer if method == 'COV' else None
+        ),
+        'covariance_optimizer_resolved': (
+            covariance_optimization_info['algorithm']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_relative_tolerance': (
+            covariance_relative_tolerance if method == 'COV' else None
+        ),
+        'covariance_absolute_tolerance': (
+            covariance_absolute_tolerance if method == 'COV' else None
+        ),
+        'covariance_handoff_relative_tolerance': (
+            covariance_handoff_relative_tolerance
+            if method == 'COV' and covariance_optimizer == 'hybrid'
+            else None
+        ),
+        'covariance_phase_iterations': (
+            covariance_optimization_info.get('phase_iterations')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_phase_wall_seconds': (
+            covariance_optimization_info.get('phase_wall_seconds')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_converged': (
+            covariance_optimization_info['converged']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_status': (
+            covariance_optimization_info['status']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_iterations_executed': (
+            covariance_optimization_info['iterations']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_iteration': (
+            covariance_optimization_info['returned_iteration']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_loss': (
+            covariance_optimization_info['loss']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_returned_entropy': (
+            covariance_optimization_info['entropy']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_relative_eliminated_kkt_residual': (
+            covariance_optimization_info.get(
+                'relative_eliminated_kkt_residual'
+            )
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_independent_kkt_converged': (
+            covariance_optimization_info.get('independent_kkt_converged')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_resolved': (
+            covariance_optimization_info['initialization']['kind']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_backend': (
+            covariance_optimization_info['initialization']['backend']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_initialization_wall_seconds': (
+            covariance_optimization_info['initialization']['wall_seconds']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_backend': (
+            covariance_optimization_info['backend']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_dtype': (
+            covariance_optimization_info['dtype']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_gpu_device': (
+            covariance_optimization_info['gpu_device']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_cupy_version': (
+            covariance_optimization_info['cupy_version']
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_fista_initial_step_size': (
+            covariance_optimization_info.get('initial_step_size')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_fista_final_step_size': (
+            covariance_optimization_info.get('final_step_size')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_fista_backtracking_reductions': (
+            covariance_optimization_info.get('backtracking_reductions')
+            if covariance_optimization_info is not None
+            else None
+        ),
+        'covariance_fista_restart_count': (
+            covariance_optimization_info.get('restart_count')
+            if covariance_optimization_info is not None
+            else None
+        ),
         'iteration': iteration,
         'learning_rate': learning_rate,
         'momentum': momentum,
         'nesterov': nesterov,
         'use_gpu_requested': use_gpu,
-        'use_gpu_enabled': model.use_gpu,
+        'use_gpu_enabled': use_gpu_enabled,
         'gpu_float32': gpu_float32,
         'binsize': binsize,
         'hic_norm': hic_norm,
@@ -972,6 +1678,7 @@ def run_optimization(input_path=None,
         'no_log': no_log,
         'no_xyzs': no_xyzs,
         'ignore_missing_data': ignore_missing_data,
+        'repair_fully_missing_loci': repair_fully_missing_loci,
         'remove_fully_missing_loci': remove_fully_missing_loci,
         'balance': balance,
         'not_normalize': not_normalize,
@@ -991,6 +1698,9 @@ def run_optimization(input_path=None,
         'missing_pair_fraction_after_repair': missing_analysis['missing_fraction_after_repair'] if missing_analysis is not None else 0.0,
         'missing_pairs_after_removal': missing_analysis['missing_pairs_after_removal'] if missing_analysis is not None else 0,
         'missing_pair_fraction_after_removal': missing_analysis['missing_fraction_after_removal'] if missing_analysis is not None else 0.0,
+        'interpolated_missing_pair_count': missing_analysis['interpolated_missing_pair_count'] if missing_analysis is not None else 0,
+        'missing_pairs_after_handling': missing_analysis['missing_pairs_after_handling'] if missing_analysis is not None else 0,
+        'missing_pair_fraction_after_handling': missing_analysis['missing_fraction_after_handling'] if missing_analysis is not None else 0.0,
         'remaining_fully_missing_loci': missing_analysis['remaining_fully_missing_loci'] if missing_analysis is not None else [],
         'eigh_threads': eigh_threads,
         'verbose': verbose,
@@ -1001,9 +1711,13 @@ def run_optimization(input_path=None,
         'iteration_series': iteration_series_df,
         'log': iteration_series_df,
         'run_parameters': run_parameters_df,
+        'optimization': optimization_summary,
         'dmap_final': dmap_maxent,
         'connectivity_matrix': final_connectivity_matrix
     }
+    if covariance_optimization_info is not None:
+        results['gram_matrix'] = fitted_gram_matrix
+        results['covariance_optimization'] = covariance_optimization_info
     if connectivity_at_steps:
         results['connectivity_matrix_at_steps'] = connectivity_at_steps
     if missing_analysis is not None and missing_analysis['removed_fully_missing_loci_count'] > 0:
@@ -1014,12 +1728,10 @@ def run_optimization(input_path=None,
     cmap_maxent = None
     rc_optimal = None
     if input_type == 'cmap':
-        cmap_rc_minimize_res = scipy.optimize.minimize_scalar(
-            objective_func, args=(final_connectivity_matrix, cmap))
-        rc_optimal = cmap_rc_minimize_res.x
+        rc_optimal = _optimize_contact_threshold(dmap_maxent, cmap)
         if verbose and console:
             console.print('Optimized contact threshold distance: {}\n'.format(rc_optimal))
-        cmap_maxent = a2cmap_theory(final_connectivity_matrix, rc_optimal)
+        cmap_maxent = dmap2cmap(dmap_maxent, rc_optimal)
         results['cmap_final'] = cmap_maxent
         results['rc_optimal'] = rc_optimal
 

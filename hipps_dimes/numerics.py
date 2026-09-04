@@ -8,13 +8,9 @@ https://journals.aps.org/prx/abstract/10.1103/PhysRevX.11.011051
 3. Shi, Guang, Sucheol, Shin, and D. Thirumalai. "Static three-dimensional structures determine fast dynamics between distal loci pairs in interphase chromosomes." Science Advance 11 (31), eadx1763
 """
 
-import os
-import sys
-import warnings
 import itertools
-
-if not sys.warnoptions:
-    warnings.simplefilter("ignore")
+import os
+import time
 
 import numpy as np
 import scipy
@@ -56,6 +52,7 @@ _CUPY_AVAILABLE = False
 _CUPY_GPU_NAME = None
 try:
     import cupy as cp
+    import cupyx
 
     # Test if GPU is actually accessible
     cp.cuda.runtime.getDeviceCount()
@@ -132,7 +129,10 @@ def _a2dmap_theory_gpu(A_gpu, force_positive_definite=False, return_eigenvalues=
     # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = cp.diag(Omega)
-    sigma = cp.sqrt(Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega)
+    sigma_squared = Omega_diag[:, cp.newaxis] + Omega_diag - 2.0 * Omega
+    if force_positive_definite:
+        sigma_squared = cp.maximum(sigma_squared, 0.0)
+    sigma = cp.sqrt(sigma_squared)
     dmap = 2.0 * cp.sqrt(2.0 / cp.pi) * sigma
 
     if return_eigenvalues:
@@ -1324,7 +1324,8 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     # (A is generated/updated numerically and we already nan_to_num() in optimization)
     eigvalue, eigvector = np.linalg.eigh(A)
 
-    temp = -1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = -1.0 / eigvalue
 
     temp[temp == -np.inf] = 0.0
     temp[temp == np.inf] = 0.0
@@ -1340,7 +1341,10 @@ def a2dmap_theory(A, force_positive_definite=False, return_eigenvalues=False):
     # V @ diag(temp) @ V.T == (V * temp) @ V.T  (broadcast scales columns of V)
     Omega = (eigvector * temp) @ eigvector.T
     Omega_diag = np.diag(Omega)
-    sigma = np.sqrt(Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega)
+    sigma_squared = Omega_diag[:, np.newaxis] + Omega_diag - 2.0 * Omega
+    if force_positive_definite:
+        sigma_squared = np.maximum(sigma_squared, 0.0)
+    sigma = np.sqrt(sigma_squared)
 
     dmap = 2.0 * np.sqrt(2.0 / np.pi) * sigma
 
@@ -1429,7 +1433,8 @@ def a2dmap_theory_with_force_applied(A, force):
     eigvalue, eigvector = np.linalg.eigh(A)
 
     # Compute -1/eigenvalue for thermal fluctuations (Ω matrix)
-    temp = -1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = -1.0 / eigvalue
 
     # Handle infinities and large values (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0
@@ -1449,7 +1454,8 @@ def a2dmap_theory_with_force_applied(A, force):
     # Compute equilibrium displacement due to force
     # R_eq = A^(-1) * B = V * (V^T * B) / λ
     # For zero eigenvalues, set 1/λ = 0
-    temp_force = 1.0 / eigvalue
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp_force = 1.0 / eigvalue
     temp_force[np.abs(temp_force) >= TOL] = 0.0
     temp_force[np.isinf(temp_force)] = 0.0
 
@@ -1490,20 +1496,119 @@ def a2dmap_theory_with_force_applied(A, force):
     return dmap
 
 
+def _contact_probability_from_mean_distance(mean_distance, rc):
+    """Return Gaussian contact probabilities without diagonal handling."""
+    mean_distance = np.asarray(mean_distance, dtype=np.float64)
+    sigma = 0.5 * np.sqrt(np.pi / 2.0) * mean_distance
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        scaled_cutoff = rc / sigma
+        # Maxwell CDF, equivalent to the prior erf-minus-exponential formula.
+        probability = scipy.special.gammainc(
+            1.5, 0.5 * np.square(scaled_cutoff)
+        )
+    return probability
+
+
 def dmap2cmap(dmap, rc):
-    """
-    Return contact map given the mean distance map and the contact threshold
-    """
-    sigma_mtx = 0.5 * np.sqrt(np.pi / 2.0) * dmap
-    cmap = (
-        scipy.special.erf(rc / (np.sqrt(2) * sigma_mtx))
-        - np.sqrt(2.0 / np.pi)
-        * np.exp(-0.5 * rc**2.0 / np.power(sigma_mtx, 2.0))
-        * rc
-        / sigma_mtx
-    )
+    """Return a contact map given a mean distance map and contact threshold."""
+    cmap = _contact_probability_from_mean_distance(dmap, rc)
     np.fill_diagonal(cmap, 1.0)
     return cmap
+
+
+def _contact_threshold_pair_data(dmap_model, cmap_exp):
+    """Prepare normalized observed pairs for contact-threshold fitting."""
+    dmap_model = np.asarray(dmap_model, dtype=np.float64)
+    cmap_exp = np.asarray(cmap_exp, dtype=np.float64)
+    if (
+        dmap_model.ndim != 2
+        or dmap_model.shape[0] != dmap_model.shape[1]
+        or cmap_exp.shape != dmap_model.shape
+    ):
+        raise ValueError(
+            "model distance and experimental contact maps must be square "
+            "matrices with matching shapes"
+        )
+
+    finite_contacts = cmap_exp[np.isfinite(cmap_exp)]
+    if finite_contacts.size == 0:
+        raise ValueError("experimental contact map has no finite entries")
+    contact_scale = float(np.max(finite_contacts))
+    if contact_scale <= 0.0:
+        raise ValueError("experimental contact map has no positive entries")
+
+    observed = np.triu(np.ones(cmap_exp.shape, dtype=bool), k=1)
+    observed &= np.isfinite(cmap_exp)
+    observed &= cmap_exp > 0.0
+    if not np.any(observed):
+        raise ValueError(
+            "contact-threshold fitting requires at least one positive finite "
+            "observed pair"
+        )
+    model_distances = dmap_model[observed]
+    if not np.all(np.isfinite(model_distances) & (model_distances > 0.0)):
+        raise ValueError(
+            "model distance map must be positive and finite on every "
+            "observed contact pair"
+        )
+    observed_contacts = cmap_exp[observed] / contact_scale
+    return model_distances, np.log(observed_contacts)
+
+
+def _contact_threshold_log_rmse(rc, model_distances, target_log_contacts):
+    """Evaluate log-contact RMSE on a fixed set of observed pairs."""
+    if not np.isfinite(rc) or rc <= 0.0:
+        return np.finfo(np.float64).max
+    model_contacts = _contact_probability_from_mean_distance(
+        model_distances, rc
+    )
+    model_contacts = np.clip(
+        model_contacts, np.finfo(np.float64).tiny, 1.0
+    )
+    squared_log_error = np.square(
+        np.log(model_contacts) - target_log_contacts
+    )
+    return float(np.sqrt(np.mean(squared_log_error)))
+
+
+def _optimize_contact_threshold(dmap_model, cmap_exp):
+    """Fit one contact threshold from a fixed model distance map."""
+    model_distances, target_log_contacts = _contact_threshold_pair_data(
+        dmap_model, cmap_exp
+    )
+    target_contacts = np.exp(target_log_contacts)
+    target_contacts = np.clip(
+        target_contacts,
+        np.finfo(np.float64).tiny,
+        1.0 - np.finfo(np.float64).eps,
+    )
+    sigma = 0.5 * np.sqrt(np.pi / 2.0) * model_distances
+    # Each inverse CDF is the cutoff that matches one observed pair, providing
+    # a scale-aware finite search interval. Optimize log(rc) so the physical
+    # cutoff stays positive across widely different distance scales.
+    implied_cutoffs = sigma * np.sqrt(
+        2.0 * scipy.special.gammaincinv(1.5, target_contacts)
+    )
+    log_lower = float(np.log(np.min(implied_cutoffs)) - np.log(2.0))
+    log_upper = float(np.log(np.max(implied_cutoffs)) + np.log(2.0))
+
+    def objective(log_cutoff):
+        return _contact_threshold_log_rmse(
+            np.exp(log_cutoff), model_distances, target_log_contacts
+        )
+
+    result = scipy.optimize.minimize_scalar(
+        objective,
+        bounds=(log_lower, log_upper),
+        method="bounded",
+        options={"xatol": 1e-10},
+    )
+    rc_optimal = float(np.exp(result.x))
+    if not result.success or not np.isfinite(rc_optimal):
+        raise RuntimeError(
+            "contact-threshold optimization failed: " + str(result.message)
+        )
+    return rc_optimal
 
 
 def a2cmap_theory(A, rc):
@@ -1600,7 +1705,8 @@ def a2xyz_sample(A, ensemble=1, force_positive_definite=False):
     """
     TOL = 10**8.0
     eigvalue, eigvector = np.linalg.eigh(A)
-    temp = 1.0 / eigvalue[:, np.newaxis]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = 1.0 / eigvalue[:, np.newaxis]
 
     # replace close zero eigvenvalue with zero
     temp[temp == -np.inf] = 0.0
@@ -1697,7 +1803,8 @@ def a2xyz_sample_with_force_applied(A, force, ensemble=1):
     eigvalue, eigvector = np.linalg.eigh(A)
 
     # Compute 1/eigenvalue, handling zero eigenvalues
-    temp = 1.0 / eigvalue[:, np.newaxis]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        temp = 1.0 / eigvalue[:, np.newaxis]
 
     # Replace infinities and large values with zero (zero eigenvalue handling)
     temp[temp == -np.inf] = 0.0
@@ -1825,19 +1932,13 @@ def interpolate_missing(matrix):
 
 
 def objective_func(rc, A_mtx, cmap_exp):
-    x = a2cmap_theory(A_mtx, rc)
-    y = cmap_exp / np.nanmax(cmap_exp)
-    logx = interpolate_missing(np.log(x))
-    logy = interpolate_missing(np.log(y))
-    res = (
-        np.power(
-            logx[np.triu_indices_from(logx, k=1)]
-            - logy[np.triu_indices_from(logy, k=1)],
-            2.0,
-        ).mean()
-        ** 0.5
+    """Compatibility objective for callers supplying a connectivity matrix."""
+    model_distances, target_log_contacts = _contact_threshold_pair_data(
+        a2dmap_theory(A_mtx), cmap_exp
     )
-    return res
+    return _contact_threshold_log_rmse(
+        rc, model_distances, target_log_contacts
+    )
 
 
 # FUNCTION TO CONVERT CMAP TO DMAP
@@ -1864,7 +1965,9 @@ def cmap2dmap(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # and then interpolate the missing data. Any zero contact pair will be interpolated
-    cmap_log = interpolate_missing(np.log10(cmap))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cmap_log = np.log10(cmap)
+    cmap_log = interpolate_missing(cmap_log)
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # lastly, convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
@@ -1875,10 +1978,12 @@ def cmap2dmap_missing_data(cmap, alpha, not_normalize):
     # cmap is the raw data
     # we take log on contact map
     # unlike cmap2dmap(), this function does not interpolate the missing data. Just leave the missing data as is
-    cmap_log = np.log10(cmap)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cmap_log = np.log10(cmap)
     cmap_log = np.array((cmap_log + cmap_log.T) / 2.0)
     # convert to distance map using value of alpha
     dmap = cmap2dmap_core(cmap_log, 1.0, alpha, not_normalize)
+    np.fill_diagonal(dmap, 0.0)
     return dmap
 
 
@@ -1886,6 +1991,355 @@ def nearestNSD(X, delta):
     v, w = np.linalg.eigh(X)
     v_new = np.minimum(v, delta)
     return w @ np.diag(v_new) @ w.T
+
+
+def _squared_distances_from_gram(B, array_module=np):
+    """Return the squared Euclidean distance matrix induced by Gram matrix ``B``."""
+    diagonal = array_module.diag(B)
+    ddmap = diagonal[:, array_module.newaxis] + diagonal - 2.0 * B
+    ddmap = 0.5 * (ddmap + ddmap.T)
+    array_module.fill_diagonal(ddmap, 0.0)
+    return ddmap
+
+
+def _centered_orthonormal_basis(n):
+    """Return a deterministic orthonormal basis for ``1.T @ x = 0``."""
+    basis = np.zeros((n, n - 1), dtype=np.float64)
+    for column in range(n - 1):
+        denominator = np.sqrt((column + 1) * (column + 2))
+        basis[: column + 1, column] = 1.0 / denominator
+        basis[column + 1, column] = -(column + 1) / denominator
+    return basis
+
+
+def _positive_finite_scalar(value, name):
+    """Validate and return one strictly positive finite scalar."""
+    if isinstance(value, (bool, np.bool_)) or not np.isscalar(value):
+        raise ValueError(f"{name} must be a positive finite scalar")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a positive finite scalar") from error
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name} must be a positive finite scalar")
+    return value
+
+
+def _validate_gaussian_covariance_inputs(
+    squared_distances, noise_variance, relative_noise_std
+):
+    """Validate observed pairs and construct their Gaussian variances."""
+    observed = np.asarray(squared_distances, dtype=np.float64)
+    if observed.ndim != 2 or observed.shape[0] != observed.shape[1]:
+        raise ValueError("squared_distances must be a square matrix")
+    if observed.shape[0] < 2:
+        raise ValueError("squared_distances must contain at least two loci")
+    if np.any(np.isinf(observed)):
+        raise ValueError("squared_distances must not contain infinite values")
+
+    n = observed.shape[0]
+    off_diagonal = ~np.eye(n, dtype=bool)
+    finite = np.isfinite(observed)
+    if not np.array_equal(finite & off_diagonal, finite.T & off_diagonal):
+        raise ValueError("the observed-pair pattern must be symmetric")
+    pair_mask = finite & off_diagonal
+    upper_mask = np.triu(pair_mask, k=1)
+    if not np.any(upper_mask):
+        raise ValueError("at least one off-diagonal pair must be observed")
+    if not np.allclose(
+        observed[pair_mask], observed.T[pair_mask], rtol=1e-10, atol=1e-12
+    ):
+        raise ValueError("observed squared distances must be symmetric")
+    if np.any(observed[pair_mask] <= 0.0):
+        raise ValueError("observed off-diagonal squared distances must be positive")
+
+    # A disconnected observation graph leaves relative translations between
+    # components unconstrained.  Along those covariance directions the
+    # Gaussian COV objective is unbounded below, even though a finite iterate
+    # can have an arbitrarily small KKT residual.  Scan the already-materialized
+    # dense pair mask in O(n^2) time without allocating another adjacency matrix.
+    unvisited = np.ones(n, dtype=bool)
+    components = []
+    while np.any(unvisited):
+        start = int(np.flatnonzero(unvisited)[0])
+        unvisited[start] = False
+        stack = [start]
+        component = []
+        while stack:
+            locus = stack.pop()
+            component.append(locus)
+            neighbors = np.flatnonzero(pair_mask[locus] & unvisited)
+            if neighbors.size:
+                unvisited[neighbors] = False
+                stack.extend(neighbors.tolist())
+        components.append(sorted(component))
+
+    if len(components) != 1:
+        component_sizes = [len(component) for component in components]
+        component_previews = [
+            component[:12] for component in components[:8]
+        ]
+        raise ValueError(
+            "the observed squared-distance graph must be connected; "
+            f"found {len(components)} components with sizes {component_sizes} "
+            f"and locus previews {component_previews}. Repair or remove fully "
+            "missing loci explicitly; disjoint multi-locus clusters require "
+            "corrected input constraints"
+        )
+
+    has_absolute = noise_variance is not None
+    has_relative = relative_noise_std is not None
+    if has_absolute == has_relative:
+        raise ValueError(
+            "provide exactly one of noise_variance or relative_noise_std"
+        )
+
+    pair_i, pair_j = np.where(upper_mask)
+    target_pairs = observed[pair_i, pair_j]
+    if has_absolute:
+        noise_parameter = _positive_finite_scalar(
+            noise_variance, "noise_variance"
+        )
+        pair_variance = np.full(
+            target_pairs.shape, noise_parameter, dtype=np.float64
+        )
+        noise_model = "homoskedastic_absolute_variance"
+    else:
+        noise_parameter = _positive_finite_scalar(
+            relative_noise_std, "relative_noise_std"
+        )
+        pair_variance = np.square(noise_parameter * target_pairs)
+        noise_model = "heteroskedastic_relative_std"
+
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        inverse_variance = 1.0 / pair_variance
+    if not np.all(np.isfinite(pair_variance)) or not np.all(
+        np.isfinite(inverse_variance)
+    ):
+        raise ValueError(
+            "the noise specification must produce positive finite pair variances "
+            "and inverse variances"
+        )
+
+    return (
+        observed,
+        pair_i,
+        pair_j,
+        target_pairs,
+        pair_variance,
+        noise_model,
+        noise_parameter,
+    )
+
+
+def _rouse_initial_connectivity(squared_distances, pair_i, pair_j):
+    """Return a Rouse chain matched to the observed-pair distance mean."""
+    squared_distances = np.asarray(squared_distances, dtype=np.float64)
+    observed_pair_mean_squared_distance = _positive_finite_scalar(
+        np.mean(squared_distances[pair_i, pair_j]),
+        "observed-pair mean squared distance",
+    )
+    unit_spring_rouse_pair_mean_squared_distance = 3.0 * float(
+        np.mean(pair_j - pair_i)
+    )
+    spring_constant = (
+        unit_spring_rouse_pair_mean_squared_distance
+        / observed_pair_mean_squared_distance
+    )
+    connectivity = construct_connectivity_matrix_rouse(
+        squared_distances.shape[0], spring_constant
+    )
+    return (
+        connectivity,
+        observed_pair_mean_squared_distance,
+        unit_spring_rouse_pair_mean_squared_distance,
+        spring_constant,
+    )
+
+
+def _reduced_gram_from_connectivity(connectivity, basis):
+    """Validate a centered stable connectivity and return its internal Gram."""
+    n = basis.shape[0]
+    connectivity = np.asarray(connectivity, dtype=np.float64)
+    if connectivity.shape != (n, n) or not np.all(np.isfinite(connectivity)):
+        raise ValueError("initial_connectivity must be a finite NxN matrix")
+    if not np.allclose(connectivity, connectivity.T, rtol=1e-10, atol=1e-12):
+        raise ValueError("initial_connectivity must be symmetric")
+    row_scale = max(float(np.max(np.abs(connectivity))), 1.0)
+    row_sum_error = float(np.max(np.abs(np.sum(connectivity, axis=1))))
+    if row_sum_error > 1e-10 * row_scale:
+        raise ValueError("initial_connectivity rows must sum to zero")
+    reduced_connectivity = basis.T @ (-connectivity) @ basis
+    eigenvalues = np.linalg.eigvalsh(reduced_connectivity)
+    if float(eigenvalues[0]) <= 0.0:
+        raise ValueError("initial_connectivity must be stable in every internal mode")
+    reduced_gram = 3.0 * np.linalg.solve(
+        reduced_connectivity,
+        np.eye(n - 1, dtype=np.float64),
+    )
+    return reduced_gram, eigenvalues
+
+
+def _calibrate_gaussian_covariance_initial_scale(
+    reduced_gram,
+    basis,
+    pair_i,
+    pair_j,
+    target_pairs,
+    inverse_variance,
+    *,
+    array_module=np,
+):
+    """Exactly minimize the COV objective over one positive Gram scale."""
+    use_gpu = _CUPY_AVAILABLE and array_module is cp
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
+    start_time = time.perf_counter()
+
+    gram = basis @ reduced_gram @ basis.T
+    fitted_pairs = _squared_distances_from_gram(
+        gram, array_module=array_module
+    )[pair_i, pair_j]
+    distance_square_coefficient = float(
+        array_module.sum(
+            inverse_variance * array_module.square(fitted_pairs)
+        ).item()
+    )
+    distance_target_coefficient = float(
+        array_module.sum(inverse_variance * fitted_pairs * target_pairs).item()
+    )
+    if (
+        not np.isfinite(distance_square_coefficient)
+        or distance_square_coefficient <= 0.0
+        or not np.isfinite(distance_target_coefficient)
+        or distance_target_coefficient <= 0.0
+    ):
+        raise RuntimeError(
+            "initial scalar calibration requires positive finite COV coefficients"
+        )
+
+    n_modes = reduced_gram.shape[0]
+    entropy_scale_coefficient = 1.5 * n_modes
+    square_root_term = 2.0 * np.sqrt(distance_square_coefficient) * np.sqrt(
+        entropy_scale_coefficient
+    )
+    discriminant_root = np.hypot(
+        distance_target_coefficient, square_root_term
+    )
+    scale_factor = 0.5 * (
+        distance_target_coefficient / distance_square_coefficient
+        + discriminant_root / distance_square_coefficient
+    )
+    if not np.isfinite(scale_factor) or scale_factor <= 0.0:
+        raise RuntimeError(
+            "initial scalar calibration produced a nonpositive or nonfinite scale"
+        )
+
+    determinant_sign, logdet = array_module.linalg.slogdet(reduced_gram)
+    determinant_sign = float(determinant_sign.item())
+    logdet = float(logdet.item())
+    if determinant_sign <= 0.0 or not np.isfinite(logdet):
+        raise RuntimeError(
+            "initial scalar calibration requires a positive-definite Gram matrix"
+        )
+    residual_before = fitted_pairs - target_pairs
+    residual_after = scale_factor * fitted_pairs - target_pairs
+    data_objective_before = 0.5 * float(
+        array_module.sum(
+            inverse_variance * array_module.square(residual_before)
+        ).item()
+    )
+    data_objective_after = 0.5 * float(
+        array_module.sum(
+            inverse_variance * array_module.square(residual_after)
+        ).item()
+    )
+    objective_before = -1.5 * logdet + data_objective_before
+    objective_after = (
+        -1.5 * (logdet + n_modes * np.log(scale_factor))
+        + data_objective_after
+    )
+    derivative_residual = (
+        distance_square_coefficient * scale_factor
+        - distance_target_coefficient
+        - entropy_scale_coefficient / scale_factor
+    )
+    derivative_scale = max(
+        abs(distance_square_coefficient * scale_factor),
+        abs(distance_target_coefficient),
+        abs(entropy_scale_coefficient / scale_factor),
+        1.0,
+    )
+    reduced_gram = scale_factor * reduced_gram
+    if use_gpu:
+        cp.cuda.get_current_stream().synchronize()
+
+    return reduced_gram, {
+        "method": "exact_covariance_objective_ray_minimum",
+        "scale_factor": float(scale_factor),
+        "connectivity_scale_factor": float(1.0 / scale_factor),
+        "objective_before": float(objective_before),
+        "objective_after": float(objective_after),
+        "objective_reduction": float(objective_before - objective_after),
+        "relative_derivative_residual": float(
+            abs(derivative_residual) / derivative_scale
+        ),
+        "backend": "gpu" if use_gpu else "cpu",
+        "wall_seconds": time.perf_counter() - start_time,
+    }
+
+
+def _initialize_gaussian_reduced_gram(
+    observed,
+    pair_i,
+    pair_j,
+    basis,
+    initial_connectivity,
+):
+    """Return the Rouse or explicitly supplied connectivity initialization."""
+    start_time = time.perf_counter()
+    if initial_connectivity is not None:
+        reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
+            initial_connectivity, basis
+        )
+        initialization_info = {
+            "kind": "provided_connectivity",
+            "minimum_internal_stiffness": float(eigenvalues[0]),
+            "maximum_internal_stiffness": float(eigenvalues[-1]),
+        }
+    else:
+        (
+            connectivity,
+            observed_pair_mean_squared_distance,
+            unit_spring_rouse_pair_mean_squared_distance,
+            spring_constant,
+        ) = _rouse_initial_connectivity(observed, pair_i, pair_j)
+        reduced_gram, eigenvalues = _reduced_gram_from_connectivity(
+            connectivity, basis
+        )
+        initialization_info = {
+            "kind": "rouse",
+            "observed_pair_mean_squared_distance": (
+                observed_pair_mean_squared_distance
+            ),
+            "unit_spring_rouse_pair_mean_squared_distance": (
+                unit_spring_rouse_pair_mean_squared_distance
+            ),
+            "spring_constant": spring_constant,
+            "minimum_internal_stiffness": float(eigenvalues[0]),
+            "maximum_internal_stiffness": float(eigenvalues[-1]),
+        }
+
+    reduced_gram = 0.5 * (reduced_gram + reduced_gram.T)
+    try:
+        np.linalg.cholesky(reduced_gram)
+    except np.linalg.LinAlgError as error:
+        raise RuntimeError(
+            "initial covariance is not strictly positive definite"
+        ) from error
+    initialization_info.setdefault("backend", "cpu")
+    initialization_info["wall_seconds"] = time.perf_counter() - start_time
+    return reduced_gram, initialization_info
 
 
 def ddmap2cov(ddmap):

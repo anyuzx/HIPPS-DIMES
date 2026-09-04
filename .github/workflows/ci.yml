@@ -63,8 +63,11 @@ jobs:
     - name: Run linting
       run: |
         flake8 HippsDimes.py
+        flake8 hipps_dimes/covariance_pdhg.py tests/test_covariance_pdhg.py --max-line-length=88 --extend-ignore=E203,W503
         black --check HippsDimes.py
-        isort --check-only HippsDimes.py
+        black --check hipps_dimes/covariance_pdhg.py
+        black --check tests/test_covariance_pdhg.py
+        isort --check-only HippsDimes.py hipps_dimes/covariance_pdhg.py tests/test_covariance_pdhg.py
         mypy HippsDimes.py
 
   build:
@@ -87,4 +90,4 @@ jobs:
       run: python -m build
     
     - name: Check package
-      run: twine check dist/* 
+      run: twine check dist/*

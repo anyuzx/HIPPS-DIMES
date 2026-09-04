@@ -3,6 +3,8 @@
 import json
 import os
 import pickle
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -10,8 +12,39 @@ import pytest
 from click.testing import CliRunner
 
 import HippsDimes
-from hipps_dimes.api import _repair_fully_missing_loci_nearest_neighbors, _summarize_missing_data
+import hipps_dimes.api as api
+import hipps_dimes.covariance_pdhg as covariance_pdhg
+import hipps_dimes.numerics as numerics
+from hipps_dimes.api import (
+    _handle_missing_data,
+    _repair_fully_missing_loci_nearest_neighbors,
+    _summarize_missing_data,
+)
 from hipps_dimes.cli import main as cli_main
+
+
+def test_plain_library_call_surfaces_cov_nonconvergence_warning():
+    """Importing HIPPS-DIMES must not suppress process-wide warnings."""
+    environment = os.environ.copy()
+    environment.pop("PYTHONWARNINGS", None)
+    code = (
+        "import numpy as np, HippsDimes; "
+        "indices = np.arange(5); "
+        "target = 3.0 * np.abs(indices[:, None] - indices[None, :]); "
+        "HippsDimes.fit_gaussian_noise_covariance_pdhg("
+        "target, 0.1, max_iterations=1, relative_tolerance=1e-14, "
+        "absolute_tolerance=1e-15)"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=True,
+    )
+
+    assert "stopped without satisfying the KKT tolerance" in completed.stderr
 
 
 def test_compute_entropy_from_random_connectivity_matrix():
@@ -68,6 +101,122 @@ def test_run_optimization_smoke_dmap():
     assert np.allclose(np.sum(A_est, axis=1), 0.0, atol=1e-8)
 
 
+@pytest.mark.parametrize(
+    ("method", "method_options", "expected_status", "expected_converged"),
+    [
+        (
+            "IS",
+            {"iteration": 2, "learning_rate": 1.0},
+            "iteration_budget_completed",
+            None,
+        ),
+        (
+            "GD",
+            {"iteration": 2, "learning_rate": 1.0},
+            "iteration_budget_completed",
+            None,
+        ),
+        ("DI", {}, "direct_solution", None),
+        (
+            "COV",
+            {"iteration": 200, "gaussian_noise_variance": 0.1},
+            "optimality_tolerance",
+            True,
+        ),
+    ],
+)
+def test_run_optimization_returns_common_optimization_summary(
+    method,
+    method_options,
+    expected_status,
+    expected_converged,
+):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(connectivity)
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        **method_options,
+    )
+
+    summary = results["optimization"]
+    assert set(summary) == {
+        "method",
+        "status",
+        "converged",
+        "iterations_executed",
+        "returned_iteration",
+        "final_loss",
+        "final_entropy",
+    }
+    assert summary["method"] == method
+    assert summary["status"] == expected_status
+    assert summary["converged"] is expected_converged
+
+    fitted_ddmap = (3.0 * np.pi / 8.0) * np.square(results["dmap_final"])
+    observed = np.isfinite(ddmap_target) & (ddmap_target > 0.0)
+    expected_loss = np.sqrt(
+        np.mean(
+            np.square(
+                (fitted_ddmap[observed] - ddmap_target[observed])
+                / ddmap_target[observed]
+            )
+        )
+    )
+    expected_entropy = HippsDimes.compute_entropy_from_A(
+        results["connectivity_matrix"]
+    )
+    assert summary["final_loss"] == pytest.approx(expected_loss)
+    assert summary["final_entropy"] == pytest.approx(expected_entropy)
+
+    if method == "COV":
+        info = results["covariance_optimization"]
+        assert summary["iterations_executed"] == info["iterations"]
+        assert summary["returned_iteration"] == info["returned_iteration"]
+        assert summary["final_loss"] == pytest.approx(info["loss"])
+        assert summary["final_entropy"] == pytest.approx(info["entropy"])
+    else:
+        assert summary["iterations_executed"] == len(results["iteration_series"])
+        assert summary["returned_iteration"] == len(results["iteration_series"])
+
+
+@pytest.mark.parametrize("method", ["IS", "GD"])
+def test_zero_iteration_summary_describes_initial_model(method):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    target = HippsDimes.a2dmap_theory(connectivity)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        iteration=0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    assert results["iteration_series"].empty
+    assert results["optimization"] == {
+        "method": method,
+        "status": "no_iterations_requested",
+        "converged": None,
+        "iterations_executed": 0,
+        "returned_iteration": 0,
+        "final_loss": pytest.approx(0.0, abs=1e-12),
+        "final_entropy": pytest.approx(
+            HippsDimes.compute_entropy_from_A(results["connectivity_matrix"])
+        ),
+    }
+
+
 def test_run_optimization_smoke_dmap_npy_input(tmp_path):
     """run_optimization should accept dmap input from a .npy file."""
     n = 6
@@ -115,6 +264,65 @@ def test_run_optimization_smoke_cmap_npy_input(tmp_path):
     assert "connectivity_matrix" in results
     assert "cmap_final" in results
     assert "rc_optimal" in results
+
+
+def test_contact_threshold_fit_uses_normalized_observed_pairs_only():
+    """Threshold fitting should ignore zero/NaN pairs and recover known rc."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(8, 1.0)
+    model_dmap = HippsDimes.a2dmap_theory(connectivity)
+    expected_rc = 0.7
+    experimental_cmap = 4.0 * HippsDimes.dmap2cmap(
+        model_dmap, expected_rc
+    )
+    experimental_cmap[1, 5] = experimental_cmap[5, 1] = 0.0
+    experimental_cmap[2, 6] = experimental_cmap[6, 2] = np.nan
+
+    fitted_rc = numerics._optimize_contact_threshold(
+        model_dmap, experimental_cmap
+    )
+
+    assert fitted_rc == pytest.approx(expected_rc, rel=1e-6)
+
+
+@pytest.mark.parametrize("method", ["IS", "GD", "DI", "COV"])
+@pytest.mark.filterwarnings(
+    "ignore:fit_gaussian_noise_covariance.*stopped:RuntimeWarning"
+)
+def test_contact_threshold_postprocessing_reuses_any_solver_dmap(
+    monkeypatch, method
+):
+    """All contact-map solvers should use their returned distance map for rc."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(6, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+    captured = {}
+
+    def capture_threshold_fit(model_dmap, experimental_cmap):
+        captured["model_dmap"] = np.asarray(model_dmap).copy()
+        captured["experimental_cmap"] = np.asarray(experimental_cmap).copy()
+        return 0.8
+
+    monkeypatch.setattr(
+        api, "_optimize_contact_threshold", capture_threshold_fit
+    )
+    results = HippsDimes.run_optimization(
+        input_matrix=cmap_target,
+        input_type="cmap",
+        input_format="text",
+        method=method,
+        gaussian_noise_relative_std=0.1 if method == "COV" else None,
+        iteration=2,
+        learning_rate=1e-4 if method == "GD" else 5.0,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    assert np.allclose(captured["model_dmap"], results["dmap_final"])
+    assert np.allclose(captured["experimental_cmap"], cmap_target)
+    assert np.allclose(
+        results["cmap_final"],
+        HippsDimes.dmap2cmap(results["dmap_final"], 0.8),
+    )
 
 
 @pytest.mark.parametrize(
@@ -348,8 +556,150 @@ def test_run_optimization_progress_callback_receives_structured_updates():
     assert np.isclose(updates[-1]["entropy"], results["iteration_series"]["entropy"].iloc[-1])
 
 
-def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefix():
-    """Noisy optimization should return save-step snapshots even in library mode."""
+@pytest.mark.parametrize("method", ["IS", "GD"])
+def test_iterative_metrics_and_checkpoints_describe_same_post_update_state(method):
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    connectivity[0, 4] = 0.35
+    connectivity[4, 0] = 0.35
+    connectivity = HippsDimes.a2a(connectivity)
+    dmap_target = HippsDimes.a2dmap_theory(connectivity)
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+    observed = np.isfinite(ddmap_target) & (ddmap_target > 0.0)
+    updates = []
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method=method,
+        iteration=3,
+        learning_rate=1.0,
+        save_steps=[1, 2, 3],
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+        progress_callback=updates.append,
+    )
+
+    series = results["iteration_series"]
+    checkpoints = results["connectivity_matrix_at_steps"]
+    assert [update["iteration"] for update in updates] == [1, 2, 3]
+    assert sorted(checkpoints) == [1, 2, 3]
+    assert np.allclose(checkpoints[3], results["connectivity_matrix"])
+
+    for step, checkpoint in checkpoints.items():
+        checkpoint_dmap = HippsDimes.a2dmap_theory(
+            checkpoint, force_positive_definite=True
+        )
+        checkpoint_ddmap = (3.0 * np.pi / 8.0) * np.square(checkpoint_dmap)
+        expected_loss = np.sqrt(
+            np.mean(
+                np.square(
+                    (checkpoint_ddmap[observed] - ddmap_target[observed])
+                    / ddmap_target[observed]
+                )
+            )
+        )
+        expected_entropy = HippsDimes.compute_entropy_from_A(checkpoint)
+        row = series.iloc[step - 1]
+        assert row["loss"] == pytest.approx(expected_loss)
+        assert row["entropy"] == pytest.approx(expected_entropy)
+        assert updates[step - 1]["loss"] == pytest.approx(expected_loss)
+        assert updates[step - 1]["entropy"] == pytest.approx(expected_entropy)
+
+    assert results["optimization"]["final_loss"] == pytest.approx(
+        series.iloc[-1]["loss"]
+    )
+    assert results["optimization"]["final_entropy"] == pytest.approx(
+        series.iloc[-1]["entropy"]
+    )
+
+
+@pytest.mark.parametrize(
+    "optimizer, expected_descriptions, expected_stages",
+    [
+        (
+            "hybrid",
+            [
+                "COV operator norm",
+                "COV PDHG optimization",
+                "COV FISTA optimization",
+            ],
+            {
+                "covariance_operator_norm",
+                "covariance_optimization",
+            },
+        ),
+        (
+            "pdhg",
+            ["COV operator norm", "COV PDHG optimization"],
+            {"covariance_operator_norm", "covariance_optimization"},
+        ),
+    ],
+)
+def test_cov_progress_distinguishes_pdhg_and_fista(
+    monkeypatch,
+    optimizer,
+    expected_descriptions,
+    expected_stages,
+):
+    """COV should render solver-specific stages and preserve callbacks."""
+
+    class FakeProgressBar:
+        instances = []
+
+        def __init__(self, *, total, desc, unit):
+            self.total = total
+            self.desc = desc
+            self.unit = unit
+            self.n = 0
+            self.postfix = {}
+            self.closed = False
+            self.instances.append(self)
+
+        def set_postfix(self, **values):
+            values.pop("refresh", None)
+            self.postfix = values
+
+        def update(self, amount):
+            self.n += amount
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(api, "tqdm", FakeProgressBar)
+
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    updates = []
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        covariance_optimizer=optimizer,
+        gaussian_noise_variance=0.1,
+        iteration=200,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=True,
+        progress_callback=updates.append,
+    )
+
+    bars = FakeProgressBar.instances
+    assert [bar.desc for bar in bars] == expected_descriptions
+    assert all(bar.closed and bar.n > 0 for bar in bars)
+    assert {update["stage"] for update in updates} == expected_stages
+    optimization_bar = bars[-1]
+    assert "cg_iterations" not in optimization_bar.postfix
+    assert "relative_kkt" in optimization_bar.postfix
+    assert results["covariance_optimization"]["converged"]
+
+
+def test_run_optimization_cov_save_steps_return_snapshots_without_output_prefix():
+    """COV should return save-step snapshots and calibrated diagnostics."""
     n = 6
     A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
     dmap_target = HippsDimes.a2dmap_theory(A_true)
@@ -358,9 +708,8 @@ def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefi
         input_matrix=dmap_target,
         input_type="dmap",
         input_format="text",
-        method="IS",
-        iteration=3,
-        learning_rate=5.0,
+        method="COV",
+        iteration=200,
         gaussian_noise_variance=0.1,
         save_steps=[1, 3],
         no_xyzs=True,
@@ -372,6 +721,377 @@ def test_run_optimization_noisy_save_steps_return_snapshots_without_output_prefi
     assert sorted(results["connectivity_matrix_at_steps"]) == [1, 3]
     assert results["connectivity_matrix_at_steps"][1].shape == (n, n)
     assert results["connectivity_matrix_at_steps"][3].shape == (n, n)
+    assert results["covariance_optimization"]["converged"]
+    assert results["covariance_optimization"]["algorithm"] == "hybrid"
+    assert results["covariance_optimization"]["pdhg"]["variance_whitened"]
+    assert results["covariance_optimization"]["pdhg"][
+        "inverse_free_runtime_kkt"
+    ]
+    assert results["covariance_optimization"]["handoff"]["reached"]
+    assert results["covariance_optimization"]["phase_iterations"]["pdhg"] > 0
+    assert results["covariance_optimization"]["phase_iterations"]["fista"] > 0
+    assert (
+        results["covariance_optimization"][
+            "relative_eliminated_kkt_residual"
+        ]
+        <= 1e-5
+    )
+    assert results["covariance_optimization"]["initialization"]["kind"] == "rouse"
+    assert results["gram_matrix"].shape == (n, n)
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    assert parameters["covariance_optimizer_requested"] == "hybrid"
+    assert parameters["covariance_optimizer_resolved"] == "hybrid"
+    assert parameters["covariance_relative_tolerance"] == pytest.approx(1e-5)
+    assert parameters["covariance_absolute_tolerance"] == pytest.approx(1e-10)
+    assert parameters[
+        "covariance_handoff_relative_tolerance"
+    ] == pytest.approx(1e-2)
+    assert json.loads(parameters["covariance_phase_iterations"])["fista"] > 0
+    assert bool(parameters["covariance_independent_kkt_converged"])
+    assert parameters["covariance_fista_initial_step_size"] > 0.0
+    assert parameters["covariance_fista_final_step_size"] > 0.0
+
+
+def test_run_optimization_cov_relative_noise_is_applied_after_dmap_conversion():
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    relative_std = 0.08
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        gaussian_noise_relative_std=relative_std,
+        iteration=200,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    ddmap_target = (3.0 * np.pi / 8.0) * np.square(dmap_target)
+    expected_variance = np.square(
+        relative_std * ddmap_target[np.triu_indices(n, k=1)]
+    )
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    assert info["noise_model"] == "heteroskedastic_relative_std"
+    assert info["noise_variance_minimum"] == pytest.approx(
+        np.min(expected_variance)
+    )
+    assert info["noise_variance_median"] == pytest.approx(
+        np.median(expected_variance)
+    )
+    assert info["noise_variance_maximum"] == pytest.approx(
+        np.max(expected_variance)
+    )
+    assert parameters["gaussian_noise_relative_std"] == relative_std
+    assert parameters["covariance_initialization_resolved"] == "rouse"
+
+
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_run_optimization_cov_cmap_missing_pairs_follow_policy(
+    tmp_path,
+    ignore_missing_data,
+):
+    """Direct contact input should apply the selected pair policy before COV."""
+    n = 6
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    cmap_target = HippsDimes.a2cmap_theory(truth, rc=1.0)
+    missing_pairs = ((0, 4), (1, 5))
+    for i, j in missing_pairs:
+        cmap_target[i, j] = 0.0
+        cmap_target[j, i] = 0.0
+    cmap_path = tmp_path / "cmap_missing.npy"
+    np.save(cmap_path, cmap_target)
+
+    results = HippsDimes.run_optimization(
+        input_path=str(cmap_path),
+        input_type="cmap",
+        input_format="npy",
+        method="COV",
+        gaussian_noise_relative_std=0.1,
+        iteration=300,
+        ignore_missing_data=ignore_missing_data,
+        not_normalize=True,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    expected_missing = len(missing_pairs) if ignore_missing_data else 0
+    assert info["observed_pair_count"] == n * (n - 1) // 2 - expected_missing
+    assert info["initialization"]["kind"] == "rouse"
+    assert parameters["missing_pairs"] == len(missing_pairs)
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else len(missing_pairs)
+    )
+    assert parameters["missing_pairs_after_handling"] == expected_missing
+    assert bool(parameters["ignore_missing_data"]) is ignore_missing_data
+
+
+@pytest.mark.skipif(
+    not numerics.is_gpu_available(),
+    reason="requires CuPy and an accessible CUDA GPU",
+)
+def test_run_optimization_cov_uses_gpu_backend():
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+
+    results = HippsDimes.run_optimization(
+        input_matrix=dmap_target,
+        input_type="dmap",
+        input_format="text",
+        method="COV",
+        covariance_optimizer="hybrid",
+        gaussian_noise_variance=0.05,
+        iteration=500,
+        use_gpu=True,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert results["covariance_optimization"]["converged"]
+    assert results["covariance_optimization"]["backend"] == "gpu"
+    assert parameters["use_gpu_requested"] is True
+    assert parameters["use_gpu_enabled"] is True
+    assert parameters["covariance_initialization_backend"] == "cpu"
+    assert parameters["covariance_initialization_wall_seconds"] >= 0.0
+    assert parameters["covariance_backend"] == "gpu"
+    assert parameters["covariance_dtype"] == "float64"
+    assert parameters["covariance_gpu_device"] == numerics.get_gpu_name()
+    assert parameters["covariance_cupy_version"] == numerics.cp.__version__
+    assert parameters["covariance_optimizer_resolved"] == "hybrid"
+    assert parameters["covariance_fista_initial_step_size"] > 0.0
+    assert parameters["covariance_fista_final_step_size"] > 0.0
+
+
+@pytest.mark.parametrize("method", ["IS", "GD", "DI"])
+def test_run_optimization_rejects_gaussian_noise_outside_cov(method):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="only with method='COV'"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method=method,
+            gaussian_noise_variance=0.1,
+            no_xyzs=True,
+            verbose=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({}, "requires exactly one"),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "gaussian_noise_relative_std": 0.1,
+            },
+            "requires exactly one",
+        ),
+        ({"gaussian_noise_variance": 0.1, "lamd": 0.2}, "lamd"),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "enforce_nonnegative_connectivity_matrix": True,
+            },
+            "nonnegative-connectivity",
+        ),
+        (
+            {"gaussian_noise_variance": 0.1, "gpu_float32": True},
+            "float64 only",
+        ),
+        (
+            {"gaussian_noise_variance": 0.1, "covariance_optimizer": "bad"},
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_optimizer": "newton",
+            },
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_optimizer": "fista",
+            },
+            "covariance_optimizer",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_relative_tolerance": 0.0,
+                "covariance_absolute_tolerance": 0.0,
+            },
+            "at least one covariance convergence tolerance",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_handoff_relative_tolerance": 0.0,
+            },
+            "covariance_handoff_relative_tolerance",
+        ),
+        (
+            {
+                "gaussian_noise_variance": 0.1,
+                "covariance_handoff_relative_tolerance": 1e-6,
+            },
+            "must not be smaller",
+        ),
+    ],
+)
+def test_run_optimization_rejects_invalid_cov_combinations(options, message):
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match=message):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method="COV",
+            no_xyzs=True,
+            verbose=False,
+            **options,
+        )
+
+
+def test_run_optimization_rejects_covariance_solver_options_outside_cov():
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    with pytest.raises(ValueError, match="only with method='COV'"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="ddmap",
+            method="IS",
+            covariance_optimizer="pdhg",
+            no_xyzs=True,
+            verbose=False,
+        )
+
+
+def test_legacy_optimize_no_longer_exposes_noisy_solver():
+    target = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    model = HippsDimes.Optimize(target)
+
+    assert not hasattr(model, "run_noisy")
+
+
+def test_cli_help_exposes_cov_solver_and_noise_contract():
+    result = CliRunner().invoke(cli_main, ["--help"])
+    parameter_names = {parameter.name for parameter in cli_main.params}
+
+    assert result.exit_code == 0
+    assert not hasattr(HippsDimes, "nearest_edm")
+    assert not hasattr(numerics, "nearest_edm")
+    assert "COV" in result.output
+    assert "gaussian_noise_relative_std" in parameter_names
+    assert "covariance_initialization" not in parameter_names
+    assert "covariance_optimizer" in parameter_names
+    assert "covariance_relative_tolerance" in parameter_names
+    assert "covariance_absolute_tolerance" in parameter_names
+    assert "covariance_handoff_relative_tolerance" in parameter_names
+    assert "repair_fully_missing_loci" in parameter_names
+    relative_noise_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "gaussian_noise_relative_std"
+    )
+    assert relative_noise_parameter.type.min_open
+    optimizer_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "covariance_optimizer"
+    )
+    assert optimizer_parameter.default == "hybrid"
+    assert set(optimizer_parameter.type.choices) == {"hybrid", "pdhg"}
+    handoff_parameter = next(
+        parameter
+        for parameter in cli_main.params
+        if parameter.name == "covariance_handoff_relative_tolerance"
+    )
+    assert handoff_parameter.default == pytest.approx(1e-2)
+
+
+def test_cli_routes_cov_to_pdhg_with_configurable_tolerance(tmp_path):
+    n = 5
+    truth = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap_target = HippsDimes.a2dmap_theory(truth)
+    input_path = tmp_path / "target.npy"
+    output_prefix = tmp_path / "cov_pdhg"
+    np.save(input_path, dmap_target)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(input_path),
+            str(output_prefix),
+            "--input-type",
+            "dmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "COV",
+            "--gaussian-noise-variance",
+            "0.1",
+            "--covariance-optimizer",
+            "pdhg",
+            "--covariance-relative-tolerance",
+            "1e-5",
+            "--iteration",
+            "200",
+            "--no-xyzs",
+            "--save-pickle",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    with open(
+        tmp_path / "cov_pdhg_HIPPS_DIMES_results.pkl", "rb"
+    ) as fin:
+        payload = pickle.load(fin)
+    info = payload["covariance_optimization"]
+    assert info["algorithm"] == "pdhg"
+    assert info["pdhg"]["variance_whitened"]
+    assert info["pdhg"]["inverse_free_runtime_kkt"]
+    assert info["converged"]
+    assert info["relative_eliminated_kkt_residual"] <= 1e-5
 
 
 def test_run_optimization_applies_eigh_threads_in_library(monkeypatch):
@@ -442,8 +1162,7 @@ def test_ignore_missing_data_l2_stays_bounded_over_long_iterations():
 
     loss = results["iteration_series"]["loss"].to_numpy()
     assert np.isfinite(loss).all()
-    assert loss[-1] < 0.7
-    assert loss[-1] <= loss[0] * 1.2
+    assert np.max(loss) < 0.7
 
 
 def test_repair_fully_missing_contact_locus_repairs_only_nearest_neighbors():
@@ -474,6 +1193,179 @@ def test_repair_fully_missing_contact_locus_repairs_only_nearest_neighbors():
     assert repaired_summary["fully_missing_loci"] == []
 
 
+@pytest.mark.parametrize("matrix_kind", ["dmap", "ddmap"])
+def test_repair_fully_missing_distance_locus_excludes_diagonal_source(
+    matrix_kind,
+):
+    """Distance repair must not copy the zero diagonal off diagonal."""
+    dmap = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    target = dmap if matrix_kind == "dmap" else np.square(dmap)
+    target[2, :] = np.nan
+    target[:, 2] = np.nan
+    target[2, 2] = 0.0
+    summary = _summarize_missing_data(target, matrix_kind)
+
+    repaired, repair_info = _repair_fully_missing_loci_nearest_neighbors(
+        target,
+        matrix_kind,
+        summary["missing_mask"],
+        summary["fully_missing_loci"],
+    )
+
+    assert repair_info["nearest_neighbor_repaired_pairs"] == [(1, 2), (2, 3)]
+    assert repaired[1, 2] > 0.0
+    assert repaired[2, 3] > 0.0
+    assert np.isnan(repaired[0, 2])
+    assert np.isnan(repaired[2, 4])
+
+
+@pytest.mark.parametrize("matrix_kind", ["cmap", "dmap", "ddmap"])
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_partial_missing_pairs_follow_selected_policy(
+    matrix_kind,
+    ignore_missing_data,
+):
+    """Partial pairs are either interpolated natively or left missing."""
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    dmap = HippsDimes.a2dmap_theory(connectivity)
+    if matrix_kind == "cmap":
+        target = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+        missing_value = 0.0
+    elif matrix_kind == "dmap":
+        target = dmap
+        missing_value = np.nan
+    else:
+        target = (3.0 * np.pi / 8.0) * np.square(dmap)
+        missing_value = np.nan
+
+    expected_nearest_value = target[0, 3]
+    target = target.copy()
+    target[0, 4] = missing_value
+    target[4, 0] = missing_value
+    analysis = _summarize_missing_data(target, matrix_kind)
+
+    handled = _handle_missing_data(
+        target,
+        matrix_kind,
+        analysis,
+        ignore_missing_data=ignore_missing_data,
+        repair_fully_missing_loci=False,
+        remove_fully_missing_loci=False,
+    )
+
+    if ignore_missing_data:
+        assert analysis["interpolated_missing_pair_count"] == 0
+        assert analysis["missing_pairs_after_handling"] == 1
+        assert _summarize_missing_data(handled, matrix_kind)["missing_pairs"] == 1
+    else:
+        assert analysis["interpolated_missing_pair_count"] == 1
+        assert analysis["missing_pairs_after_handling"] == 0
+        assert _summarize_missing_data(handled, matrix_kind)["missing_pairs"] == 0
+        assert handled[0, 4] == pytest.approx(expected_nearest_value)
+        assert handled[4, 0] == pytest.approx(expected_nearest_value)
+
+
+def test_contact_interpolation_excludes_and_preserves_diagonal():
+    """Self-contact values must not seed missing off-diagonal contacts."""
+    n = 6
+    target = np.full((n, n), 0.1)
+    np.fill_diagonal(target, 1.0)
+    separation = np.abs(np.subtract.outer(np.arange(n), np.arange(n)))
+    missing_band = (separation <= 2) & (separation > 0)
+    target[missing_band] = 0.0
+    analysis = _summarize_missing_data(target, "cmap")
+
+    handled = _handle_missing_data(
+        target,
+        "cmap",
+        analysis,
+        ignore_missing_data=False,
+        repair_fully_missing_loci=False,
+        remove_fully_missing_loci=False,
+    )
+
+    assert analysis["interpolated_missing_pair_count"] == 9
+    assert np.allclose(handled[missing_band], 0.1)
+    assert np.allclose(np.diag(handled), 1.0)
+
+
+def test_cov_contact_map_accepts_zero_self_contact_diagonal():
+    """Contact-map diagonals are conventions, not COV observations."""
+    n = 5
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    contact_map = HippsDimes.a2cmap_theory(connectivity, rc=1.0)
+    np.fill_diagonal(contact_map, 0.0)
+
+    with pytest.warns(RuntimeWarning, match="stopped without satisfying"):
+        results = HippsDimes.run_optimization(
+            input_matrix=contact_map,
+            input_type="cmap",
+            input_format="text",
+            method="COV",
+            gaussian_noise_variance=0.1,
+            covariance_optimizer="pdhg",
+            iteration=1,
+            ignore_missing_data=False,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+    assert results["covariance_optimization"]["observed_pair_count"] == (
+        n * (n - 1) // 2
+    )
+
+
+@pytest.mark.parametrize("input_type", ["dmap", "ddmap"])
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_cov_partial_distance_pairs_follow_public_missing_policy(
+    input_type,
+    ignore_missing_data,
+):
+    """COV must receive completed targets unless missing pairs are excluded."""
+    n = 5
+    connectivity = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
+    dmap = HippsDimes.a2dmap_theory(connectivity)
+    target = (
+        dmap.copy()
+        if input_type == "dmap"
+        else (3.0 * np.pi / 8.0) * np.square(dmap)
+    )
+    target[0, 4] = np.nan
+    target[4, 0] = np.nan
+
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type=input_type,
+        input_format="text",
+        method="COV",
+        gaussian_noise_variance=0.1,
+        covariance_optimizer="pdhg",
+        iteration=1,
+        ignore_missing_data=ignore_missing_data,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    expected_missing = 1 if ignore_missing_data else 0
+
+    assert results["covariance_optimization"]["observed_pair_count"] == (
+        n * (n - 1) // 2 - expected_missing
+    )
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else 1
+    )
+    assert parameters["missing_pairs_after_handling"] == expected_missing
+
+
 def test_run_optimization_records_missing_data_analysis_and_repair():
     """run_optimization should record missing-data analysis and nearest-neighbor repairs."""
     A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
@@ -488,6 +1380,7 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
         input_type="cmap",
         input_format="text",
         ignore_missing_data=True,
+        repair_fully_missing_loci=True,
         method="IS",
         iteration=5,
         learning_rate=5.0,
@@ -506,22 +1399,249 @@ def test_run_optimization_records_missing_data_analysis_and_repair():
     assert run_parameters["missing_pairs"] == 4
     assert np.isclose(float(run_parameters["missing_pair_fraction"]), 0.4)
     assert json.loads(run_parameters["fully_missing_loci"]) == [2]
+    assert bool(run_parameters["repair_fully_missing_loci"]) is True
     assert run_parameters["nearest_neighbor_repair_count"] == 2
     assert json.loads(run_parameters["nearest_neighbor_repaired_pairs"]) == [[1, 2], [2, 3]]
     assert json.loads(run_parameters["remaining_fully_missing_loci"]) == []
 
 
-def test_remove_fully_missing_loci_requires_ignore_missing_data():
-    """Removing fully missing loci is only valid when ignore_missing_data is enabled."""
-    n = 5
-    A_true = HippsDimes.construct_connectivity_matrix_rouse(n, 1.0)
-    dmap_target = HippsDimes.a2dmap_theory(A_true)
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_cov_repair_is_explicit_and_enters_final_noise_model(
+    ignore_missing_data,
+):
+    target = HippsDimes.a2cmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0),
+        rc=1.0,
+    )
+    target[2, :] = 0.0
+    target[:, 2] = 0.0
+    target[2, 2] = 1.0
 
-    with pytest.raises(ValueError, match="remove_fully_missing_loci=True requires ignore_missing_data=True"):
-        HippsDimes.run_optimization(
-            input_matrix=dmap_target,
+    results = HippsDimes.run_optimization(
+        input_matrix=target,
+        input_type="cmap",
+        input_format="text",
+        method="COV",
+        gaussian_noise_relative_std=0.1,
+        ignore_missing_data=ignore_missing_data,
+        repair_fully_missing_loci=True,
+        iteration=500,
+        no_xyzs=True,
+        verbose=False,
+        show_progress=False,
+    )
+    info = results["covariance_optimization"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+
+    assert info["converged"]
+    assert info["observed_pair_count"] == (
+        8 if ignore_missing_data else 10
+    )
+    assert parameters["nearest_neighbor_repair_count"] == 2
+    assert parameters["interpolated_missing_pair_count"] == (
+        0 if ignore_missing_data else 2
+    )
+    assert parameters["missing_pairs_after_handling"] == (
+        2 if ignore_missing_data else 0
+    )
+    assert bool(parameters["repair_fully_missing_loci"]) is True
+
+
+def test_cov_returned_iterate_is_consistent_across_reports(
+    monkeypatch,
+    capsys,
+):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(4, 1.0)
+    )
+    original = covariance_pdhg._inverse_free_residuals
+    call_count = 0
+
+    def prefer_first_runtime_iterate(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        residuals = dict(original(*args, **kwargs))
+        residuals["eliminated_relative"] = float(call_count - 1)
+        return residuals
+
+    monkeypatch.setattr(
+        covariance_pdhg,
+        "_inverse_free_residuals",
+        prefer_first_runtime_iterate,
+    )
+    with pytest.warns(RuntimeWarning, match="without satisfying"):
+        results = HippsDimes.run_optimization(
+            input_matrix=target,
             input_type="dmap",
             input_format="text",
+            method="COV",
+            covariance_optimizer="pdhg",
+            gaussian_noise_variance=0.1,
+            covariance_relative_tolerance=0.0,
+            covariance_absolute_tolerance=1e-30,
+            iteration=3,
+            no_xyzs=True,
+            verbose=True,
+            show_progress=False,
+        )
+
+    info = results["covariance_optimization"]
+    series = results["iteration_series"]
+    parameters = dict(
+        zip(
+            results["run_parameters"]["parameter"],
+            results["run_parameters"]["value"],
+        )
+    )
+    output = capsys.readouterr().out
+
+    assert info["iterations"] == 3
+    assert info["returned_iteration"] == 1
+    assert series["is_returned_iterate"].sum() == 1
+    assert bool(series.loc[0, "is_returned_iterate"])
+    assert info["loss"] == pytest.approx(series.loc[0, "loss"])
+    assert info["entropy"] == pytest.approx(series.loc[0, "entropy"])
+    assert info["objective"] == pytest.approx(series.loc[0, "objective"])
+    assert parameters["covariance_iterations_executed"] == 3
+    assert parameters["covariance_returned_iteration"] == 1
+    assert parameters["covariance_returned_loss"] == pytest.approx(info["loss"])
+    assert results["optimization"] == {
+        "method": "COV",
+        "status": info["status"],
+        "converged": False,
+        "iterations_executed": 3,
+        "returned_iteration": 1,
+        "final_loss": pytest.approx(info["loss"]),
+        "final_entropy": pytest.approx(info["entropy"]),
+    }
+    assert "Returned loss at iteration 1" in output
+
+
+def test_cli_cov_nonconvergence_exits_nonzero_after_writing_outputs(tmp_path):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(6, 1.0)
+    )
+    input_path = tmp_path / "target.npy"
+    output_prefix = tmp_path / "nonconverged"
+    np.save(input_path, target)
+
+    result = CliRunner().invoke(
+        cli_main,
+        [
+            str(input_path),
+            str(output_prefix),
+            "--input-type",
+            "dmap",
+            "--input-format",
+            "npy",
+            "--method",
+            "COV",
+            "--gaussian-noise-variance",
+            "0.1",
+            "--iteration",
+            "1",
+            "--no-xyzs",
+            "--quiet",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "COV did not converge" in result.output
+    assert "nonconverged partial results" in result.output
+    assert (tmp_path / "nonconverged_run_parameters.csv").exists()
+    assert (tmp_path / "nonconverged_iteration_series.csv").exists()
+    assert (tmp_path / "nonconverged_dmap_final.txt").exists()
+    assert (tmp_path / "nonconverged_connectivity_matrix.txt").exists()
+    parameters = pd.read_csv(
+        tmp_path / "nonconverged_run_parameters.csv"
+    ).set_index("parameter")["value"]
+    assert parameters["covariance_converged"] == "False"
+
+
+def test_di_rejects_excluded_partial_pairs():
+    """Direct inversion has no sparse-target optimization contract."""
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    target[0, 4] = np.nan
+    target[4, 0] = np.nan
+
+    with pytest.raises(
+        ValueError,
+        match="DI.*requires a complete target",
+    ):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            method="DI",
+            ignore_missing_data=True,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("matrix_kind", ["dmap", "ddmap"])
+def test_distance_inputs_reject_nonpositive_finite_pairs(matrix_kind):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    if matrix_kind == "ddmap":
+        target = (3.0 * np.pi / 8.0) * np.square(target)
+    target[0, 4] = 0.0
+    target[4, 0] = 0.0
+
+    with pytest.raises(ValueError, match="must be positive"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type=matrix_kind,
+            input_format="text",
+            iteration=1,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_fully_missing_locus_policy_must_be_explicit(ignore_missing_data):
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+    target[2, :] = np.nan
+    target[:, 2] = np.nan
+    target[2, 2] = 0.0
+
+    with pytest.raises(ValueError, match="explicitly set"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            ignore_missing_data=ignore_missing_data,
+            no_xyzs=True,
+            verbose=False,
+            show_progress=False,
+        )
+
+
+def test_fully_missing_locus_repair_and_removal_are_mutually_exclusive():
+    target = HippsDimes.a2dmap_theory(
+        HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        HippsDimes.run_optimization(
+            input_matrix=target,
+            input_type="dmap",
+            input_format="text",
+            ignore_missing_data=True,
+            repair_fully_missing_loci=True,
             remove_fully_missing_loci=True,
             no_xyzs=True,
             verbose=False,
@@ -529,7 +1649,10 @@ def test_remove_fully_missing_loci_requires_ignore_missing_data():
         )
 
 
-def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_mapping():
+@pytest.mark.parametrize("ignore_missing_data", [False, True])
+def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_mapping(
+    ignore_missing_data,
+):
     """Removing fully missing loci should reduce the optimization problem and keep index mapping."""
     A_true = HippsDimes.construct_connectivity_matrix_rouse(5, 1.0)
     cmap = HippsDimes.a2cmap_theory(A_true, rc=1.0)
@@ -543,7 +1666,7 @@ def test_run_optimization_remove_fully_missing_loci_reduces_problem_and_records_
         connectivity_matrix=A_true,
         input_type="cmap",
         input_format="text",
-        ignore_missing_data=True,
+        ignore_missing_data=ignore_missing_data,
         remove_fully_missing_loci=True,
         method="IS",
         iteration=5,

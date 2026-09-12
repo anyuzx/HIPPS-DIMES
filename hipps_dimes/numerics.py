@@ -1672,6 +1672,75 @@ def optimal_rotate(P, Q, return_rotation=False, allow_reflection=False):
         return np.array(P * U + Qc), U
 
 
+def iterative_generalized_procrustes_alignment(
+    P, tolerance=1.0e-8, max_iterations=100, allow_reflection=True
+):
+    """Compute a centered mean structure by iterative orthogonal alignment.
+
+    Parameters
+    ----------
+    P : array_like, shape (n_structures, n_points, n_dimensions)
+        Finite real coordinates with corresponding points in the same order.
+        Every axis must be nonempty. The input is not modified.
+    tolerance : float, optional
+        Positive absolute tolerance for the RMS change of the mean, averaged
+        over all point coordinates, in the same units as P. Default is 1e-8.
+    max_iterations : int, optional
+        Positive maximum number of alignment/averaging steps. Default is 100.
+    allow_reflection : bool, optional
+        Allow rotations and reflections if True (default); restrict alignment
+        to proper rotations if False. No scaling is performed in either case.
+
+    Returns
+    -------
+    Q : ndarray, shape (n_points, n_dimensions)
+        Final centered mean structure.
+    iteration : int
+        Number of alignment/averaging steps performed.
+    difference : float
+        RMS change in the last step. Convergence is reached only when this is
+        less than tolerance; otherwise the iteration limit was reached.
+
+    Notes
+    -----
+    The first centered structure initializes Q. Each iteration aligns the
+    original centered structures to Q using optimal_rotate, then replaces Q
+    with their centered mean. The result depends on this initialization.
+    """
+    P = np.asarray(P)
+    if P.ndim != 3 or 0 in P.shape:
+        raise ValueError(
+            "P must have nonempty shape (n_structures, n_points, n_dimensions)"
+        )
+    if np.iscomplexobj(P):
+        raise ValueError("P must contain finite real coordinates")
+    P = np.asarray(P, dtype=float)
+    if not np.all(np.isfinite(P)):
+        raise ValueError("P must contain finite real coordinates")
+    tolerance = _positive_finite_scalar(tolerance, "tolerance")
+    if (
+        isinstance(max_iterations, (bool, np.bool_))
+        or not isinstance(max_iterations, (int, np.integer))
+        or max_iterations < 1
+    ):
+        raise ValueError("max_iterations must be a positive integer")
+
+    P = P - np.mean(P, axis=1, keepdims=True)
+    Q = P[0].copy()
+    for iteration in range(1, max_iterations + 1):
+        P_aligned = [
+            optimal_rotate(snapshot, Q, allow_reflection=allow_reflection)
+            for snapshot in P
+        ]
+        Q_new = np.mean(P_aligned, axis=0)
+        Q_new -= np.mean(Q_new, axis=0, keepdims=True)
+        difference = float(np.sqrt(np.mean(np.square(Q_new - Q))))
+        Q = Q_new
+        if difference < tolerance:
+            break
+    return Q, iteration, difference
+
+
 def write2xyz(fout, xyzs, alignment=True, allow_reflection=True):
     natoms = xyzs.shape[1]  # number of atoms
     xyz0 = xyzs[0]

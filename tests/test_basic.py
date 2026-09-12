@@ -29,6 +29,163 @@ def working_cupy():
 def test_import():
     """Test that the package can be imported."""
     assert HippsDimes is not None
+    assert (
+        hipps_dimes.iterative_generalized_procrustes_alignment
+        is numerics.iterative_generalized_procrustes_alignment
+    )
+    assert (
+        HippsDimes.iterative_generalized_procrustes_alignment
+        is numerics.iterative_generalized_procrustes_alignment
+    )
+
+
+@pytest.mark.parametrize("allow_reflection", [False, True])
+def test_optimal_rotate_reflection_control(allow_reflection):
+    """Mirrored full-rank structures require reflection for an exact fit."""
+    Q = np.array([[3, 2, 1], [3, -2, -1], [-3, 2, -1], [-3, -2, 1]])
+    P = Q * [-1, 1, 1] + [10, -4, 7]
+    aligned, U = numerics.optimal_rotate(
+        P, Q + [2, 3, 4], return_rotation=True, allow_reflection=allow_reflection
+    )
+    expected = Q if allow_reflection else Q * [1, 1, -1]
+    np.testing.assert_allclose(aligned, expected + [2, 3, 4], atol=1e-12)
+    assert np.linalg.det(U) == pytest.approx(-1.0 if allow_reflection else 1.0)
+
+
+@pytest.mark.parametrize(
+    "options", [{}, {"allow_reflection": True}, {"allow_reflection": False}]
+)
+def test_iterative_generalized_procrustes_alignment_reflection_control(options):
+    """Reflection recovers a chiral shape; rotations alone give a planar mean."""
+    Q = np.array([[3, 2, 1], [3, -2, -1], [-3, 2, -1], [-3, -2, 1]])
+    P = np.stack([Q + [3, 5, 7], Q * [-1, 1, 1] + [-2, 4, 9]])
+    P_before = P.copy()
+
+    mean, iterations, difference = numerics.iterative_generalized_procrustes_alignment(
+        P, **options
+    )
+
+    allow_reflection = options.get("allow_reflection", True)
+    expected = Q if allow_reflection else Q * [1, 1, 0]
+    np.testing.assert_allclose(mean, expected, atol=1e-12)
+    assert iterations == (1 if allow_reflection else 2)
+    assert difference < 1e-8
+    np.testing.assert_array_equal(P, P_before)
+
+
+@pytest.mark.parametrize("allow_reflection", [False, True])
+def test_iterative_generalized_procrustes_alignment_preserves_scale_and_reports_iteration_limit(
+    allow_reflection,
+):
+    """Unequal sizes are averaged without rescaling; RMS uses all coordinates."""
+    Q = np.array([[3, 2, 1], [3, -2, -1], [-3, 2, -1], [-3, -2, 1]])
+    U = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    P = np.stack([Q, 3 * Q @ U + [5, -3, 2]])
+
+    mean, iterations, difference = numerics.iterative_generalized_procrustes_alignment(
+        P, max_iterations=1, allow_reflection=allow_reflection
+    )
+    np.testing.assert_allclose(mean, 2 * Q, atol=1e-12)
+    assert iterations == 1
+    assert difference == pytest.approx(np.sqrt(np.mean(Q**2)))
+
+    mean, iterations, difference = numerics.iterative_generalized_procrustes_alignment(
+        P, allow_reflection=allow_reflection
+    )
+    np.testing.assert_allclose(mean, 2 * Q, atol=1e-12)
+    assert iterations == 2
+    assert difference < 1e-8
+
+
+@pytest.mark.parametrize("allow_reflection", [False, True])
+def test_iterative_generalized_procrustes_alignment_updates_reference_until_stationary(
+    allow_reflection,
+):
+    """Updating the mean improves a noncongruent ensemble beyond a single pass."""
+    rng = np.random.default_rng(123)
+    P = rng.normal(size=(5, 8, 3))
+    first, _, _ = numerics.iterative_generalized_procrustes_alignment(
+        P, max_iterations=1, allow_reflection=allow_reflection
+    )
+    mean, iterations, difference = numerics.iterative_generalized_procrustes_alignment(
+        P, tolerance=1e-10, max_iterations=1000, allow_reflection=allow_reflection
+    )
+    aligned_first = np.array(
+        [
+            numerics.optimal_rotate(snapshot, first, allow_reflection=allow_reflection)
+            for snapshot in P
+        ]
+    )
+    aligned_final = np.array(
+        [
+            numerics.optimal_rotate(snapshot, mean, allow_reflection=allow_reflection)
+            for snapshot in P
+        ]
+    )
+
+    assert 1 < iterations < 1000
+    assert difference < 1e-10
+    assert np.mean((aligned_final - mean) ** 2) < np.mean((aligned_first - first) ** 2)
+    np.testing.assert_allclose(np.mean(aligned_final, axis=0), mean, atol=1e-9)
+    np.testing.assert_allclose(np.mean(mean, axis=0), 0.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("allow_reflection", [False, True])
+@pytest.mark.parametrize(
+    "P",
+    [
+        np.array([[[1, 2, 3], [3, 1, 4], [2, 5, 6]]]),
+        np.ones((2, 1, 3)),
+        np.array([[[0, 0], [1, 0], [2, 0]], [[0, 0], [0, 1], [0, 2]]]),
+    ],
+)
+def test_iterative_generalized_procrustes_alignment_single_and_degenerate_structures(
+    P, allow_reflection
+):
+    """Single structures, coincident points, and collinear 2D inputs are valid."""
+    mean, iterations, difference = numerics.iterative_generalized_procrustes_alignment(
+        P, allow_reflection=allow_reflection
+    )
+    np.testing.assert_allclose(mean, P[0] - np.mean(P[0], axis=0), atol=1e-12)
+    assert iterations == 1
+    assert difference < 1e-8
+
+
+@pytest.mark.parametrize(
+    "P",
+    [
+        np.zeros((3, 3)),
+        np.empty((0, 3, 3)),
+        np.empty((2, 0, 3)),
+        np.empty((2, 3, 0)),
+        np.full((2, 3, 3), np.nan),
+        np.full((2, 3, 3), np.inf),
+        np.ones((2, 3, 3), dtype=complex),
+    ],
+)
+def test_iterative_generalized_procrustes_alignment_rejects_invalid_coordinates(P):
+    with pytest.raises(ValueError, match="P must"):
+        numerics.iterative_generalized_procrustes_alignment(P)
+
+
+@pytest.mark.parametrize("tolerance", [0, -1, np.nan, np.inf, True, [1e-8]])
+def test_iterative_generalized_procrustes_alignment_rejects_invalid_tolerance(
+    tolerance,
+):
+    with pytest.raises(ValueError, match="tolerance"):
+        numerics.iterative_generalized_procrustes_alignment(
+            np.ones((2, 3, 3)), tolerance=tolerance
+        )
+
+
+@pytest.mark.parametrize("max_iterations", [0, -1, 1.5, np.nan, True])
+def test_iterative_generalized_procrustes_alignment_rejects_invalid_iteration_limit(
+    max_iterations,
+):
+    with pytest.raises(ValueError, match="max_iterations"):
+        numerics.iterative_generalized_procrustes_alignment(
+            np.ones((2, 3, 3)), max_iterations=max_iterations
+        )
 
 
 def test_construct_connectivity_matrix_rouse():

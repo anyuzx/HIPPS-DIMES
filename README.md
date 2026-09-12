@@ -554,6 +554,11 @@ import hipps_dimes as HD
 # Generate structures from connectivity matrix
 structures = HD.a2xyz_sample(connectivity_matrix, ensemble=1000)
 
+# Compute an iteratively aligned mean structure
+mean_structure, iterations, difference = HD.iterative_generalized_procrustes_alignment(
+    structures, tolerance=1e-8, max_iterations=100, allow_reflection=True
+)
+
 # Convert connectivity matrix to distance map
 dmap = HD.a2dmap_theory(connectivity_matrix)
 
@@ -563,6 +568,16 @@ cmap = HD.a2cmap_theory(connectivity_matrix, rc=5.0)
 # Create a Rouse chain connectivity matrix
 A = HD.construct_connectivity_matrix_rouse(n=100, k=1.0)
 ```
+
+`iterative_generalized_procrustes_alignment` accepts coordinates shaped
+`(n_structures, n_points, n_dimensions)` with corresponding points in the same order. It centers each
+structure, initializes the reference with the first structure, and repeatedly
+uses `optimal_rotate` to align the original centered structures to the current
+mean. Reflections are allowed by default; set `allow_reflection=False` for proper
+rotations only. No scaling is applied, and the input is not modified. It returns
+the centered mean, iteration count, and final RMS change over all point
+coordinates. Convergence means `difference < tolerance`; if the iteration limit
+is reached first, the latest mean and change are returned.
 
 ---
 
